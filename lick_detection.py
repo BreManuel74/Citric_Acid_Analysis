@@ -153,6 +153,70 @@ def plot_single_sensor_over_time(
 
 	return save_path
 
+def plot_selected_sensors_grid(
+	df: pd.DataFrame,
+	sensor_cols: List[str],
+	*,
+	nrows: int = 2,
+	ncols: int = 6,
+	title: str | None = None,
+	save_path: Path | None = None,
+	show: bool = True,
+) -> Path:
+	"""Plot selected sensors in a grid of subplots (default 2x6 for 12 sensors).
+
+	Each subplot shows one sensor vs Time_sec (s), styled similarly to the single-sensor plot.
+	"""
+	if "Time_sec" not in df.columns:
+		raise ValueError("'Time_sec' column not found. Did you run load_capacitive_csv()?")
+	needed = nrows * ncols
+	if len(sensor_cols) != needed:
+		raise ValueError(f"Expected exactly {needed} sensors, got {len(sensor_cols)}")
+	for col in sensor_cols:
+		if col not in df.columns:
+			raise ValueError(f"Sensor column '{col}' not found in DataFrame.")
+
+	# Reasonable figure size for a 2x6 grid
+	fig_w = max(12, ncols * 3)
+	fig_h = max(6, nrows * 3)
+	fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), sharex=False, sharey=False)
+	axes = axes.reshape(nrows, ncols)
+
+	# Plot each sensor in its subplot
+	for i, col in enumerate(sensor_cols):
+		r = i // ncols
+		c = i % ncols
+		ax = axes[r][c]
+		ax.plot(df["Time_sec"], df[col], color="#1f77b4", linewidth=1.2)
+		ax.set_title(col, fontsize=10)
+		ax.grid(True, alpha=0.3)
+		# Only label leftmost y-axes and bottom x-axes to reduce clutter
+		if c == 0:
+			ax.set_ylabel("Capacitive (a.u.)")
+		else:
+			ax.set_ylabel("")
+		if r == nrows - 1:
+			ax.set_xlabel("Time (s)")
+		else:
+			ax.set_xlabel("")
+
+	if title:
+		fig.suptitle(title)
+	fig.tight_layout(rect=[0, 0, 1, 0.97] if title else None)
+
+	if save_path is None:
+		save_path = Path("selected_12_sensors_grid.png")
+    
+	save_path.parent.mkdir(parents=True, exist_ok=True)
+	fig.savefig(save_path, dpi=150)
+
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+
+	return save_path
+
 
 def plot_timestamps_series(
 	df: pd.DataFrame,
@@ -284,24 +348,38 @@ def main() -> None:
 	except ValueError as e:
 		print(str(e))
 
-	# Ask user which single sensor to plot (accepts number like 19 or name like Sensor_19)
-	user_input = input("Enter which sensor to plot alone (e.g., 19 or Sensor_19) [default: 19]: ").strip()
-	if not user_input:
-		user_input = "19"
+	# Removed single-sensor interactive prompt and plot per user request
+
+	# Prompt for 12 sensors to plot in a 2x6 grid
+	def _prompt_for_sensor_list(df: pd.DataFrame, count: int = 12) -> List[str]:
+		while True:
+			entry = input(
+				f"Enter {count} sensors as a comma-separated list (e.g., 1, 3, 7, Sensor_10, ...): "
+			).strip()
+			# Split on commas and strip whitespace; ignore empty tokens
+			raw_items = [tok.strip() for tok in entry.split(",") if tok.strip()]
+			if len(raw_items) != count:
+				print(f"Please enter exactly {count} items. You provided {len(raw_items)}. Try again.\n")
+				continue
+			try:
+				names = [normalize_sensor_name(tok, df) for tok in raw_items]
+				return names
+			except ValueError as ve:
+				print(f"{ve}\nPlease correct the list and try again.\n")
 
 	try:
-		sensor_name = normalize_sensor_name(user_input, df)
-		save_path_single = csv_path.with_name(csv_path.stem + f"_{sensor_name}_plot.png")
-		title_single = f"{sensor_name} over Time — {csv_path.name}"
-		out_single = plot_single_sensor_over_time(
+		selected = _prompt_for_sensor_list(df, count=12)
+		grid_title = f"Selected Sensors (12) — {csv_path.name}"
+		grid_path = csv_path.with_name(csv_path.stem + "_selected12_grid.png")
+		out_grid = plot_selected_sensors_grid(
 			df=df,
-			sensor_col=sensor_name,
-			title=title_single,
-			save_path=save_path_single,
+			sensor_cols=selected,
+			title=grid_title,
+			save_path=grid_path,
 			show=True,
 		)
-		print(f"Saved plot to: {out_single}")
-	except ValueError as e:
+		print(f"Saved plot to: {out_grid}")
+	except Exception as e:
 		print(str(e))
 
 
