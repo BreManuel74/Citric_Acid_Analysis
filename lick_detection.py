@@ -363,6 +363,10 @@ def main() -> None:
 				continue
 			try:
 				names = [normalize_sensor_name(tok, df) for tok in raw_items]
+				# Enforce uniqueness
+				if len(set(names)) != count:
+					print("Each sensor must be unique. Duplicates detected. Please try again.\n")
+					continue
 				return names
 			except ValueError as ve:
 				print(f"{ve}\nPlease correct the list and try again.\n")
@@ -379,6 +383,23 @@ def main() -> None:
 			show=True,
 		)
 		print(f"Saved plot to: {out_grid}")
+
+		# Compute and plot the remaining sensors (all sensors minus selected)
+		all_sensors = [c for c in df.columns if c.startswith("Sensor_")]
+		remaining = [c for c in all_sensors if c not in set(selected)]
+		if len(remaining) == 12:
+			rem_title = f"Remaining Sensors (12) — {csv_path.name}"
+			rem_path = csv_path.with_name(csv_path.stem + "_remaining12_grid.png")
+			out_grid_rem = plot_selected_sensors_grid(
+				df=df,
+				sensor_cols=remaining,
+				title=rem_title,
+				save_path=rem_path,
+				show=True,
+			)
+			print(f"Saved plot to: {out_grid_rem}")
+		else:
+			print(f"Skipping remaining-sensors grid: expected 12 remaining, found {len(remaining)}.")
 	except Exception as e:
 		print(str(e))
 
