@@ -162,10 +162,12 @@ def plot_selected_sensors_grid(
 	title: str | None = None,
 	save_path: Path | None = None,
 	show: bool = True,
+	y_limits: tuple[float, float] | None = None,
 ) -> Path:
 	"""Plot selected sensors in a grid of subplots (default 2x6 for 12 sensors).
 
 	Each subplot shows one sensor vs Time_sec (s), styled similarly to the single-sensor plot.
+	If y_limits is provided, all subplots use the same y-axis range.
 	"""
 	if "Time_sec" not in df.columns:
 		raise ValueError("'Time_sec' column not found. Did you run load_capacitive_csv()?")
@@ -181,6 +183,10 @@ def plot_selected_sensors_grid(
 	fig_h = max(6, nrows * 3)
 	fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), sharex=False, sharey=False)
 	axes = axes.reshape(nrows, ncols)
+
+	# Determine common y-limits (either provided or computed from the selected sensors)
+	if y_limits is None:
+		y_limits = compute_y_limits(df, sensor_cols)
 
 	# Plot each sensor in its subplot
 	for i, col in enumerate(sensor_cols):
@@ -200,6 +206,10 @@ def plot_selected_sensors_grid(
 		else:
 			ax.set_xlabel("")
 
+		# Apply common y-limits
+		if y_limits is not None:
+			ax.set_ylim(*y_limits)
+
 	if title:
 		fig.suptitle(title)
 	fig.tight_layout(rect=[0, 0, 1, 0.97] if title else None)
@@ -216,6 +226,32 @@ def plot_selected_sensors_grid(
 		plt.close(fig)
 
 	return save_path
+
+
+def compute_y_limits(df: pd.DataFrame, sensor_cols: List[str], pad_ratio: float = 0.05) -> tuple[float, float]:
+	"""Compute common y-axis limits across given sensors with optional padding.
+
+	Ignores NaNs. If min==max, expands symmetrically by 1.0.
+	"""
+	vals = []
+	for col in sensor_cols:
+		if col in df.columns:
+			s = pd.to_numeric(df[col], errors="coerce")
+			vals.append(s.values)
+	if not vals:
+		return (0.0, 1.0)
+	import numpy as _np
+	arr = _np.concatenate(vals)
+	arr = arr[_np.isfinite(arr)]
+	if arr.size == 0:
+		return (0.0, 1.0)
+	vmin = float(arr.min())
+	vmax = float(arr.max())
+	if vmin == vmax:
+		return (vmin - 1.0, vmax + 1.0)
+	span = vmax - vmin
+	pad = span * max(0.0, pad_ratio)
+	return (vmin - pad, vmax + pad)
 
 
 def plot_timestamps_series(
@@ -375,12 +411,16 @@ def main() -> None:
 		selected = _prompt_for_sensor_list(df, count=12)
 		grid_title = f"Selected Sensors (12) — {csv_path.name}"
 		grid_path = csv_path.with_name(csv_path.stem + "_selected12_grid.png")
+		# Compute common y-limits across all 24 sensors so both grids share the same scale
+		all_sensor_cols = [c for c in df.columns if c.startswith("Sensor_")]
+		common_y_limits = compute_y_limits(df, all_sensor_cols)
 		out_grid = plot_selected_sensors_grid(
 			df=df,
 			sensor_cols=selected,
 			title=grid_title,
 			save_path=grid_path,
 			show=True,
+			y_limits=common_y_limits,
 		)
 		print(f"Saved plot to: {out_grid}")
 
@@ -396,6 +436,7 @@ def main() -> None:
 				title=rem_title,
 				save_path=rem_path,
 				show=True,
+				y_limits=common_y_limits,
 			)
 			print(f"Saved plot to: {out_grid_rem}")
 		else:
