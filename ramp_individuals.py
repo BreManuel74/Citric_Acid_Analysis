@@ -446,6 +446,47 @@ def build_daily_change_series_by_id(df: pd.DataFrame, *, index: str = "date") ->
 	return series_by_id
 
 
+def build_total_change_series_by_id(df: pd.DataFrame, *, index: str = "date") -> dict:
+	"""
+	For each ID, return a pandas Series of 'Total Change' indexed by either Date or Day.
+
+	Assumptions and behavior mirror build_daily_change_series_by_id.
+	"""
+	required = {"ID", "Date", "Total Change"}
+	missing = required - set(df.columns)
+	if missing:
+		raise ValueError(f"DataFrame missing required columns: {sorted(missing)}")
+
+	# Clean first to ensure types/indexing are reliable
+	cdf = clean_master_dataframe(df)
+	if index == "day":
+		cdf = _add_day_number_column(cdf)
+		if "Day" not in cdf.columns:
+			raise ValueError("Failed to compute 'Day' column. Ensure 'Date' parsing succeeded.")
+
+	series_by_id: dict[str, pd.Series] = {}
+	for gid, g in cdf.groupby("ID", dropna=True):
+		# Drop NaN total change rows
+		g = g.dropna(subset=["Total Change"])  # type: ignore[assignment]
+
+		# Set index based on requested mode and ensure uniqueness by keeping last
+		if index == "day":
+			idx_col = "Day"
+			# Make sure day is integer
+			g[idx_col] = g[idx_col].astype("Int64")
+			ser = g.set_index(idx_col)["Total Change"].sort_index()
+			# Aggregate duplicates by index
+			s = ser.groupby(level=0).last()
+		else:
+			ser = g.set_index("Date")["Total Change"].sort_index()
+			s = ser.groupby(level=0).last()
+		# Name the series for clarity
+		s.name = str(gid)
+		series_by_id[str(gid)] = s
+
+	return series_by_id
+
+
 def main() -> None:
 	"""Interactive entrypoint: select and load the master CSV, then preview it."""
 	try:
@@ -469,11 +510,210 @@ def main() -> None:
 	except Exception as e:
 		print(f"\nWarning: failed to build per-ID series: {e}")
 
-	# Plot daily changes over time for each mouse in one figure
+	# Plot total change and daily change, show both, then ask for filenames to save
 	try:
-		plot_daily_change_by_id(df, use_day_number=True, save_svg=True)
+		# Create figures without saving and without immediately blocking
+		fig_total = plot_total_change_by_id(
+			df,
+			use_day_number=True,
+			save_svg=False,
+			show=False,
+		)
+		fig_daily = plot_daily_change_by_id(
+			df,
+			use_day_number=True,
+			save_svg=False,
+			show=False,
+		)
+		# Show both figures together, then continue after windows are closed
+		plt.show()
+
+		# After viewing, ask for custom SVG filenames (optional)
+		try:
+			print("\n(Optional) Enter custom SVG filenames (without extension). Leave blank for defaults.")
+			custom_total_svg = input("Filename for Total Change plot: ").strip()
+			custom_daily_svg = input("Filename for Daily Change plot: ").strip()
+		except Exception:
+			custom_total_svg = ""
+			custom_daily_svg = ""
+
+		def _safe_svg_name(base: str) -> str:
+			name = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("-_.") or "plot"
+			return name if name.lower().endswith(".svg") else f"{name}.svg"
+
+		# Determine output paths in current working directory
+		out_total = Path.cwd() / _safe_svg_name(custom_total_svg or "total_change_by_id")
+		out_daily = Path.cwd() / _safe_svg_name(custom_daily_svg or "daily_change_by_id")
+
+		# Save both figures
+		try:
+			fig_total.savefig(str(out_total), format="svg", bbox_inches="tight")
+			print(f"Saved SVG to: {out_total}")
+		except Exception as e:
+			print(f"Warning: failed to save Total Change SVG: {e}")
+		try:
+			fig_daily.savefig(str(out_daily), format="svg", bbox_inches="tight")
+			print(f"Saved SVG to: {out_daily}")
+		except Exception as e:
+			print(f"Warning: failed to save Daily Change SVG: {e}")
 	except Exception as e:
-		print(f"\nWarning: failed to plot daily changes: {e}")
+		print(f"\nWarning: failed to plot changes: {e}")
+
+
+def plot_total_change_by_id(
+	df: pd.DataFrame,
+	*,
+	ids: Optional[list[str]] = None,
+	title: Optional[str] = None,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	use_day_number: bool = True,
+	# Quick-save to SVG in current working directory
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+	# Tick interval controls (applies when using day numbers)
+	x_tick_interval: Optional[int] = None,
+	y_tick_interval: Optional[int] = None,
+	# Target number of ticks for auto step sizing (higher -> smaller steps)
+	x_target_ticks: int = 10,
+	y_target_ticks: int = 7,
+) -> plt.Figure:
+	"""
+	Create a single plot showing Total Change over Date (or Day) for each mouse (ID),
+	with the same style and CA% annotations as the daily-change plot.
+	"""
+	series_by_id = build_total_change_series_by_id(df, index=("day" if use_day_number else "date"))
+	sex_map = _get_id_sex_map(df)
+
+	# If using day numbers, compute CA% per day (draw boundaries/labels later after axis is set)
+	if use_day_number:
+		try:
+			ca_by_day = build_ca_percent_series_by_day(df)
+		except Exception:
+			ca_by_day = pd.Series(dtype=float)
+
+	# Filter to requested IDs if provided
+	if ids is not None:
+		series_by_id = {k: v for k, v in series_by_id.items() if k in set(ids)}
+
+	if not series_by_id:
+		raise ValueError("No series available to plot. Check input DataFrame and 'ids' filter.")
+
+	fig, ax = plt.subplots(figsize=(11, 6))
+
+	# Plot each ID as a separate line
+	for mid, s in series_by_id.items():
+		if s.empty:
+			continue
+		color, marker = _sex_to_style(sex_map.get(mid))
+		ax.plot(
+			s.index,
+			s.values,
+			label=str(mid),
+			marker=marker,
+			markersize=3,
+			linewidth=1.5,
+			alpha=0.9,
+			color=color,
+		)
+
+	ax.set_xlabel("Day" if use_day_number else "Date")
+	ax.set_ylabel("Total Change")
+	ax.grid(False)
+
+	# Axis formatting: integers for day numbers, concise dates for datetimes
+	if use_day_number:
+		ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+	else:
+		locator = mdates.AutoDateLocator()
+		formatter = mdates.ConciseDateFormatter(locator)
+		ax.xaxis.set_major_locator(locator)
+		ax.xaxis.set_major_formatter(formatter)
+		for label in ax.get_xticklabels():
+			label.set_rotation(0)
+
+	if title is None:
+		title = "Total Change by Day Number per Mouse" if use_day_number else "Total Change over Time by Mouse"
+	ax.set_title(title)
+
+	# Apply common styling
+	apply_common_plot_style(
+		ax,
+		start_x_at_zero=False,
+		remove_top_right=True,
+		remove_x_margins=True,
+		remove_y_margins=True,
+		ticks_in=True,
+	)
+
+	# Fixed-interval ticks
+	all_y = np.concatenate([s.values for s in series_by_id.values() if len(s) > 0])
+	y_data_min = float(np.nanmin(all_y)) if all_y.size else 0.0
+	y_data_max = float(np.nanmax(all_y)) if all_y.size else 1.0
+
+	if use_day_number:
+		all_x = np.concatenate([np.asarray(s.index, dtype=float) for s in series_by_id.values() if len(s) > 0])
+		x_data_min = int(np.nanmin(all_x)) if all_x.size else 0
+		x_data_max = int(np.nanmax(all_x)) if all_x.size else 1
+		# Choose or compute x step and apply with clamp at zero
+		x_step = x_tick_interval or _auto_integer_step(
+			x_data_min, x_data_max, target_ticks=x_target_ticks, allow_sub5=True
+		)
+		_apply_integer_axis(
+			ax,
+			axis='x',
+			data_min=x_data_min,
+			data_max=x_data_max,
+			step=x_step,
+			clamp_min=0,
+			left_pad_steps=1,
+			right_pad_steps=1,
+		)
+	else:
+		# Leave date axis as previously configured
+		pass
+
+	# Y axis: integer ticks without decimals
+	y_step = y_tick_interval or _auto_integer_step(y_data_min, y_data_max, target_ticks=y_target_ticks)
+	_apply_integer_axis(
+		ax,
+		axis='y',
+		data_min=y_data_min,
+		data_max=y_data_max,
+		step=y_step,
+		left_pad_steps=0,
+		right_pad_steps=1,
+	)
+
+	# CA% dashed boundaries and labels
+	if use_day_number:
+		_add_ca_block_boundaries(ax, ca_by_day)
+		_add_ca_block_labels(ax, ca_by_day)
+
+	# Legend placement
+	if len(series_by_id) > 6:
+		ax.legend(title="ID", bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0.)
+		fig.tight_layout(rect=[0, 0, 0.85, 1])
+	else:
+		ax.legend(title="ID", loc="best")
+		fig.tight_layout()
+
+	if save_path is not None:
+		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+
+	if save_svg:
+		base = svg_filename or (title or "total_change_by_id")
+		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+		if not safe.lower().endswith(".svg"):
+			safe += ".svg"
+		out_path = Path.cwd() / safe
+		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		print(f"Saved SVG to: {out_path}")
+
+	if show:
+		plt.show()
+
+	return fig
 
 
 def plot_daily_change_by_id(
