@@ -109,11 +109,18 @@ def plot_sensors_over_time(
 	ax.set_ylabel("Capacitive reading (a.u.)")
 	if title:
 		ax.set_title(title)
-	ax.grid(True, alpha=0.3)
 
 	# Put legend outside to the right
 	ax.legend(ncol=2, bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0.)
 	fig.tight_layout()
+
+	# Global style tweaks per request: start x at 0, remove top/right spines, inward ticks
+	left, right = ax.get_xlim()
+	ax.set_xlim(left=0, right=right)
+	ax.margins(x=0)
+	for side in ("top", "right"):
+		ax.spines[side].set_visible(False)
+	ax.tick_params(direction="in", which="both", length=5)
 
 	# Save only if a save_path is provided
 	if save_path is not None:
@@ -152,9 +159,16 @@ def plot_single_sensor_over_time(
 	ax.set_ylabel("Capacitive reading (a.u.)")
 	if title:
 		ax.set_title(title)
-	ax.grid(True, alpha=0.3)
 	ax.legend(loc="best")
 	fig.tight_layout()
+
+	# Style adjustments per request for single-plot as well
+	left, right = ax.get_xlim()
+	ax.set_xlim(left=0, right=right)
+	ax.margins(x=0)
+	for side in ("top", "right"):
+		ax.spines[side].set_visible(False)
+	ax.tick_params(direction="in", which="both", length=5)
 
 	# Save only if a save_path is provided
 	if save_path is not None:
@@ -210,7 +224,6 @@ def plot_selected_sensors_grid(
 		ax = axes[r][c]
 		ax.plot(df["Time_sec"], df[col], color="#1f77b4", linewidth=1.2)
 		ax.set_title(col, fontsize=10)
-		ax.grid(True, alpha=0.3)
 		# Only label leftmost y-axes and bottom x-axes to reduce clutter
 		if c == 0:
 			ax.set_ylabel("Capacitive (a.u.)")
@@ -224,6 +237,17 @@ def plot_selected_sensors_grid(
 		# Apply common y-limits
 		if y_limits is not None:
 			ax.set_ylim(*y_limits)
+
+		# Style adjustments per request:
+		# - Start x-axis at 0
+		# - Remove top and right spines (boundaries)
+		# - Tick marks inward and remove extra x-margins
+		left, right = ax.get_xlim()
+		ax.set_xlim(left=0, right=right)
+		ax.margins(x=0)
+		for side in ("top", "right"):
+			ax.spines[side].set_visible(False)
+		ax.tick_params(direction="in", which="both", length=5)
 
 	if title:
 		fig.suptitle(title)
@@ -299,7 +323,6 @@ def plot_timestamps_series(
 	ax.set_ylabel("Delta time (s)")
 	if title:
 		ax.set_title(title)
-	ax.grid(True, alpha=0.3)
 	fig.tight_layout()
 
 	# Save only if a save_path is provided
