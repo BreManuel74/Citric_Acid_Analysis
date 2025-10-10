@@ -16,10 +16,26 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 from typing import List, Optional
 
 import pandas as pd
 import matplotlib.pyplot as plt
+
+plt.rcParams["font.family"] = "sans-serif"
+plt.rcParams["font.sans-serif"] = ["Arial"]
+plt.rcParams["svg.fonttype"] = "none"
+"""Ramp analysis utilities: load master CSV, clean types, build per-ID series, and plot."""
+
+plt.rcParams.update({
+    "font.size": 11,          # base text
+    "axes.titlesize": 13,     # ax.set_title / suptitle
+    "axes.labelsize": 12,     # x/y labels
+    "xtick.labelsize": 10,
+    "ytick.labelsize": 10,
+    "legend.fontsize": 10,
+    "figure.titlesize": 14,   # plt.suptitle
+})
 
 def load_capacitive_csv(csv_path: Path) -> pd.DataFrame:
 	"""Load the capacitive CSV and return a cleaned DataFrame.
@@ -72,7 +88,8 @@ def plot_sensors_over_time(
 	title: str | None = None,
 	save_path: Path | None = None,
 	show: bool = True,
-) -> Path:
+	return_fig: bool = False,
+) -> Path | tuple[Optional[Path], plt.Figure]:
 	"""Plot all sensor columns vs Time_sec (s) and save to PNG.
 
 	Returns the path to the saved PNG.
@@ -98,19 +115,17 @@ def plot_sensors_over_time(
 	ax.legend(ncol=2, bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0.)
 	fig.tight_layout()
 
-	# Determine save path
-	if save_path is None:
-		save_path = Path("lick_sensors_plot.png")
-
-	save_path.parent.mkdir(parents=True, exist_ok=True)
-	fig.savefig(save_path, dpi=150)
+	# Save only if a save_path is provided
+	if save_path is not None:
+		save_path.parent.mkdir(parents=True, exist_ok=True)
+		fig.savefig(save_path, dpi=150)
 
 	if show:
 		plt.show()
 	else:
 		plt.close(fig)
 
-	return save_path
+	return (save_path, fig) if return_fig else save_path
 
 
 def plot_single_sensor_over_time(
@@ -119,7 +134,8 @@ def plot_single_sensor_over_time(
 	title: str | None = None,
 	save_path: Path | None = None,
 	show: bool = True,
-) -> Path:
+	return_fig: bool = False,
+) -> Path | tuple[Optional[Path], plt.Figure]:
 	"""Plot a single sensor column vs Time_sec (s) and save to PNG.
 
 	Returns the path to the saved PNG.
@@ -140,18 +156,17 @@ def plot_single_sensor_over_time(
 	ax.legend(loc="best")
 	fig.tight_layout()
 
-	if save_path is None:
-		save_path = Path(f"{sensor_col}_plot.png")
-
-	save_path.parent.mkdir(parents=True, exist_ok=True)
-	fig.savefig(save_path, dpi=150)
+	# Save only if a save_path is provided
+	if save_path is not None:
+		save_path.parent.mkdir(parents=True, exist_ok=True)
+		fig.savefig(save_path, dpi=150)
 
 	if show:
 		plt.show()
 	else:
 		plt.close(fig)
 
-	return save_path
+	return (save_path, fig) if return_fig else save_path
 
 def plot_selected_sensors_grid(
 	df: pd.DataFrame,
@@ -163,7 +178,7 @@ def plot_selected_sensors_grid(
 	save_path: Path | None = None,
 	show: bool = True,
 	y_limits: tuple[float, float] | None = None,
-) -> Path:
+) -> Path | tuple[Optional[Path], plt.Figure]:
 	"""Plot selected sensors in a grid of subplots (default 2x6 for 12 sensors).
 
 	Each subplot shows one sensor vs Time_sec (s), styled similarly to the single-sensor plot.
@@ -214,18 +229,17 @@ def plot_selected_sensors_grid(
 		fig.suptitle(title)
 	fig.tight_layout(rect=[0, 0, 1, 0.97] if title else None)
 
-	if save_path is None:
-		save_path = Path("selected_12_sensors_grid.png")
-    
-	save_path.parent.mkdir(parents=True, exist_ok=True)
-	fig.savefig(save_path, dpi=150)
+	# Save only if a save_path is provided
+	if save_path is not None:
+		save_path.parent.mkdir(parents=True, exist_ok=True)
+		fig.savefig(save_path, dpi=150)
 
 	if show:
 		plt.show()
 	else:
 		plt.close(fig)
 
-	return save_path
+	return (save_path, fig) if True else save_path
 
 
 def compute_y_limits(df: pd.DataFrame, sensor_cols: List[str], pad_ratio: float = 0.05) -> tuple[float, float]:
@@ -260,7 +274,8 @@ def plot_timestamps_series(
 	title: str | None = None,
 	save_path: Path | None = None,
 	show: bool = True,
-) -> Path:
+	return_fig: bool = False,
+) -> Path | tuple[Optional[Path], plt.Figure]:
 	"""Plot the running difference between consecutive timestamps vs sample index.
 
 	- X-axis: sample index (1..N-1) corresponding to the delta positions
@@ -287,18 +302,17 @@ def plot_timestamps_series(
 	ax.grid(True, alpha=0.3)
 	fig.tight_layout()
 
-	if save_path is None:
-		save_path = Path("timestamps_plot.png")
-
-	save_path.parent.mkdir(parents=True, exist_ok=True)
-	fig.savefig(save_path, dpi=150)
+	# Save only if a save_path is provided
+	if save_path is not None:
+		save_path.parent.mkdir(parents=True, exist_ok=True)
+		fig.savefig(save_path, dpi=150)
 
 	if show:
 		plt.show()
 	else:
 		plt.close(fig)
 
-	return save_path
+	return (save_path, fig) if return_fig else save_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -351,15 +365,12 @@ def main() -> None:
 	df = load_capacitive_csv(csv_path)
 	sensor_cols = get_sensor_columns(df)
 
-	# Build default save path next to input file
-	if args.save is None:
-		save_path = csv_path.with_name(csv_path.stem + "_plot.png")
-	else:
-		save_path = Path(args.save)
+	# Do not save PNGs; SVG saving is handled later via prompts
+	save_path = None
 
 	title = f"Capacitive Sensors over Time — {csv_path.name}"
 
-	out_path = plot_sensors_over_time(
+	_ = plot_sensors_over_time(
 		df=df,
 		sensor_cols=sensor_cols,
 		title=title,
@@ -367,20 +378,17 @@ def main() -> None:
 		show=True,
 	)
 
-	print(f"Saved plot to: {out_path}")
-
 	# Plot the timestamp column (first column) vs sample index
 	try:
 		ts_title = f"Timestamps over Samples — {csv_path.name}"
-		ts_path = csv_path.with_name(csv_path.stem + "_timestamps_plot.png")
-		out_ts = plot_timestamps_series(
+		# show only; saving will be handled later with user-provided name
+		plot_timestamps_series(
 			df=df,
 			col_name="Arduino_Timestamp",
 			title=ts_title,
-			save_path=ts_path,
+			save_path=None,
 			show=True,
 		)
-		print(f"Saved plot to: {out_ts}")
 	except ValueError as e:
 		print(str(e))
 
@@ -410,37 +418,101 @@ def main() -> None:
 	try:
 		selected = _prompt_for_sensor_list(df, count=12)
 		grid_title = f"Selected Sensors (12) — {csv_path.name}"
-		grid_path = csv_path.with_name(csv_path.stem + "_selected12_grid.png")
 		# Compute common y-limits across all 24 sensors so both grids share the same scale
 		all_sensor_cols = [c for c in df.columns if c.startswith("Sensor_")]
 		common_y_limits = compute_y_limits(df, all_sensor_cols)
-		out_grid = plot_selected_sensors_grid(
+		# Show selected grid first (no save yet)
+		plot_selected_sensors_grid(
 			df=df,
 			sensor_cols=selected,
 			title=grid_title,
-			save_path=grid_path,
+			save_path=None,
 			show=True,
 			y_limits=common_y_limits,
 		)
-		print(f"Saved plot to: {out_grid}")
 
-		# Compute and plot the remaining sensors (all sensors minus selected)
+		# Compute and show the remaining sensors grid
 		all_sensors = [c for c in df.columns if c.startswith("Sensor_")]
 		remaining = [c for c in all_sensors if c not in set(selected)]
 		if len(remaining) == 12:
 			rem_title = f"Remaining Sensors (12) — {csv_path.name}"
-			rem_path = csv_path.with_name(csv_path.stem + "_remaining12_grid.png")
-			out_grid_rem = plot_selected_sensors_grid(
+			plot_selected_sensors_grid(
 				df=df,
 				sensor_cols=remaining,
 				title=rem_title,
-				save_path=rem_path,
+				save_path=None,
 				show=True,
 				y_limits=common_y_limits,
 			)
-			print(f"Saved plot to: {out_grid_rem}")
 		else:
 			print(f"Skipping remaining-sensors grid: expected 12 remaining, found {len(remaining)}.")
+
+		# After viewing, prompt for SVG filenames to save each figure
+		def _safe_svg(name: str) -> Path:
+			base = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-_.") or "plot"
+			if not base.lower().endswith(".svg"):
+				base += ".svg"
+			return Path.cwd() / base
+
+		print("\n(Optional) Save figures as SVGs. Leave blank to skip.")
+		ov_name = input("SVG filename for all-sensors overview: ").strip()
+		sel_name = input("SVG filename for selected 12 grid: ").strip()
+		rem_name = input("SVG filename for remaining 12 grid: ").strip()
+		ts_name = input("SVG filename for timestamp deltas: ").strip()
+
+		# Re-generate figures in memory without showing, then save with provided names
+		# All-sensors overview
+		if ov_name:
+			_, fig_ov = plot_sensors_over_time(
+				df=df,
+				sensor_cols=sensor_cols,
+				title=title,
+				save_path=None,
+				show=False,
+				return_fig=True,
+			)
+			fig_ov.savefig(str(_safe_svg(ov_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(ov_name)}")
+
+		# Selected grid
+		if sel_name:
+			_, fig_sel = plot_selected_sensors_grid(
+				df=df,
+				sensor_cols=selected,
+				title=grid_title,
+				save_path=None,
+				show=False,
+				y_limits=common_y_limits,
+			)
+			fig_sel.savefig(str(_safe_svg(sel_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(sel_name)}")
+
+		# Remaining grid
+		if rem_name and len(remaining) == 12:
+			_, fig_rem = plot_selected_sensors_grid(
+				df=df,
+				sensor_cols=remaining,
+				title=rem_title,
+				save_path=None,
+				show=False,
+				y_limits=common_y_limits,
+			)
+			fig_rem.savefig(str(_safe_svg(rem_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(rem_name)}")
+
+		# Timestamp deltas figure
+		if ts_name:
+			_, fig_ts = plot_timestamps_series(
+				df=df,
+				col_name="Arduino_Timestamp",
+				title=ts_title,
+				save_path=None,
+				show=False,
+				return_fig=True,
+			)
+			fig_ts.savefig(str(_safe_svg(ts_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(ts_name)}")
+
 	except Exception as e:
 		print(str(e))
 
