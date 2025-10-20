@@ -8,8 +8,7 @@ Also creates a separate plot for a chosen sensor (x-axis in seconds).
 Usage (from the workspace root):
 	python lick_detection.py --input "capacitive_log_2025-09-29_15-38-39.csv" --save "lick_sensors_plot.png"
 
-If --save is omitted, a PNG will be saved next to the input file with suffix _plot.png.
-The plot window will display interactively on every run.
+If --input is omitted, a file picker window will open to select a CSV. The plot window will display interactively on every run.
 """
 
 from __future__ import annotations
@@ -182,6 +181,7 @@ def plot_single_sensor_over_time(
 
 	return (save_path, fig) if return_fig else save_path
 
+
 def plot_selected_sensors_grid(
 	df: pd.DataFrame,
 	sensor_cols: List[str],
@@ -344,8 +344,8 @@ def parse_args() -> argparse.Namespace:
 		"--input",
 		"-i",
 		type=str,
-		default=str(Path("capacitive_log_2025-09-29_15-38-39.csv")),
-		help="Path to the capacitive log CSV (default: capacitive_log_2025-09-29_15-38-39.csv)",
+		default=None,
+		help="Path to the capacitive log CSV. If omitted, a file picker will open.",
 	)
 	parser.add_argument(
 		"--save",
@@ -355,6 +355,30 @@ def parse_args() -> argparse.Namespace:
 		help="Path to save the PNG plot (default: <input> with _plot.png suffix)",
 	)
 	return parser.parse_args()
+
+
+def select_csv_via_tkinter(initial_dir: Optional[Path] = None) -> Optional[Path]:
+	"""Open a Tkinter file dialog to select a CSV file. Returns a Path or None if canceled/unavailable."""
+	try:
+		import tkinter as tk
+		from tkinter import filedialog
+		root = tk.Tk()
+		root.withdraw()
+		# Ensure the dialog appears in front on some platforms
+		root.update()
+		path = filedialog.askopenfilename(
+			initialdir=str(initial_dir or Path.cwd()),
+			title="Select capacitive CSV",
+			filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+		)
+		try:
+			root.destroy()
+		except Exception:
+			pass
+		return Path(path) if path else None
+	except Exception:
+		# Tkinter may be unavailable in some environments
+		return None
 
 
 def normalize_sensor_name(sensor_arg: str, df: pd.DataFrame) -> str:
@@ -384,7 +408,24 @@ def normalize_sensor_name(sensor_arg: str, df: pd.DataFrame) -> str:
 def main() -> None:
 	args = parse_args()
 
-	csv_path = Path(args.input)
+	# Resolve CSV path: use CLI input if provided, otherwise open a file picker, then fallback to console prompt
+	csv_path: Optional[Path] = Path(args.input) if args.input else None
+	if csv_path is None:
+		csv_path = select_csv_via_tkinter(initial_dir=Path.cwd())
+	if csv_path is None:
+		while True:
+			entry = input("Enter path to the capacitive CSV (or leave blank to cancel): ").strip()
+			if not entry:
+				print("No file selected. Exiting.")
+				return
+			candidate = Path(entry)
+			if candidate.exists():
+				csv_path = candidate
+				break
+			print(f"File not found: {candidate}. Please try again.\n")
+
+	if not csv_path.exists():
+		raise FileNotFoundError(f"CSV not found: {csv_path}")
 	df = load_capacitive_csv(csv_path)
 	sensor_cols = get_sensor_columns(df)
 
@@ -415,7 +456,24 @@ def main() -> None:
 	except ValueError as e:
 		print(str(e))
 
-	# Removed single-sensor interactive prompt and plot per user request
+	# Single-sensor interactive prompt and plot
+	single_sensor_col: Optional[str] = None
+	single_title: Optional[str] = None
+	try:
+		entry = input("Enter a single sensor to plot (e.g., 19 or Sensor_19). Leave blank to skip: ").strip()
+		if entry:
+			resolved = normalize_sensor_name(entry, df)
+			single_sensor_col = resolved
+			single_title = f"{resolved} over Time — {csv_path.name}"
+			plot_single_sensor_over_time(
+				df=df,
+				sensor_col=resolved,
+				title=single_title,
+				save_path=None,
+				show=True,
+			)
+	except Exception as e:
+		print(str(e))
 
 	# Prompt for 12 sensors to plot in a 2x6 grid
 	def _prompt_for_sensor_list(df: pd.DataFrame, count: int = 12) -> List[str]:
@@ -481,6 +539,10 @@ def main() -> None:
 		ov_name = input("SVG filename for all-sensors overview: ").strip()
 		sel_name = input("SVG filename for selected 12 grid: ").strip()
 		rem_name = input("SVG filename for remaining 12 grid: ").strip()
+		# Only ask for single-sensor save name if a single sensor was plotted
+		sing_name = ""
+		if single_sensor_col is not None:
+			sing_name = input("SVG filename for single-sensor plot: ").strip()
 		ts_name = input("SVG filename for timestamp deltas: ").strip()
 
 		# Re-generate figures in memory without showing, then save with provided names
@@ -522,6 +584,19 @@ def main() -> None:
 			)
 			fig_rem.savefig(str(_safe_svg(rem_name)), format="svg", bbox_inches="tight")
 			print(f"Saved SVG: {_safe_svg(rem_name)}")
+
+		# Single-sensor figure
+		if sing_name and single_sensor_col is not None:
+			_, fig_sing = plot_single_sensor_over_time(
+				df=df,
+				sensor_col=single_sensor_col,
+				title=single_title or single_sensor_col,
+				save_path=None,
+				show=False,
+				return_fig=True,
+			)
+			fig_sing.savefig(str(_safe_svg(sing_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(sing_name)}")
 
 		# Timestamp deltas figure
 		if ts_name:
