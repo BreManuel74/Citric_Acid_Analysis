@@ -66,8 +66,11 @@ def load_capacitive_csv(csv_path: Path) -> pd.DataFrame:
 
 
 def get_sensor_columns(df: pd.DataFrame) -> List[str]:
-	"""Return list of sensor columns like Sensor_1..Sensor_N in sorted numeric order."""
-	sensor_cols = [c for c in df.columns if c.startswith("Sensor_")]
+	"""Return list of sensor columns like Sensor_1..Sensor_N in sorted numeric order.
+	
+	Excludes deviation columns (those ending with '_deviation').
+	"""
+	sensor_cols = [c for c in df.columns if c.startswith("Sensor_") and not c.endswith("_deviation")]
 	# Sort by numeric suffix if possible
 	def key(c: str) -> int:
 		try:
@@ -79,6 +82,51 @@ def get_sensor_columns(df: pd.DataFrame) -> List[str]:
 	if not sensor_cols:
 		raise ValueError("No sensor columns found (expected columns like 'Sensor_1', 'Sensor_2', ...)")
 	return sensor_cols
+
+
+def compute_sensor_modes(df: pd.DataFrame, sensor_cols: List[str]) -> pd.Series:
+	"""Compute the mode (most frequent value) for each sensor column.
+	
+	Returns a Series indexed by sensor column names with their mode values.
+	If multiple modes exist, returns the first one.
+	"""
+	modes = {}
+	for col in sensor_cols:
+		series = pd.to_numeric(df[col], errors="coerce")
+		# Drop NaN values before computing mode
+		series = series.dropna()
+		if len(series) > 0:
+			mode_result = series.mode()
+			# mode() returns a Series; take the first value if multiple modes exist
+			modes[col] = mode_result.iloc[0] if len(mode_result) > 0 else None
+		else:
+			modes[col] = None
+	return pd.Series(modes)
+
+
+def compute_mode_deviations(df: pd.DataFrame, sensor_cols: List[str], sensor_modes: pd.Series) -> pd.DataFrame:
+	"""Compute absolute difference between each sensor's mode and its values at each time point.
+	
+	For each sensor column, creates a new column with suffix '_deviation' containing
+	the absolute value of (mode - sensor_value) at each time point.
+	
+	Returns a copy of the dataframe with the new deviation columns added.
+	"""
+	df_with_deviations = df.copy()
+	
+	for col in sensor_cols:
+		mode_val = sensor_modes[col]
+		if mode_val is not None and col in df.columns:
+			# Compute absolute deviation: |mode - value|
+			sensor_series = pd.to_numeric(df[col], errors="coerce")
+			deviation_col_name = f"{col}_deviation"
+			df_with_deviations[deviation_col_name] = abs(mode_val - sensor_series)
+		else:
+			# If mode is None or column missing, set deviation to NaN
+			deviation_col_name = f"{col}_deviation"
+			df_with_deviations[deviation_col_name] = pd.NA
+	
+	return df_with_deviations
 
 
 def plot_sensors_over_time(
@@ -227,6 +275,94 @@ def plot_selected_sensors_grid(
 		# Only label leftmost y-axes and bottom x-axes to reduce clutter
 		if c == 0:
 			ax.set_ylabel("Capacitive (a.u.)")
+		else:
+			ax.set_ylabel("")
+		if r == nrows - 1:
+			ax.set_xlabel("Time (s)")
+		else:
+			ax.set_xlabel("")
+
+		# Apply common y-limits
+		if y_limits is not None:
+			ax.set_ylim(*y_limits)
+
+		# Style adjustments per request:
+		# - Start x-axis at 0
+		# - Remove top and right spines (boundaries)
+		# - Tick marks inward and remove extra x-margins
+		left, right = ax.get_xlim()
+		ax.set_xlim(left=0, right=right)
+		ax.margins(x=0)
+		for side in ("top", "right"):
+			ax.spines[side].set_visible(False)
+		ax.tick_params(direction="in", which="both", length=5)
+
+	if title:
+		fig.suptitle(title)
+	fig.tight_layout(rect=[0, 0, 1, 0.97] if title else None)
+
+	# Save only if a save_path is provided
+	if save_path is not None:
+		save_path.parent.mkdir(parents=True, exist_ok=True)
+		fig.savefig(save_path, dpi=150)
+
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+
+	return (save_path, fig) if True else save_path
+
+
+def plot_deviations_grid(
+	df: pd.DataFrame,
+	sensor_cols: List[str],
+	*,
+	nrows: int = 2,
+	ncols: int = 6,
+	title: str | None = None,
+	save_path: Path | None = None,
+	show: bool = True,
+	y_limits: tuple[float, float] | None = None,
+) -> Path | tuple[Optional[Path], plt.Figure]:
+	"""Plot sensor deviations in a grid of subplots (default 2x6 for 12 sensors).
+
+	Each subplot shows one sensor's deviation (|mode - value|) vs Time_sec (s).
+	If y_limits is provided, all subplots use the same y-axis range.
+	"""
+	if "Time_sec" not in df.columns:
+		raise ValueError("'Time_sec' column not found. Did you run load_capacitive_csv()?")
+	needed = nrows * ncols
+	if len(sensor_cols) != needed:
+		raise ValueError(f"Expected exactly {needed} sensors, got {len(sensor_cols)}")
+	
+	# Build list of deviation column names
+	deviation_cols = [f"{col}_deviation" for col in sensor_cols]
+	for col in deviation_cols:
+		if col not in df.columns:
+			raise ValueError(f"Deviation column '{col}' not found in DataFrame. Did you run compute_mode_deviations()?")
+
+	# Reasonable figure size for a 2x6 grid
+	fig_w = max(12, ncols * 3)
+	fig_h = max(6, nrows * 3)
+	fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), sharex=False, sharey=False)
+	axes = axes.reshape(nrows, ncols)
+
+	# Determine common y-limits (either provided or computed from the deviation columns)
+	if y_limits is None:
+		y_limits = compute_y_limits(df, deviation_cols)
+
+	# Plot each deviation in its subplot
+	for i, col in enumerate(sensor_cols):
+		dev_col = f"{col}_deviation"
+		r = i // ncols
+		c = i % ncols
+		ax = axes[r][c]
+		ax.plot(df["Time_sec"], df[dev_col], color="#ff7f0e", linewidth=1.2)
+		ax.set_title(f"{col} (deviation)", fontsize=10)
+		# Only label leftmost y-axes and bottom x-axes to reduce clutter
+		if c == 0:
+			ax.set_ylabel("Deviation (a.u.)")
 		else:
 			ax.set_ylabel("")
 		if r == nrows - 1:
@@ -429,6 +565,20 @@ def main() -> None:
 	df = load_capacitive_csv(csv_path)
 	sensor_cols = get_sensor_columns(df)
 
+	# Compute and display the mode for each sensor
+	print("\n" + "=" * 60)
+	print("MODE VALUES FOR EACH SENSOR")
+	print("=" * 60)
+	sensor_modes = compute_sensor_modes(df, sensor_cols)
+	for sensor, mode_val in sensor_modes.items():
+		print(f"{sensor:12s} : {mode_val}")
+	print("=" * 60 + "\n")
+
+	# Compute mode deviations (absolute difference from mode at each time point)
+	print("Computing mode deviations for each sensor...")
+	df = compute_mode_deviations(df, sensor_cols, sensor_modes)
+	print(f"Added deviation columns: {', '.join([f'{col}_deviation' for col in sensor_cols[:3]])}...\n")
+
 	# Do not save PNGs; SVG saving is handled later via prompts
 	save_path = None
 
@@ -500,7 +650,7 @@ def main() -> None:
 		selected = _prompt_for_sensor_list(df, count=12)
 		grid_title = f"Selected Sensors (12) — {csv_path.name}"
 		# Compute common y-limits across all 24 sensors so both grids share the same scale
-		all_sensor_cols = [c for c in df.columns if c.startswith("Sensor_")]
+		all_sensor_cols = get_sensor_columns(df)
 		common_y_limits = compute_y_limits(df, all_sensor_cols)
 		# Show selected grid first (no save yet)
 		plot_selected_sensors_grid(
@@ -513,7 +663,7 @@ def main() -> None:
 		)
 
 		# Compute and show the remaining sensors grid
-		all_sensors = [c for c in df.columns if c.startswith("Sensor_")]
+		all_sensors = get_sensor_columns(df)
 		remaining = [c for c in all_sensors if c not in set(selected)]
 		if len(remaining) == 12:
 			rem_title = f"Remaining Sensors (12) — {csv_path.name}"
@@ -528,6 +678,34 @@ def main() -> None:
 		else:
 			print(f"Skipping remaining-sensors grid: expected 12 remaining, found {len(remaining)}.")
 
+		# Plot deviations for selected sensors
+		print("\nPlotting deviations for selected sensors...")
+		# Compute common y-limits for deviation plots across all 24 deviation columns
+		all_deviation_cols = [f"{col}_deviation" for col in all_sensor_cols]
+		common_dev_y_limits = compute_y_limits(df, all_deviation_cols)
+		
+		dev_sel_title = f"Selected Sensors Deviations (12) — {csv_path.name}"
+		plot_deviations_grid(
+			df=df,
+			sensor_cols=selected,
+			title=dev_sel_title,
+			save_path=None,
+			show=True,
+			y_limits=common_dev_y_limits,
+		)
+
+		# Plot deviations for remaining sensors
+		if len(remaining) == 12:
+			dev_rem_title = f"Remaining Sensors Deviations (12) — {csv_path.name}"
+			plot_deviations_grid(
+				df=df,
+				sensor_cols=remaining,
+				title=dev_rem_title,
+				save_path=None,
+				show=True,
+				y_limits=common_dev_y_limits,
+			)
+
 		# After viewing, prompt for SVG filenames to save each figure
 		def _safe_svg(name: str) -> Path:
 			base = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-_.") or "plot"
@@ -539,6 +717,8 @@ def main() -> None:
 		ov_name = input("SVG filename for all-sensors overview: ").strip()
 		sel_name = input("SVG filename for selected 12 grid: ").strip()
 		rem_name = input("SVG filename for remaining 12 grid: ").strip()
+		dev_sel_name = input("SVG filename for selected 12 deviations: ").strip()
+		dev_rem_name = input("SVG filename for remaining 12 deviations: ").strip()
 		# Only ask for single-sensor save name if a single sensor was plotted
 		sing_name = ""
 		if single_sensor_col is not None:
@@ -584,6 +764,32 @@ def main() -> None:
 			)
 			fig_rem.savefig(str(_safe_svg(rem_name)), format="svg", bbox_inches="tight")
 			print(f"Saved SVG: {_safe_svg(rem_name)}")
+
+		# Selected deviations grid
+		if dev_sel_name:
+			_, fig_dev_sel = plot_deviations_grid(
+				df=df,
+				sensor_cols=selected,
+				title=dev_sel_title,
+				save_path=None,
+				show=False,
+				y_limits=common_dev_y_limits,
+			)
+			fig_dev_sel.savefig(str(_safe_svg(dev_sel_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(dev_sel_name)}")
+
+		# Remaining deviations grid
+		if dev_rem_name and len(remaining) == 12:
+			_, fig_dev_rem = plot_deviations_grid(
+				df=df,
+				sensor_cols=remaining,
+				title=dev_rem_title,
+				save_path=None,
+				show=False,
+				y_limits=common_dev_y_limits,
+			)
+			fig_dev_rem.savefig(str(_safe_svg(dev_rem_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(dev_rem_name)}")
 
 		# Single-sensor figure
 		if sing_name and single_sensor_col is not None:
