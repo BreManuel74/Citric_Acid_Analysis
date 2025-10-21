@@ -715,6 +715,26 @@ def plot_average_weight_change_by_ca(
 	ax1.spines['top'].set_visible(False)
 	ax1.spines['right'].set_visible(False)
 	
+	# Set x-axis to start at 0 and end at the last CA% position
+	ax1.set_xlim(-0.5, len(ca_labels) - 0.5)
+	
+	# Calculate y-axis range including error bars
+	daily_with_err_top = np.array(daily_means) + np.array(daily_sems)
+	daily_with_err_bottom = np.array(daily_means) - np.array(daily_sems)
+	daily_data_min = float(np.min(daily_with_err_bottom))
+	daily_data_max = float(np.max(daily_with_err_top))
+	
+	# Calculate nice evenly-spaced ticks for y-axis
+	daily_y_range = daily_data_max - daily_data_min
+	daily_y_step = _auto_integer_step(daily_data_min, daily_data_max, target_ticks=6)
+	daily_y_min = int(np.floor(daily_data_min / daily_y_step)) * daily_y_step
+	daily_y_max = int(np.ceil(daily_data_max / daily_y_step)) * daily_y_step
+	daily_y_ticks = np.arange(daily_y_min, daily_y_max + daily_y_step, daily_y_step)
+	
+	ax1.set_ylim(daily_y_min, daily_y_max)
+	ax1.set_yticks(daily_y_ticks)
+	ax1.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.0f'))
+	
 	# Total Change subplot
 	bars2 = ax2.bar(x_pos, total_means, bar_width,
 					yerr=total_sems, capsize=5,
@@ -731,6 +751,26 @@ def plot_average_weight_change_by_ca(
 	ax2.grid(False)
 	ax2.spines['top'].set_visible(False)
 	ax2.spines['right'].set_visible(False)
+	
+	# Set x-axis to start at 0 and end at the last CA% position
+	ax2.set_xlim(-0.5, len(ca_labels) - 0.5)
+	
+	# Calculate y-axis range including error bars
+	total_with_err_top = np.array(total_means) + np.array(total_sems)
+	total_with_err_bottom = np.array(total_means) - np.array(total_sems)
+	total_data_min = float(np.min(total_with_err_bottom))
+	total_data_max = float(np.max(total_with_err_top))
+	
+	# Calculate nice evenly-spaced ticks for y-axis
+	total_y_range = total_data_max - total_data_min
+	total_y_step = _auto_integer_step(total_data_min, total_data_max, target_ticks=6)
+	total_y_min = int(np.floor(total_data_min / total_y_step)) * total_y_step
+	total_y_max = int(np.ceil(total_data_max / total_y_step)) * total_y_step
+	total_y_ticks = np.arange(total_y_min, total_y_max + total_y_step, total_y_step)
+	
+	ax2.set_ylim(total_y_min, total_y_max)
+	ax2.set_yticks(total_y_ticks)
+	ax2.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.0f'))
 	
 	plt.tight_layout()
 	
@@ -1166,6 +1206,7 @@ def plot_all_pie_charts(
 ) -> plt.Figure:
 	"""
 	Create a 2x2 subplot with all four pie charts: Nest Made, Lethargy, CA Spot Digging, and Anxious Behaviors.
+	Uses a single common legend since all charts share the same Yes/No color scheme and sample size.
 	
 	Parameters:
 		df: Master DataFrame
@@ -1180,7 +1221,7 @@ def plot_all_pie_charts(
 	# Clean the dataframe to ensure yes/no conversion to boolean
 	cdf = clean_master_dataframe(df)
 	
-	# Create 2x2 subplot
+	# Create 2x2 subplot with extra space for legend
 	fig, axes = plt.subplots(2, 2, figsize=(14, 12))
 	fig.suptitle("Behavioral Observations Distribution", fontsize=16, weight='bold', y=0.995)
 	
@@ -1191,6 +1232,9 @@ def plot_all_pie_charts(
 		("CA Spot Digging?", axes[1, 0]),
 		("Anxious Behaviors?", axes[1, 1])
 	]
+	
+	# Track total n (should be same for all)
+	total_n = None
 	
 	for col_name, ax in columns:
 		if col_name not in cdf.columns:
@@ -1217,6 +1261,8 @@ def plot_all_pie_charts(
 			continue
 		
 		total = sum(values)
+		if total_n is None:
+			total_n = total
 		
 		# Use blue for Yes and orange for No
 		colors = []
@@ -1226,9 +1272,9 @@ def plot_all_pie_charts(
 			else:
 				colors.append("orange")
 		
+		# Create pie chart without labels (we'll use a common legend)
 		wedges, texts, autotexts = ax.pie(
 			values,
-			labels=labels,
 			autopct='%1.1f%%',
 			startangle=90,
 			colors=colors,
@@ -1243,10 +1289,28 @@ def plot_all_pie_charts(
 		# Equal aspect ratio ensures that pie is drawn as a circle
 		ax.axis('equal')
 		
-		# Set title for each subplot
-		ax.set_title(f"{col_name} (n={total})", fontsize=13, weight='bold', pad=10)
+		# Set title for each subplot (removed n from individual titles)
+		ax.set_title(f"{col_name}", fontsize=13, weight='bold', pad=10)
 	
-	plt.tight_layout()
+	# Create a single common legend at the bottom center
+	legend_labels = ['Yes', 'No']
+	legend_colors = ['blue', 'orange']
+	legend_handles = [plt.Rectangle((0, 0), 1, 1, fc=color) for color in legend_colors]
+	
+	# Add legend below the plots
+	fig.legend(
+		legend_handles,
+		legend_labels,
+		loc='lower center',
+		ncol=2,
+		fontsize=12,
+		frameon=True,
+		title=f'n = {total_n}' if total_n else None,
+		title_fontsize=12
+	)
+	
+	# Adjust layout to make room for legend
+	plt.tight_layout(rect=[0, 0.03, 1, 0.96])
 	
 	if save_path is not None:
 		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
