@@ -487,6 +487,271 @@ def build_total_change_series_by_id(df: pd.DataFrame, *, index: str = "date") ->
 	return series_by_id
 
 
+def bin_weight_changes_by_ca_percent(df: pd.DataFrame) -> dict:
+	"""
+	Bin Daily Change and Total Change by CA% for each animal ID.
+	
+	For each ID, groups all weight change measurements by their corresponding CA (%)
+	concentration level. This is useful for analyzing how weight changes vary across
+	different citric acid exposure levels.
+	
+	Parameters:
+		df: Master DataFrame with columns ID, CA (%), Daily Change, Total Change
+		
+	Returns:
+		dict[str, pd.DataFrame]: Dictionary mapping ID -> DataFrame with columns:
+			- CA (%): The citric acid concentration level
+			- Daily Change: List of all daily change values at that CA%
+			- Total Change: List of all total change values at that CA%
+			- Daily Change Mean: Mean of daily changes at that CA%
+			- Daily Change SEM: Standard error of mean for daily changes
+			- Total Change Mean: Mean of total changes at that CA%
+			- Total Change SEM: Standard error of mean for total changes
+			- Count: Number of observations at that CA%
+			
+	Example:
+		>>> binned = bin_weight_changes_by_ca_percent(df)
+		>>> print(binned['R2'])
+		   CA (%)  Daily Change Mean  Total Change Mean  Count
+		0     0.0              0.150              0.447      3
+		1     1.0             -2.700             -7.147      3
+		...
+	"""
+	required = {"ID", "CA (%)", "Daily Change", "Total Change"}
+	missing = required - set(df.columns)
+	if missing:
+		raise ValueError(f"DataFrame missing required columns: {sorted(missing)}")
+	
+	# Clean the dataframe
+	cdf = clean_master_dataframe(df)
+	
+	# Drop rows with missing essential data
+	cdf = cdf.dropna(subset=["ID", "CA (%)", "Daily Change", "Total Change"])
+	
+	binned_by_id = {}
+	
+	for animal_id, group in cdf.groupby("ID", dropna=True):
+		# Group by CA% and aggregate
+		binned = group.groupby("CA (%)").agg({
+			"Daily Change": ["mean", "sem", "count", lambda x: list(x)],
+			"Total Change": ["mean", "sem", lambda x: list(x)]
+		}).reset_index()
+		
+		# Flatten column names
+		binned.columns = [
+			"CA (%)",
+			"Daily Change Mean",
+			"Daily Change SEM",
+			"Count",
+			"Daily Change Values",
+			"Total Change Mean",
+			"Total Change SEM",
+			"Total Change Values"
+		]
+		
+		# Reorder columns for clarity
+		binned = binned[[
+			"CA (%)",
+			"Count",
+			"Daily Change Mean",
+			"Daily Change SEM",
+			"Daily Change Values",
+			"Total Change Mean",
+			"Total Change SEM",
+			"Total Change Values"
+		]]
+		
+		binned_by_id[str(animal_id)] = binned
+	
+	return binned_by_id
+
+
+def export_binned_data_to_csv(
+	binned_data: dict,
+	output_dir: Optional[Path] = None,
+	prefix: str = "binned_ca"
+) -> list[Path]:
+	"""
+	Export binned weight change data to CSV files.
+	
+	Creates one CSV file per animal ID with their CA%-binned weight changes.
+	
+	Parameters:
+		binned_data: Dictionary from bin_weight_changes_by_ca_percent()
+		output_dir: Directory to save CSV files (default: current working directory)
+		prefix: Prefix for output filenames
+		
+	Returns:
+		List of Path objects for created CSV files
+		
+	Example:
+		>>> binned = bin_weight_changes_by_ca_percent(df)
+		>>> files = export_binned_data_to_csv(binned, prefix="animal_ca_binned")
+		>>> print(files)
+		[Path('animal_ca_binned_R2.csv'), Path('animal_ca_binned_R4.csv'), ...]
+	"""
+	if output_dir is None:
+		output_dir = Path.cwd()
+	else:
+		output_dir = Path(output_dir)
+		output_dir.mkdir(parents=True, exist_ok=True)
+	
+	created_files = []
+	
+	for animal_id, data in binned_data.items():
+		# Create a copy and format for CSV export
+		export_df = data.copy()
+		
+		# Convert list columns to string representation for CSV
+		if "Daily Change Values" in export_df.columns:
+			export_df["Daily Change Values"] = export_df["Daily Change Values"].apply(
+				lambda x: ";".join(f"{v:.2f}" for v in x) if isinstance(x, list) else str(x)
+			)
+		if "Total Change Values" in export_df.columns:
+			export_df["Total Change Values"] = export_df["Total Change Values"].apply(
+				lambda x: ";".join(f"{v:.2f}" for v in x) if isinstance(x, list) else str(x)
+			)
+		
+		# Create safe filename
+		safe_id = re.sub(r"[^A-Za-z0-9_-]+", "_", str(animal_id))
+		filename = f"{prefix}_{safe_id}.csv"
+		filepath = output_dir / filename
+		
+		# Save to CSV
+		export_df.to_csv(filepath, index=False, float_format="%.4f")
+		created_files.append(filepath)
+		print(f"Saved binned data for {animal_id} to: {filepath}")
+	
+	return created_files
+
+
+def plot_average_weight_change_by_ca(
+	df: pd.DataFrame,
+	*,
+	title: Optional[str] = None,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> plt.Figure:
+	"""
+	Create bar charts showing average Daily Change and Total Change across all animals
+	for each CA% concentration level.
+	
+	Parameters:
+		df: Master DataFrame
+		title: Optional plot title
+		save_path: If provided, saves the figure to this path
+		show: If True, calls plt.show() at the end
+		save_svg: If True, saves as SVG in current working directory
+		svg_filename: Custom filename for SVG output
+		
+	Returns:
+		The matplotlib Figure object with two subplots (Daily Change and Total Change)
+	"""
+	# Get binned data for all animals
+	binned_data = bin_weight_changes_by_ca_percent(df)
+	
+	# Aggregate across all animals for each CA%
+	all_ca_levels = set()
+	for animal_data in binned_data.values():
+		all_ca_levels.update(animal_data["CA (%)"].values)
+	
+	ca_levels = sorted(all_ca_levels)
+	
+	# Collect data for each CA% across all animals
+	daily_change_by_ca = {ca: [] for ca in ca_levels}
+	total_change_by_ca = {ca: [] for ca in ca_levels}
+	
+	for animal_id, animal_data in binned_data.items():
+		for _, row in animal_data.iterrows():
+			ca = row["CA (%)"]
+			daily_change_by_ca[ca].append(row["Daily Change Mean"])
+			total_change_by_ca[ca].append(row["Total Change Mean"])
+	
+	# Calculate mean and SEM across animals for each CA%
+	ca_labels = []
+	daily_means = []
+	daily_sems = []
+	total_means = []
+	total_sems = []
+	
+	for ca in ca_levels:
+		ca_labels.append(f"{int(ca)}%")
+		
+		daily_vals = np.array(daily_change_by_ca[ca])
+		daily_means.append(np.mean(daily_vals))
+		daily_sems.append(np.std(daily_vals, ddof=1) / np.sqrt(len(daily_vals)) if len(daily_vals) > 1 else 0)
+		
+		total_vals = np.array(total_change_by_ca[ca])
+		total_means.append(np.mean(total_vals))
+		total_sems.append(np.std(total_vals, ddof=1) / np.sqrt(len(total_vals)) if len(total_vals) > 1 else 0)
+	
+	# Create figure with two subplots side by side
+	fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+	
+	if title:
+		fig.suptitle(title, fontsize=16, weight='bold', y=0.98)
+	else:
+		fig.suptitle("Average Weight Change by CA% Concentration", fontsize=16, weight='bold', y=0.98)
+	
+	x_pos = np.arange(len(ca_labels))
+	bar_width = 0.6
+	
+	# Daily Change subplot
+	bars1 = ax1.bar(x_pos, daily_means, bar_width, 
+					yerr=daily_sems, capsize=5,
+					color='steelblue', alpha=0.8, 
+					edgecolor='black', linewidth=1.2,
+					error_kw={'elinewidth': 2, 'capthick': 2})
+	
+	ax1.set_xlabel('CA (%)', fontsize=12, weight='bold')
+	ax1.set_ylabel('Daily Change (Mean ± SEM)', fontsize=12, weight='bold')
+	ax1.set_title('Daily Weight Change', fontsize=13, weight='bold', pad=10)
+	ax1.set_xticks(x_pos)
+	ax1.set_xticklabels(ca_labels)
+	ax1.axhline(0, color='black', linewidth=1.5, linestyle='-', alpha=0.8)
+	ax1.grid(False)
+	ax1.spines['top'].set_visible(False)
+	ax1.spines['right'].set_visible(False)
+	
+	# Total Change subplot
+	bars2 = ax2.bar(x_pos, total_means, bar_width,
+					yerr=total_sems, capsize=5,
+					color='coral', alpha=0.8,
+					edgecolor='black', linewidth=1.2,
+					error_kw={'elinewidth': 2, 'capthick': 2})
+	
+	ax2.set_xlabel('CA (%)', fontsize=12, weight='bold')
+	ax2.set_ylabel('Total Change (Mean ± SEM)', fontsize=12, weight='bold')
+	ax2.set_title('Total Weight Change', fontsize=13, weight='bold', pad=10)
+	ax2.set_xticks(x_pos)
+	ax2.set_xticklabels(ca_labels)
+	ax2.axhline(0, color='black', linewidth=1.5, linestyle='-', alpha=0.8)
+	ax2.grid(False)
+	ax2.spines['top'].set_visible(False)
+	ax2.spines['right'].set_visible(False)
+	
+	plt.tight_layout()
+	
+	if save_path is not None:
+		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+	
+	if save_svg:
+		base = svg_filename or "average_weight_change_by_ca"
+		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+		if not safe.lower().endswith(".svg"):
+			safe += ".svg"
+		out_path = Path.cwd() / safe
+		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		print(f"Saved SVG to: {out_path}")
+	
+	if show:
+		plt.show()
+	
+	return fig
+
+
 def plot_nest_made_pie_chart(
 	df: pd.DataFrame,
 	*,
@@ -1024,7 +1289,7 @@ def main() -> None:
 	except Exception as e:
 		print(f"\nWarning: failed to build per-ID series: {e}")
 
-	# Plot all figures: individual mice (total, daily), sex-averaged (total, daily), and combined pie charts
+	# Plot all figures: individual mice (total, daily), sex-averaged (total, daily), combined pie charts, and CA% bar charts
 	try:
 		# Create figures without saving and without immediately blocking
 		fig_total = plot_total_change_by_id(
@@ -1056,6 +1321,11 @@ def main() -> None:
 			save_svg=False,
 			show=False,
 		)
+		fig_ca_bars = plot_average_weight_change_by_ca(
+			df,
+			save_svg=False,
+			show=False,
+		)
 		# Show all figures together, then continue after windows are closed
 		plt.show()
 
@@ -1067,12 +1337,14 @@ def main() -> None:
 			custom_total_sex_svg = input("Filename for Total Change plot (sex-averaged): ").strip()
 			custom_daily_sex_svg = input("Filename for Daily Change plot (sex-averaged): ").strip()
 			custom_pies_svg = input("Filename for combined behavioral pie charts: ").strip()
+			custom_ca_bars_svg = input("Filename for CA% bar charts: ").strip()
 		except Exception:
 			custom_total_svg = ""
 			custom_daily_svg = ""
 			custom_total_sex_svg = ""
 			custom_daily_sex_svg = ""
 			custom_pies_svg = ""
+			custom_ca_bars_svg = ""
 
 		def _safe_svg_name(base: str) -> str:
 			name = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("-_.") or "plot"
@@ -1084,8 +1356,9 @@ def main() -> None:
 		out_total_sex = Path.cwd() / _safe_svg_name(custom_total_sex_svg or "total_change_by_sex")
 		out_daily_sex = Path.cwd() / _safe_svg_name(custom_daily_sex_svg or "daily_change_by_sex")
 		out_pies = Path.cwd() / _safe_svg_name(custom_pies_svg or "all_behavioral_pie_charts")
+		out_ca_bars = Path.cwd() / _safe_svg_name(custom_ca_bars_svg or "average_weight_change_by_ca")
 
-		# Save all five figures
+		# Save all six figures
 		try:
 			fig_total.savefig(str(out_total), format="svg", bbox_inches="tight")
 			print(f"Saved SVG to: {out_total}")
@@ -1111,6 +1384,11 @@ def main() -> None:
 			print(f"Saved SVG to: {out_pies}")
 		except Exception as e:
 			print(f"Warning: failed to save combined pie charts SVG: {e}")
+		try:
+			fig_ca_bars.savefig(str(out_ca_bars), format="svg", bbox_inches="tight")
+			print(f"Saved SVG to: {out_ca_bars}")
+		except Exception as e:
+			print(f"Warning: failed to save CA% bar charts SVG: {e}")
 	except Exception as e:
 		print(f"\nWarning: failed to plot changes: {e}")
 
