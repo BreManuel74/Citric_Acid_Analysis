@@ -487,6 +487,520 @@ def build_total_change_series_by_id(df: pd.DataFrame, *, index: str = "date") ->
 	return series_by_id
 
 
+def plot_nest_made_pie_chart(
+	df: pd.DataFrame,
+	*,
+	title: Optional[str] = None,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> plt.Figure:
+	"""
+	Create a pie chart showing the percentage of 'Yes' and 'No' values in the 'Nest Made?' column.
+	
+	Parameters:
+		df: Master DataFrame
+		title: Optional plot title
+		save_path: If provided, saves the figure to this path
+		show: If True, calls plt.show() at the end
+		save_svg: If True, saves as SVG in current working directory
+		svg_filename: Custom filename for SVG output
+		
+	Returns:
+		The matplotlib Figure object
+	"""
+	# Clean the dataframe to ensure yes/no conversion to boolean
+	cdf = clean_master_dataframe(df)
+	
+	if "Nest Made?" not in cdf.columns:
+		raise ValueError("'Nest Made?' column not found in DataFrame")
+	
+	# Count Yes and No values (the column is now boolean after cleaning)
+	nest_counts = cdf["Nest Made?"].value_counts()
+	
+	# Map boolean to labels
+	labels = []
+	values = []
+	for val, count in nest_counts.items():
+		if pd.isna(val):
+			continue
+		label = "Yes" if val else "No"
+		labels.append(label)
+		values.append(count)
+	
+	if not values:
+		raise ValueError("No valid data found in 'Nest Made?' column")
+	
+	# Calculate percentages for display
+	total = sum(values)
+	percentages = [v / total * 100 for v in values]
+	
+	# Create pie chart
+	fig, ax = plt.subplots(figsize=(8, 8))
+	
+	# Use green for Yes and purple for No to match sex color scheme
+	colors = []
+	for label in labels:
+		if label == "Yes":
+			colors.append("blue")
+		else:
+			colors.append("orange")
+	
+	wedges, texts, autotexts = ax.pie(
+		values,
+		labels=labels,
+		autopct='%1.1f%%',
+		startangle=90,
+		colors=colors,
+		textprops={'fontsize': 12, 'weight': 'bold'},
+	)
+	
+	# Make percentage text white for better contrast
+	for autotext in autotexts:
+		autotext.set_color('white')
+		autotext.set_fontsize(14)
+	
+	# Equal aspect ratio ensures that pie is drawn as a circle
+	ax.axis('equal')
+	
+	if title is None:
+		title = f"Nest Made? Distribution (n={total})"
+	ax.set_title(title, fontsize=14, weight='bold', pad=20)
+	
+	fig.tight_layout()
+	
+	if save_path is not None:
+		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+	
+	if save_svg:
+		base = svg_filename or (title or "nest_made_pie_chart")
+		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+		if not safe.lower().endswith(".svg"):
+			safe += ".svg"
+		out_path = Path.cwd() / safe
+		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		print(f"Saved SVG to: {out_path}")
+	
+	if show:
+		plt.show()
+	
+	return fig
+
+
+def plot_lethargy_pie_chart(
+	df: pd.DataFrame,
+	*,
+	title: Optional[str] = None,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> plt.Figure:
+	"""
+	Create a pie chart showing the percentage of 'Yes' and 'No' values in the 'Lethargy?' column.
+	
+	Parameters:
+		df: Master DataFrame
+		title: Optional plot title
+		save_path: If provided, saves the figure to this path
+		show: If True, calls plt.show() at the end
+		save_svg: If True, saves as SVG in current working directory
+		svg_filename: Custom filename for SVG output
+		
+	Returns:
+		The matplotlib Figure object
+	"""
+	# Clean the dataframe to ensure yes/no conversion to boolean
+	cdf = clean_master_dataframe(df)
+	
+	if "Lethargy?" not in cdf.columns:
+		raise ValueError("'Lethargy?' column not found in DataFrame")
+	
+	# Count Yes and No values (the column is now boolean after cleaning)
+	lethargy_counts = cdf["Lethargy?"].value_counts()
+	
+	# Map boolean to labels
+	labels = []
+	values = []
+	for val, count in lethargy_counts.items():
+		if pd.isna(val):
+			continue
+		label = "Yes" if val else "No"
+		labels.append(label)
+		values.append(count)
+	
+	if not values:
+		raise ValueError("No valid data found in 'Lethargy?' column")
+	
+	# Calculate percentages for display
+	total = sum(values)
+	percentages = [v / total * 100 for v in values]
+	
+	# Create pie chart
+	fig, ax = plt.subplots(figsize=(8, 8))
+	
+	# Use green for Yes and red for No
+	colors = []
+	for label in labels:
+		if label == "Yes":
+			colors.append("blue")
+		else:
+			colors.append("orange")
+
+	wedges, texts, autotexts = ax.pie(
+		values,
+		labels=labels,
+		autopct='%1.1f%%',
+		startangle=90,
+		colors=colors,
+		textprops={'fontsize': 12, 'weight': 'bold'},
+	)
+	
+	# Make percentage text white for better contrast
+	for autotext in autotexts:
+		autotext.set_color('white')
+		autotext.set_fontsize(14)
+	
+	# Equal aspect ratio ensures that pie is drawn as a circle
+	ax.axis('equal')
+	
+	if title is None:
+		title = f"Lethargy? Distribution (n={total})"
+	ax.set_title(title, fontsize=14, weight='bold', pad=20)
+	
+	fig.tight_layout()
+	
+	if save_path is not None:
+		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+	
+	if save_svg:
+		base = svg_filename or (title or "lethargy_pie_chart")
+		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+		if not safe.lower().endswith(".svg"):
+			safe += ".svg"
+		out_path = Path.cwd() / safe
+		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		print(f"Saved SVG to: {out_path}")
+	
+	if show:
+		plt.show()
+	
+	return fig
+
+
+def plot_ca_spot_digging_pie_chart(
+	df: pd.DataFrame,
+	*,
+	title: Optional[str] = None,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> plt.Figure:
+	"""
+	Create a pie chart showing the percentage of 'Yes' and 'No' values in the 'CA Spot Digging?' column.
+	
+	Parameters:
+		df: Master DataFrame
+		title: Optional plot title
+		save_path: If provided, saves the figure to this path
+		show: If True, calls plt.show() at the end
+		save_svg: If True, saves as SVG in current working directory
+		svg_filename: Custom filename for SVG output
+		
+	Returns:
+		The matplotlib Figure object
+	"""
+	# Clean the dataframe to ensure yes/no conversion to boolean
+	cdf = clean_master_dataframe(df)
+	
+	if "CA Spot Digging?" not in cdf.columns:
+		raise ValueError("'CA Spot Digging?' column not found in DataFrame")
+	
+	# Count Yes and No values (the column is now boolean after cleaning)
+	digging_counts = cdf["CA Spot Digging?"].value_counts()
+	
+	# Map boolean to labels
+	labels = []
+	values = []
+	for val, count in digging_counts.items():
+		if pd.isna(val):
+			continue
+		label = "Yes" if val else "No"
+		labels.append(label)
+		values.append(count)
+	
+	if not values:
+		raise ValueError("No valid data found in 'CA Spot Digging?' column")
+	
+	# Calculate percentages for display
+	total = sum(values)
+	percentages = [v / total * 100 for v in values]
+	
+	# Create pie chart
+	fig, ax = plt.subplots(figsize=(8, 8))
+	
+	# Use blue for Yes and orange for No
+	colors = []
+	for label in labels:
+		if label == "Yes":
+			colors.append("blue")
+		else:
+			colors.append("orange")
+	
+	wedges, texts, autotexts = ax.pie(
+		values,
+		labels=labels,
+		autopct='%1.1f%%',
+		startangle=90,
+		colors=colors,
+		textprops={'fontsize': 12, 'weight': 'bold'},
+	)
+	
+	# Make percentage text white for better contrast
+	for autotext in autotexts:
+		autotext.set_color('white')
+		autotext.set_fontsize(14)
+	
+	# Equal aspect ratio ensures that pie is drawn as a circle
+	ax.axis('equal')
+	
+	if title is None:
+		title = f"CA Spot Digging? Distribution (n={total})"
+	ax.set_title(title, fontsize=14, weight='bold', pad=20)
+	
+	fig.tight_layout()
+	
+	if save_path is not None:
+		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+	
+	if save_svg:
+		base = svg_filename or (title or "ca_spot_digging_pie_chart")
+		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+		if not safe.lower().endswith(".svg"):
+			safe += ".svg"
+		out_path = Path.cwd() / safe
+		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		print(f"Saved SVG to: {out_path}")
+	
+	if show:
+		plt.show()
+	
+	return fig
+
+
+def plot_anxious_behaviors_pie_chart(
+	df: pd.DataFrame,
+	*,
+	title: Optional[str] = None,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> plt.Figure:
+	"""
+	Create a pie chart showing the percentage of 'Yes' and 'No' values in the 'Anxious Behaviors?' column.
+	
+	Parameters:
+		df: Master DataFrame
+		title: Optional plot title
+		save_path: If provided, saves the figure to this path
+		show: If True, calls plt.show() at the end
+		save_svg: If True, saves as SVG in current working directory
+		svg_filename: Custom filename for SVG output
+		
+	Returns:
+		The matplotlib Figure object
+	"""
+	# Clean the dataframe to ensure yes/no conversion to boolean
+	cdf = clean_master_dataframe(df)
+	
+	if "Anxious Behaviors?" not in cdf.columns:
+		raise ValueError("'Anxious Behaviors?' column not found in DataFrame")
+	
+	# Count Yes and No values (the column is now boolean after cleaning)
+	anxious_counts = cdf["Anxious Behaviors?"].value_counts()
+	
+	# Map boolean to labels
+	labels = []
+	values = []
+	for val, count in anxious_counts.items():
+		if pd.isna(val):
+			continue
+		label = "Yes" if val else "No"
+		labels.append(label)
+		values.append(count)
+	
+	if not values:
+		raise ValueError("No valid data found in 'Anxious Behaviors?' column")
+	
+	# Calculate percentages for display
+	total = sum(values)
+	percentages = [v / total * 100 for v in values]
+	
+	# Create pie chart
+	fig, ax = plt.subplots(figsize=(8, 8))
+	
+	# Use blue for Yes and orange for No
+	colors = []
+	for label in labels:
+		if label == "Yes":
+			colors.append("blue")
+		else:
+			colors.append("orange")
+	
+	wedges, texts, autotexts = ax.pie(
+		values,
+		labels=labels,
+		autopct='%1.1f%%',
+		startangle=90,
+		colors=colors,
+		textprops={'fontsize': 12, 'weight': 'bold'},
+	)
+	
+	# Make percentage text white for better contrast
+	for autotext in autotexts:
+		autotext.set_color('white')
+		autotext.set_fontsize(14)
+	
+	# Equal aspect ratio ensures that pie is drawn as a circle
+	ax.axis('equal')
+	
+	if title is None:
+		title = f"Anxious Behaviors? Distribution (n={total})"
+	ax.set_title(title, fontsize=14, weight='bold', pad=20)
+	
+	fig.tight_layout()
+	
+	if save_path is not None:
+		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+	
+	if save_svg:
+		base = svg_filename or (title or "anxious_behaviors_pie_chart")
+		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+		if not safe.lower().endswith(".svg"):
+			safe += ".svg"
+		out_path = Path.cwd() / safe
+		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		print(f"Saved SVG to: {out_path}")
+	
+	if show:
+		plt.show()
+	
+	return fig
+
+
+def plot_all_pie_charts(
+	df: pd.DataFrame,
+	*,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> plt.Figure:
+	"""
+	Create a 2x2 subplot with all four pie charts: Nest Made, Lethargy, CA Spot Digging, and Anxious Behaviors.
+	
+	Parameters:
+		df: Master DataFrame
+		save_path: If provided, saves the figure to this path
+		show: If True, calls plt.show() at the end
+		save_svg: If True, saves as SVG in current working directory
+		svg_filename: Custom filename for SVG output
+		
+	Returns:
+		The matplotlib Figure object
+	"""
+	# Clean the dataframe to ensure yes/no conversion to boolean
+	cdf = clean_master_dataframe(df)
+	
+	# Create 2x2 subplot
+	fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+	fig.suptitle("Behavioral Observations Distribution", fontsize=16, weight='bold', y=0.995)
+	
+	# Define the columns and their positions
+	columns = [
+		("Nest Made?", axes[0, 0]),
+		("Lethargy?", axes[0, 1]),
+		("CA Spot Digging?", axes[1, 0]),
+		("Anxious Behaviors?", axes[1, 1])
+	]
+	
+	for col_name, ax in columns:
+		if col_name not in cdf.columns:
+			ax.text(0.5, 0.5, f"'{col_name}' not found", ha='center', va='center')
+			ax.axis('off')
+			continue
+		
+		# Count Yes and No values
+		counts = cdf[col_name].value_counts()
+		
+		# Map boolean to labels
+		labels = []
+		values = []
+		for val, count in counts.items():
+			if pd.isna(val):
+				continue
+			label = "Yes" if val else "No"
+			labels.append(label)
+			values.append(count)
+		
+		if not values:
+			ax.text(0.5, 0.5, f"No valid data in '{col_name}'", ha='center', va='center')
+			ax.axis('off')
+			continue
+		
+		total = sum(values)
+		
+		# Use blue for Yes and orange for No
+		colors = []
+		for label in labels:
+			if label == "Yes":
+				colors.append("blue")
+			else:
+				colors.append("orange")
+		
+		wedges, texts, autotexts = ax.pie(
+			values,
+			labels=labels,
+			autopct='%1.1f%%',
+			startangle=90,
+			colors=colors,
+			textprops={'fontsize': 11, 'weight': 'bold'},
+		)
+		
+		# Make percentage text white for better contrast
+		for autotext in autotexts:
+			autotext.set_color('white')
+			autotext.set_fontsize(13)
+		
+		# Equal aspect ratio ensures that pie is drawn as a circle
+		ax.axis('equal')
+		
+		# Set title for each subplot
+		ax.set_title(f"{col_name} (n={total})", fontsize=13, weight='bold', pad=10)
+	
+	plt.tight_layout()
+	
+	if save_path is not None:
+		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+	
+	if save_svg:
+		base = svg_filename or "all_behavioral_pie_charts"
+		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+		if not safe.lower().endswith(".svg"):
+			safe += ".svg"
+		out_path = Path.cwd() / safe
+		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		print(f"Saved SVG to: {out_path}")
+	
+	if show:
+		plt.show()
+	
+	return fig
+
+
 def main() -> None:
 	"""Interactive entrypoint: select and load the master CSV, then preview it."""
 	try:
@@ -510,7 +1024,7 @@ def main() -> None:
 	except Exception as e:
 		print(f"\nWarning: failed to build per-ID series: {e}")
 
-	# Plot all four figures: individual mice (total, daily) and sex-averaged (total, daily)
+	# Plot all figures: individual mice (total, daily), sex-averaged (total, daily), and combined pie charts
 	try:
 		# Create figures without saving and without immediately blocking
 		fig_total = plot_total_change_by_id(
@@ -537,6 +1051,11 @@ def main() -> None:
 			save_svg=False,
 			show=False,
 		)
+		fig_all_pies = plot_all_pie_charts(
+			df,
+			save_svg=False,
+			show=False,
+		)
 		# Show all figures together, then continue after windows are closed
 		plt.show()
 
@@ -547,11 +1066,13 @@ def main() -> None:
 			custom_daily_svg = input("Filename for Daily Change plot (individual): ").strip()
 			custom_total_sex_svg = input("Filename for Total Change plot (sex-averaged): ").strip()
 			custom_daily_sex_svg = input("Filename for Daily Change plot (sex-averaged): ").strip()
+			custom_pies_svg = input("Filename for combined behavioral pie charts: ").strip()
 		except Exception:
 			custom_total_svg = ""
 			custom_daily_svg = ""
 			custom_total_sex_svg = ""
 			custom_daily_sex_svg = ""
+			custom_pies_svg = ""
 
 		def _safe_svg_name(base: str) -> str:
 			name = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("-_.") or "plot"
@@ -562,8 +1083,9 @@ def main() -> None:
 		out_daily = Path.cwd() / _safe_svg_name(custom_daily_svg or "daily_change_by_id")
 		out_total_sex = Path.cwd() / _safe_svg_name(custom_total_sex_svg or "total_change_by_sex")
 		out_daily_sex = Path.cwd() / _safe_svg_name(custom_daily_sex_svg or "daily_change_by_sex")
+		out_pies = Path.cwd() / _safe_svg_name(custom_pies_svg or "all_behavioral_pie_charts")
 
-		# Save all four figures
+		# Save all five figures
 		try:
 			fig_total.savefig(str(out_total), format="svg", bbox_inches="tight")
 			print(f"Saved SVG to: {out_total}")
@@ -584,6 +1106,11 @@ def main() -> None:
 			print(f"Saved SVG to: {out_daily_sex}")
 		except Exception as e:
 			print(f"Warning: failed to save Daily Change by Sex SVG: {e}")
+		try:
+			fig_all_pies.savefig(str(out_pies), format="svg", bbox_inches="tight")
+			print(f"Saved SVG to: {out_pies}")
+		except Exception as e:
+			print(f"Warning: failed to save combined pie charts SVG: {e}")
 	except Exception as e:
 		print(f"\nWarning: failed to plot changes: {e}")
 
