@@ -402,6 +402,113 @@ def plot_deviations_grid(
 	return (save_path, fig) if True else save_path
 
 
+def compute_dynamic_thresholds(
+	df: pd.DataFrame,
+	sensor_cols: List[str],
+	z_threshold: float = 4.0
+) -> pd.Series:
+	"""Compute dynamic threshold for each sensor using z-score normalization.
+	
+	For each sensor's deviation column, the threshold is set at:
+		mean + (z_threshold * std)
+	
+	This identifies values that are more than z_threshold standard deviations
+	above the mean deviation, indicating significant contact/lick events.
+	
+	Parameters:
+		df: DataFrame with deviation columns
+		sensor_cols: List of sensor column names (e.g., ['Sensor_1', 'Sensor_2'])
+		z_threshold: Number of standard deviations above mean (default 4.0)
+		
+	Returns:
+		pd.Series indexed by sensor name with threshold values
+		
+	Example:
+		>>> thresholds = compute_dynamic_thresholds(df, ['Sensor_1', 'Sensor_2'], z_threshold=4.0)
+		>>> print(thresholds)
+		Sensor_1    45.2
+		Sensor_2    38.7
+		dtype: float64
+	"""
+	import numpy as np
+	
+	thresholds = {}
+	
+	for sensor_col in sensor_cols:
+		dev_col = f"{sensor_col}_deviation"
+		if dev_col not in df.columns:
+			print(f"Warning: Deviation column '{dev_col}' not found. Skipping {sensor_col}.")
+			thresholds[sensor_col] = None
+			continue
+		
+		# Get deviation values and compute statistics
+		deviations = pd.to_numeric(df[dev_col], errors="coerce")
+		deviations = deviations.dropna()
+		
+		if len(deviations) == 0:
+			print(f"Warning: No valid deviation data for {sensor_col}. Skipping.")
+			thresholds[sensor_col] = None
+			continue
+		
+		# Compute mean and standard deviation
+		mean_dev = float(deviations.mean())
+		std_dev = float(deviations.std())
+		
+		# Threshold = mean + (z_threshold * std)
+		threshold = mean_dev + (z_threshold * std_dev)
+		thresholds[sensor_col] = threshold
+	
+	return pd.Series(thresholds)
+
+
+def detect_events_above_threshold(
+	df: pd.DataFrame,
+	sensor_cols: List[str],
+	thresholds: pd.Series
+) -> pd.DataFrame:
+	"""Detect time points where deviation exceeds the dynamic threshold for each sensor.
+	
+	Creates boolean columns indicating when each sensor's deviation exceeds its threshold.
+	
+	Parameters:
+		df: DataFrame with Time_sec and deviation columns
+		sensor_cols: List of sensor column names
+		thresholds: Series of threshold values per sensor (from compute_dynamic_thresholds)
+		
+	Returns:
+		DataFrame with columns:
+			- Time_sec
+			- For each sensor: {sensor}_event (boolean indicating threshold exceedance)
+			- For each sensor: {sensor}_deviation (original deviation value)
+	"""
+	import numpy as np
+	
+	result = pd.DataFrame()
+	result['Time_sec'] = df['Time_sec']
+	
+	for sensor_col in sensor_cols:
+		dev_col = f"{sensor_col}_deviation"
+		event_col = f"{sensor_col}_event"
+		
+		if dev_col not in df.columns:
+			result[event_col] = False
+			result[dev_col] = np.nan
+			continue
+		
+		threshold = thresholds.get(sensor_col)
+		if threshold is None or not np.isfinite(threshold):
+			result[event_col] = False
+			result[dev_col] = df[dev_col]
+			continue
+		
+		# Mark events where deviation exceeds threshold
+		deviations = pd.to_numeric(df[dev_col], errors="coerce")
+		result[dev_col] = deviations
+		result[event_col] = deviations > threshold
+	
+	return result
+
+
 def compute_y_limits(df: pd.DataFrame, sensor_cols: List[str], pad_ratio: float = 0.05) -> tuple[float, float]:
 	"""Compute common y-axis limits across given sensors with optional padding.
 
@@ -652,6 +759,32 @@ def main() -> None:
 		# Compute common y-limits across all 24 sensors so both grids share the same scale
 		all_sensor_cols = get_sensor_columns(df)
 		common_y_limits = compute_y_limits(df, all_sensor_cols)
+		
+		# Use fixed threshold of 10 for all selected sensors
+		fixed_threshold = 10.0
+		print("\n" + "=" * 60)
+		print(f"FIXED THRESHOLD: {fixed_threshold}")
+		print("=" * 60)
+		thresholds = pd.Series({sensor: fixed_threshold for sensor in selected})
+		for sensor in selected:
+			print(f"{sensor:12s} : {fixed_threshold:8.2f}")
+		print("=" * 60 + "\n")
+		
+		# Detect events above threshold
+		print("Detecting events above threshold for selected sensors...")
+		events_df = detect_events_above_threshold(df, selected, thresholds)
+		
+		# Count events per sensor
+		print("\n" + "=" * 60)
+		print("EVENT COUNTS (deviation > 10)")
+		print("=" * 60)
+		for sensor in selected:
+			event_col = f"{sensor}_event"
+			if event_col in events_df.columns:
+				count = events_df[event_col].sum()
+				print(f"{sensor:12s} : {count:6d} events")
+		print("=" * 60 + "\n")
+		
 		# Show selected grid first (no save yet)
 		plot_selected_sensors_grid(
 			df=df,
