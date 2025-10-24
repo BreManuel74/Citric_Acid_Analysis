@@ -20,6 +20,7 @@ from typing import List, Optional
 
 import pandas as pd
 import matplotlib.pyplot as plt
+import numpy as np
 
 plt.rcParams["font.family"] = "sans-serif"
 plt.rcParams["font.sans-serif"] = ["Arial"]
@@ -509,6 +510,172 @@ def detect_events_above_threshold(
 	return result
 
 
+def compute_inter_lick_intervals(
+	events_df: pd.DataFrame,
+	sensor_cols: List[str]
+) -> dict:
+	"""Compute inter-lick intervals (ILI) for each sensor.
+	
+	For each sensor, finds all time points where events occur (event == True),
+	then computes the time difference between consecutive events.
+	
+	Parameters:
+		events_df: DataFrame from detect_events_above_threshold with Time_sec and {sensor}_event columns
+		sensor_cols: List of sensor column names
+		
+	Returns:
+		Dictionary mapping sensor names to arrays of inter-lick intervals (in seconds).
+		If a sensor has fewer than 2 events, returns an empty array.
+		
+	Example:
+		>>> ili_dict = compute_inter_lick_intervals(events_df, ['Sensor_1', 'Sensor_2'])
+		>>> print(f"Sensor_1 ILIs: {ili_dict['Sensor_1'][:5]}")  # First 5 intervals
+		Sensor_1 ILIs: [0.245, 0.189, 0.312, 0.276, 0.198]
+	"""
+	import numpy as np
+	
+	ili_results = {}
+	
+	for sensor_col in sensor_cols:
+		event_col = f"{sensor_col}_event"
+		
+		if event_col not in events_df.columns:
+			ili_results[sensor_col] = np.array([])
+			continue
+		
+		# Get timestamps where events occurred
+		event_times = events_df.loc[events_df[event_col] == True, 'Time_sec'].values
+		
+		if len(event_times) < 2:
+			# Need at least 2 events to compute an interval
+			ili_results[sensor_col] = np.array([])
+			continue
+		
+		# Compute differences between consecutive event times
+		intervals = np.diff(event_times)
+		ili_results[sensor_col] = intervals
+	
+	return ili_results
+
+
+def compute_lick_bouts(
+	events_df: pd.DataFrame,
+	sensor_cols: List[str],
+	ili_cutoff: float = 0.3
+) -> dict:
+	"""Compute lick bouts for each sensor using an inter-lick interval cutoff.
+	
+	A lick bout is a sequence of consecutive lick events where the time between
+	events (ILI) is less than the cutoff. When ILI >= cutoff, a new bout begins.
+	
+	Parameters:
+		events_df: DataFrame from detect_events_above_threshold with Time_sec and {sensor}_event columns
+		sensor_cols: List of sensor column names
+		ili_cutoff: Maximum ILI (in seconds) to consider events part of the same bout (default 0.3s)
+		
+	Returns:
+		Dictionary mapping sensor names to bout information dictionaries containing:
+			- 'bout_count': Total number of bouts
+			- 'bout_sizes': Array of lick counts per bout
+			- 'bout_durations': Array of bout durations (in seconds)
+			- 'bout_start_times': Array of bout start times (in seconds)
+			- 'bout_end_times': Array of bout end times (in seconds)
+		
+	Example:
+		>>> bouts = compute_lick_bouts(events_df, ['Sensor_1'], ili_cutoff=0.3)
+		>>> print(f"Sensor_1 had {bouts['Sensor_1']['bout_count']} bouts")
+		>>> print(f"Average bout size: {bouts['Sensor_1']['bout_sizes'].mean():.1f} licks")
+	"""
+
+	bout_results = {}
+	
+	for sensor_col in sensor_cols:
+		event_col = f"{sensor_col}_event"
+		
+		if event_col not in events_df.columns:
+			bout_results[sensor_col] = {
+				'bout_count': 0,
+				'bout_sizes': np.array([]),
+				'bout_durations': np.array([]),
+				'bout_start_times': np.array([]),
+				'bout_end_times': np.array([])
+			}
+			continue
+		
+		# Get timestamps where events occurred
+		event_times = events_df.loc[events_df[event_col] == True, 'Time_sec'].values
+		
+		if len(event_times) == 0:
+			bout_results[sensor_col] = {
+				'bout_count': 0,
+				'bout_sizes': np.array([]),
+				'bout_durations': np.array([]),
+				'bout_start_times': np.array([]),
+				'bout_end_times': np.array([])
+			}
+			continue
+		
+		# Single event = single bout of size 1
+		if len(event_times) == 1:
+			bout_results[sensor_col] = {
+				'bout_count': 1,
+				'bout_sizes': np.array([1]),
+				'bout_durations': np.array([0.0]),
+				'bout_start_times': event_times,
+				'bout_end_times': event_times
+			}
+			continue
+		
+		# Compute ILIs
+		intervals = np.diff(event_times)
+		
+		# Identify bout boundaries: wherever ILI >= cutoff, a new bout starts
+		bout_breaks = intervals >= ili_cutoff
+		
+		# Build bouts by iterating through events
+		bout_sizes = []
+		bout_start_times = []
+		bout_end_times = []
+		
+		current_bout_start = event_times[0]
+		current_bout_size = 1
+		
+		for i in range(len(intervals)):
+			if bout_breaks[i]:
+				# End current bout
+				bout_sizes.append(current_bout_size)
+				bout_start_times.append(current_bout_start)
+				bout_end_times.append(event_times[i])
+				
+				# Start new bout
+				current_bout_start = event_times[i + 1]
+				current_bout_size = 1
+			else:
+				# Continue current bout
+				current_bout_size += 1
+		
+		# Don't forget the last bout
+		bout_sizes.append(current_bout_size)
+		bout_start_times.append(current_bout_start)
+		bout_end_times.append(event_times[-1])
+		
+		# Convert to numpy arrays
+		bout_sizes = np.array(bout_sizes)
+		bout_start_times = np.array(bout_start_times)
+		bout_end_times = np.array(bout_end_times)
+		bout_durations = bout_end_times - bout_start_times
+		
+		bout_results[sensor_col] = {
+			'bout_count': len(bout_sizes),
+			'bout_sizes': bout_sizes,
+			'bout_durations': bout_durations,
+			'bout_start_times': bout_start_times,
+			'bout_end_times': bout_end_times
+		}
+	
+	return bout_results
+
+
 def compute_y_limits(df: pd.DataFrame, sensor_cols: List[str], pad_ratio: float = 0.05) -> tuple[float, float]:
 	"""Compute common y-axis limits across given sensors with optional padding.
 
@@ -783,6 +950,52 @@ def main() -> None:
 			if event_col in events_df.columns:
 				count = events_df[event_col].sum()
 				print(f"{sensor:12s} : {count:6d} events")
+		print("=" * 60 + "\n")
+		
+		# Compute inter-lick intervals
+		print("Computing inter-lick intervals for selected sensors...")
+		ili_dict = compute_inter_lick_intervals(events_df, selected)
+		
+		# Display ILI statistics
+		print("\n" + "=" * 60)
+		print("INTER-LICK INTERVAL STATISTICS (seconds)")
+		print("=" * 60)
+		import numpy as np
+		for sensor in selected:
+			intervals = ili_dict.get(sensor, np.array([]))
+			if len(intervals) > 0:
+				mean_ili = np.mean(intervals)
+				std_ili = np.std(intervals)
+				min_ili = np.min(intervals)
+				max_ili = np.max(intervals)
+				print(f"{sensor:12s} : n={len(intervals):4d}, mean={mean_ili:6.3f}s, std={std_ili:6.3f}s, min={min_ili:6.3f}s, max={max_ili:6.3f}s")
+			else:
+				print(f"{sensor:12s} : No intervals (< 2 events)")
+		print("=" * 60 + "\n")
+		
+		# Compute lick bouts using 0.3s cutoff
+		ili_cutoff = 0.3
+		print(f"Computing lick bouts (ILI cutoff = {ili_cutoff}s)...")
+		bout_dict = compute_lick_bouts(events_df, selected, ili_cutoff=ili_cutoff)
+		
+		# Display bout statistics
+		print("\n" + "=" * 60)
+		print(f"LICK BOUT STATISTICS (ILI cutoff = {ili_cutoff}s)")
+		print("=" * 60)
+		for sensor in selected:
+			bout_info = bout_dict.get(sensor, {})
+			bout_count = bout_info.get('bout_count', 0)
+			bout_sizes = bout_info.get('bout_sizes', np.array([]))
+			bout_durations = bout_info.get('bout_durations', np.array([]))
+			
+			if bout_count > 0:
+				mean_size = np.mean(bout_sizes)
+				mean_duration = np.mean(bout_durations)
+				total_licks = np.sum(bout_sizes)
+				print(f"{sensor:12s} : {bout_count:3d} bouts, {int(total_licks):4d} total licks, "
+				      f"mean size={mean_size:5.1f} licks, mean duration={mean_duration:6.3f}s")
+			else:
+				print(f"{sensor:12s} : No bouts detected")
 		print("=" * 60 + "\n")
 		
 		# Show selected grid first (no save yet)
