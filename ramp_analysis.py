@@ -1330,6 +1330,167 @@ def plot_all_pie_charts(
 	return fig
 
 
+def plot_pie_charts_by_ca_percent(
+	df: pd.DataFrame,
+	*,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> plt.Figure:
+	"""
+	Create pie charts for each CA% concentration showing behavioral data averaged across all animals.
+	
+	For each unique CA% level (0%, 1%, 2%, 3%, 4%), creates a 2x2 subplot showing:
+	- Nest Made?
+	- Lethargy?
+	- CA Spot Digging?
+	- Anxious Behaviors?
+	
+	Each CA% level gets its own figure with 4 behavioral pie charts.
+	
+	Parameters:
+		df: Master DataFrame
+		save_path: If provided, saves the figure to this path
+		show: If True, calls plt.show() at the end
+		save_svg: If True, saves as SVG in current working directory
+		svg_filename: Custom filename for SVG output
+		
+	Returns:
+		List of matplotlib Figure objects (one per CA% level)
+	"""
+	# Clean the dataframe
+	cdf = clean_master_dataframe(df)
+	
+	if "CA (%)" not in cdf.columns:
+		raise ValueError("'CA (%)' column not found in DataFrame")
+	
+	# Get unique CA% levels, sorted
+	ca_levels = sorted(cdf["CA (%)"].dropna().unique())
+	
+	# Define behavioral columns
+	behavioral_cols = [
+		"Nest Made?",
+		"Lethargy?",
+		"CA Spot Digging?",
+		"Anxious Behaviors?"
+	]
+	
+	figures = []
+	
+	for ca_level in ca_levels:
+		# Filter data for this CA% level
+		ca_data = cdf[cdf["CA (%)"] == ca_level]
+		
+		# Create 2x2 subplot for this CA% level
+		fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+		fig.suptitle(f"Behavioral Observations at {int(ca_level)}% CA", fontsize=16, weight='bold', y=0.995)
+		
+		# Track total n for this CA% level
+		total_n = len(ca_data)
+		
+		# Position each behavioral column in the 2x2 grid
+		positions = [(0, 0), (0, 1), (1, 0), (1, 1)]
+		
+		for (col_name, (row, col)) in zip(behavioral_cols, positions):
+			ax = axes[row, col]
+			
+			if col_name not in ca_data.columns:
+				ax.text(0.5, 0.5, f"'{col_name}' not found", ha='center', va='center')
+				ax.axis('off')
+				continue
+			
+			# Count Yes and No values for this CA% level
+			counts = ca_data[col_name].value_counts()
+			
+			# Map boolean to labels
+			labels = []
+			values = []
+			for val, count in counts.items():
+				if pd.isna(val):
+					continue
+				label = "Yes" if val else "No"
+				labels.append(label)
+				values.append(count)
+			
+			if not values:
+				ax.text(0.5, 0.5, f"No valid data in '{col_name}'", ha='center', va='center')
+				ax.axis('off')
+				continue
+			
+			# Use blue for Yes and orange for No
+			colors = []
+			for label in labels:
+				if label == "Yes":
+					colors.append("blue")
+				else:
+					colors.append("orange")
+			
+			# Create pie chart
+			wedges, texts, autotexts = ax.pie(
+				values,
+				autopct='%1.1f%%',
+				startangle=90,
+				colors=colors,
+				textprops={'fontsize': 11, 'weight': 'bold'},
+			)
+			
+			# Make percentage text white for better contrast
+			for autotext in autotexts:
+				autotext.set_color('white')
+				autotext.set_fontsize(13)
+			
+			# Equal aspect ratio ensures that pie is drawn as a circle
+			ax.axis('equal')
+			
+			# Set title for each subplot
+			ax.set_title(f"{col_name}", fontsize=13, weight='bold', pad=10)
+		
+		# Create a single common legend at the bottom center
+		legend_labels = ['Yes', 'No']
+		legend_colors = ['blue', 'orange']
+		legend_handles = [plt.Rectangle((0, 0), 1, 1, fc=color) for color in legend_colors]
+		
+		# Add legend below the plots
+		fig.legend(
+			legend_handles,
+			legend_labels,
+			loc='lower center',
+			ncol=2,
+			fontsize=12,
+			frameon=True,
+			title=f'n = {total_n}',
+			title_fontsize=12
+		)
+		
+		# Adjust layout to make room for legend
+		plt.tight_layout(rect=[0, 0.03, 1, 0.96])
+		
+		figures.append(fig)
+	
+	# Save figures if requested
+	if save_path is not None:
+		for i, (fig, ca_level) in enumerate(zip(figures, ca_levels)):
+			ca_save_path = save_path.parent / f"{save_path.stem}_CA{int(ca_level)}{save_path.suffix}"
+			fig.savefig(str(ca_save_path), dpi=200, bbox_inches="tight")
+			print(f"Saved figure for CA {int(ca_level)}% to: {ca_save_path}")
+	
+	if save_svg:
+		for ca_level, fig in zip(ca_levels, figures):
+			base = svg_filename or f"behavioral_pie_charts_CA{int(ca_level)}"
+			safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+			if not safe.lower().endswith(".svg"):
+				safe += ".svg"
+			out_path = Path.cwd() / safe
+			fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+			print(f"Saved SVG to: {out_path}")
+	
+	if show:
+		plt.show()
+	
+	return figures
+
+
 def main() -> None:
 	"""Interactive entrypoint: select and load the master CSV, then preview it."""
 	try:
@@ -1353,7 +1514,7 @@ def main() -> None:
 	except Exception as e:
 		print(f"\nWarning: failed to build per-ID series: {e}")
 
-	# Plot all figures: individual mice (total, daily), sex-averaged (total, daily), combined pie charts, and CA% bar charts
+	# Plot all figures: individual mice (total, daily), sex-averaged (total, daily), combined pie charts, CA% bar charts, and CA%-sorted pie charts
 	try:
 		# Create figures without saving and without immediately blocking
 		fig_total = plot_total_change_by_id(
@@ -1390,6 +1551,11 @@ def main() -> None:
 			save_svg=False,
 			show=False,
 		)
+		fig_ca_pies = plot_pie_charts_by_ca_percent(
+			df,
+			save_svg=False,
+			show=False,
+		)
 		# Show all figures together, then continue after windows are closed
 		plt.show()
 
@@ -1402,6 +1568,7 @@ def main() -> None:
 			custom_daily_sex_svg = input("Filename for Daily Change plot (sex-averaged): ").strip()
 			custom_pies_svg = input("Filename for combined behavioral pie charts: ").strip()
 			custom_ca_bars_svg = input("Filename for CA% bar charts: ").strip()
+			custom_ca_pies_prefix = input("Filename prefix for CA%-sorted pie charts (will add _CA0, _CA1, etc.): ").strip()
 		except Exception:
 			custom_total_svg = ""
 			custom_daily_svg = ""
@@ -1409,6 +1576,7 @@ def main() -> None:
 			custom_daily_sex_svg = ""
 			custom_pies_svg = ""
 			custom_ca_bars_svg = ""
+			custom_ca_pies_prefix = ""
 
 		def _safe_svg_name(base: str) -> str:
 			name = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("-_.") or "plot"
@@ -1422,7 +1590,7 @@ def main() -> None:
 		out_pies = Path.cwd() / _safe_svg_name(custom_pies_svg or "all_behavioral_pie_charts")
 		out_ca_bars = Path.cwd() / _safe_svg_name(custom_ca_bars_svg or "average_weight_change_by_ca")
 
-		# Save all six figures
+		# Save all figures
 		try:
 			fig_total.savefig(str(out_total), format="svg", bbox_inches="tight")
 			print(f"Saved SVG to: {out_total}")
@@ -1453,6 +1621,19 @@ def main() -> None:
 			print(f"Saved SVG to: {out_ca_bars}")
 		except Exception as e:
 			print(f"Warning: failed to save CA% bar charts SVG: {e}")
+		
+		# Save CA%-sorted pie charts
+		try:
+			cdf = clean_master_dataframe(df)
+			ca_levels = sorted(cdf["CA (%)"].dropna().unique())
+			for i, (fig_ca_pie, ca_level) in enumerate(zip(fig_ca_pies, ca_levels)):
+				prefix = custom_ca_pies_prefix or "behavioral_pies"
+				base_name = f"{prefix}_CA{int(ca_level)}"
+				out_ca_pie = Path.cwd() / _safe_svg_name(base_name)
+				fig_ca_pie.savefig(str(out_ca_pie), format="svg", bbox_inches="tight")
+				print(f"Saved SVG to: {out_ca_pie}")
+		except Exception as e:
+			print(f"Warning: failed to save CA%-sorted pie charts SVG: {e}")
 	except Exception as e:
 		print(f"\nWarning: failed to plot changes: {e}")
 
