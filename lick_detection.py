@@ -777,6 +777,422 @@ def plot_bout_weight_correlation(
 	return (save_path, fig) if return_fig else save_path
 
 
+def plot_lick_weight_correlation(
+	events_df: pd.DataFrame,
+	sensor_cols: List[str],
+	sensor_to_weight: dict,
+	*,
+	title: str | None = None,
+	save_path: Path | None = None,
+	show: bool = True,
+	return_fig: bool = False,
+) -> Path | tuple[Optional[Path], plt.Figure]:
+	"""Create a scatter plot showing correlation between total lick counts and bottle weight changes.
+	
+	Parameters:
+		events_df: DataFrame from detect_events_above_threshold with {sensor}_event columns
+		sensor_cols: List of sensor column names
+		sensor_to_weight: Dictionary mapping sensor names to bottle weight changes (grams)
+		title: Optional plot title
+		save_path: If provided, saves the figure to this path
+		show: If True, calls plt.show() at the end
+		return_fig: If True, returns (save_path, figure) tuple instead of just save_path
+		
+	Returns:
+		Path to saved file, or tuple of (Path, Figure) if return_fig=True
+	"""
+	# Extract data for plotting
+	lick_counts = []
+	weight_changes = []
+	sensor_labels = []
+	
+	for sensor in sorted(sensor_to_weight.keys()):
+		weight = sensor_to_weight[sensor]
+		event_col = f"{sensor}_event"
+		
+		if event_col in events_df.columns:
+			lick_count = int(events_df[event_col].sum())
+		else:
+			lick_count = 0
+		
+		lick_counts.append(lick_count)
+		weight_changes.append(weight)
+		sensor_labels.append(sensor)
+	
+	# Convert to numpy arrays for correlation calculation
+	lick_counts_arr = np.array(lick_counts)
+	weight_changes_arr = np.array(weight_changes)
+	
+	# Calculate Pearson correlation coefficient
+	if len(lick_counts_arr) > 1:
+		correlation = np.corrcoef(lick_counts_arr, weight_changes_arr)[0, 1]
+	else:
+		correlation = np.nan
+	
+	# Create scatter plot
+	fig, ax = plt.subplots(figsize=(10, 8))
+	
+	# Plot points
+	ax.scatter(weight_changes, lick_counts, s=100, alpha=0.7, color='forestgreen', edgecolors='black', linewidth=1.5)
+	
+	# Add sensor labels next to each point
+	for i, sensor in enumerate(sensor_labels):
+		# Extract sensor number for cleaner label
+		sensor_num = sensor.split('_')[-1]
+		ax.annotate(sensor_num, (weight_changes[i], lick_counts[i]), 
+				   xytext=(5, 5), textcoords='offset points', fontsize=9, alpha=0.8)
+	
+	# Add best-fit line if we have enough points
+	if len(lick_counts_arr) > 1:
+		z = np.polyfit(weight_changes_arr, lick_counts_arr, 1)
+		p = np.poly1d(z)
+		x_line = np.linspace(min(weight_changes_arr), max(weight_changes_arr), 100)
+		ax.plot(x_line, p(x_line), "r--", alpha=0.6, linewidth=2, label=f'Best fit (r = {correlation:.3f})')
+		ax.legend(loc='best', frameon=True, fontsize=11)
+	
+	# Labels and title
+	ax.set_xlabel('Bottle Weight Change (g)', fontsize=12, weight='bold')
+	ax.set_ylabel('Total Lick Count', fontsize=12, weight='bold')
+	
+	if title is None:
+		if not np.isnan(correlation):
+			title = f'Total Licks vs. Bottle Weight Change\nPearson r = {correlation:.3f}'
+		else:
+			title = 'Total Licks vs. Bottle Weight Change'
+	ax.set_title(title, fontsize=14, weight='bold', pad=15)
+	
+	# Grid for easier reading
+	ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+	
+	# Style adjustments
+	ax.spines['top'].set_visible(False)
+	ax.spines['right'].set_visible(False)
+	ax.tick_params(direction='in', which='both', length=5)
+	
+	fig.tight_layout()
+	
+	# Save if requested
+	if save_path is not None:
+		save_path.parent.mkdir(parents=True, exist_ok=True)
+		fig.savefig(save_path, dpi=200, bbox_inches='tight')
+	
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+	
+	return (save_path, fig) if return_fig else save_path
+
+
+def plot_bout_weightloss_correlation(
+	bout_dict: dict,
+	sensor_to_weight_loss: dict,
+	*,
+	title: str | None = None,
+	save_path: Path | None = None,
+	show: bool = True,
+	return_fig: bool = False,
+) -> Path | tuple[Optional[Path], plt.Figure]:
+	"""Create a scatter plot showing correlation between lick bout counts and total weight loss %.
+	
+	Parameters:
+		bout_dict: Dictionary from compute_lick_bouts() with bout information per sensor
+		sensor_to_weight_loss: Dictionary mapping sensor names to total weight loss % values
+		title: Optional plot title
+		save_path: If provided, saves the figure to this path
+		show: If True, calls plt.show() at the end
+		return_fig: If True, returns (save_path, figure) tuple instead of just save_path
+		
+	Returns:
+		Path to saved file, or tuple of (Path, Figure) if return_fig=True
+	"""
+	# Extract data for plotting
+	bout_counts = []
+	weight_loss_values = []
+	sensor_labels = []
+	
+	for sensor in sorted(sensor_to_weight_loss.keys()):
+		wl = sensor_to_weight_loss[sensor]
+		bout_info = bout_dict.get(sensor, {})
+		bout_count = bout_info.get('bout_count', 0)
+		
+		bout_counts.append(bout_count)
+		weight_loss_values.append(wl)
+		sensor_labels.append(sensor)
+	
+	# Convert to numpy arrays for correlation calculation
+	bout_counts_arr = np.array(bout_counts)
+	weight_loss_arr = np.array(weight_loss_values)
+	
+	# Calculate Pearson correlation coefficient
+	if len(bout_counts_arr) > 1:
+		correlation = np.corrcoef(bout_counts_arr, weight_loss_arr)[0, 1]
+	else:
+		correlation = np.nan
+	
+	# Create scatter plot
+	fig, ax = plt.subplots(figsize=(10, 8))
+	
+	# Plot points
+	ax.scatter(weight_loss_values, bout_counts, s=100, alpha=0.7, color='darkorange', edgecolors='black', linewidth=1.5)
+	
+	# Add sensor labels next to each point
+	for i, sensor in enumerate(sensor_labels):
+		# Extract sensor number for cleaner label
+		sensor_num = sensor.split('_')[-1]
+		ax.annotate(sensor_num, (weight_loss_values[i], bout_counts[i]), 
+				   xytext=(5, 5), textcoords='offset points', fontsize=9, alpha=0.8)
+	
+	# Add best-fit line if we have enough points
+	if len(bout_counts_arr) > 1:
+		z = np.polyfit(weight_loss_arr, bout_counts_arr, 1)
+		p = np.poly1d(z)
+		x_line = np.linspace(min(weight_loss_arr), max(weight_loss_arr), 100)
+		ax.plot(x_line, p(x_line), "r--", alpha=0.6, linewidth=2, label=f'Best fit (r = {correlation:.3f})')
+		ax.legend(loc='best', frameon=True, fontsize=11)
+	
+	# Labels and title
+	ax.set_xlabel('Total Weight Loss (%)', fontsize=12, weight='bold')
+	ax.set_ylabel('Lick Bout Count', fontsize=12, weight='bold')
+	
+	if title is None:
+		if not np.isnan(correlation):
+			title = f'Lick Bouts vs. Total Weight Loss %\nPearson r = {correlation:.3f}'
+		else:
+			title = 'Lick Bouts vs. Total Weight Loss %'
+	ax.set_title(title, fontsize=14, weight='bold', pad=15)
+	
+	# Grid for easier reading
+	ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+	
+	# Style adjustments
+	ax.spines['top'].set_visible(False)
+	ax.spines['right'].set_visible(False)
+	ax.tick_params(direction='in', which='both', length=5)
+	
+	fig.tight_layout()
+	
+	# Save if requested
+	if save_path is not None:
+		save_path.parent.mkdir(parents=True, exist_ok=True)
+		fig.savefig(save_path, dpi=200, bbox_inches='tight')
+	
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+	
+	return (save_path, fig) if return_fig else save_path
+
+
+def plot_lick_weightloss_correlation(
+	events_df: pd.DataFrame,
+	sensor_cols: List[str],
+	sensor_to_weight_loss: dict,
+	*,
+	title: str | None = None,
+	save_path: Path | None = None,
+	show: bool = True,
+	return_fig: bool = False,
+) -> Path | tuple[Optional[Path], plt.Figure]:
+	"""Create a scatter plot showing correlation between total lick counts and total weight loss %.
+	
+	Parameters:
+		events_df: DataFrame from detect_events_above_threshold with {sensor}_event columns
+		sensor_cols: List of sensor column names
+		sensor_to_weight_loss: Dictionary mapping sensor names to total weight loss % values
+		title: Optional plot title
+		save_path: If provided, saves the figure to this path
+		show: If True, calls plt.show() at the end
+		return_fig: If True, returns (save_path, figure) tuple instead of just save_path
+		
+	Returns:
+		Path to saved file, or tuple of (Path, Figure) if return_fig=True
+	"""
+	# Extract data for plotting
+	lick_counts = []
+	weight_loss_values = []
+	sensor_labels = []
+	
+	for sensor in sorted(sensor_to_weight_loss.keys()):
+		wl = sensor_to_weight_loss[sensor]
+		event_col = f"{sensor}_event"
+		
+		if event_col in events_df.columns:
+			lick_count = int(events_df[event_col].sum())
+		else:
+			lick_count = 0
+		
+		lick_counts.append(lick_count)
+		weight_loss_values.append(wl)
+		sensor_labels.append(sensor)
+	
+	# Convert to numpy arrays for correlation calculation
+	lick_counts_arr = np.array(lick_counts)
+	weight_loss_arr = np.array(weight_loss_values)
+	
+	# Calculate Pearson correlation coefficient
+	if len(lick_counts_arr) > 1:
+		correlation = np.corrcoef(lick_counts_arr, weight_loss_arr)[0, 1]
+	else:
+		correlation = np.nan
+	
+	# Create scatter plot
+	fig, ax = plt.subplots(figsize=(10, 8))
+	
+	# Plot points
+	ax.scatter(weight_loss_values, lick_counts, s=100, alpha=0.7, color='purple', edgecolors='black', linewidth=1.5)
+	
+	# Add sensor labels next to each point
+	for i, sensor in enumerate(sensor_labels):
+		# Extract sensor number for cleaner label
+		sensor_num = sensor.split('_')[-1]
+		ax.annotate(sensor_num, (weight_loss_values[i], lick_counts[i]), 
+				   xytext=(5, 5), textcoords='offset points', fontsize=9, alpha=0.8)
+	
+	# Add best-fit line if we have enough points
+	if len(lick_counts_arr) > 1:
+		z = np.polyfit(weight_loss_arr, lick_counts_arr, 1)
+		p = np.poly1d(z)
+		x_line = np.linspace(min(weight_loss_arr), max(weight_loss_arr), 100)
+		ax.plot(x_line, p(x_line), "r--", alpha=0.6, linewidth=2, label=f'Best fit (r = {correlation:.3f})')
+		ax.legend(loc='best', frameon=True, fontsize=11)
+	
+	# Labels and title
+	ax.set_xlabel('Total Weight Loss (%)', fontsize=12, weight='bold')
+	ax.set_ylabel('Total Lick Count', fontsize=12, weight='bold')
+	
+	if title is None:
+		if not np.isnan(correlation):
+			title = f'Total Licks vs. Total Weight Loss %\nPearson r = {correlation:.3f}'
+		else:
+			title = 'Total Licks vs. Total Weight Loss %'
+	ax.set_title(title, fontsize=14, weight='bold', pad=15)
+	
+	# Grid for easier reading
+	ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+	
+	# Style adjustments
+	ax.spines['top'].set_visible(False)
+	ax.spines['right'].set_visible(False)
+	ax.tick_params(direction='in', which='both', length=5)
+	
+	fig.tight_layout()
+	
+	# Save if requested
+	if save_path is not None:
+		save_path.parent.mkdir(parents=True, exist_ok=True)
+		fig.savefig(save_path, dpi=200, bbox_inches='tight')
+	
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+	
+	return (save_path, fig) if return_fig else save_path
+
+
+def plot_weight_weightloss_correlation(
+	sensor_to_weight: dict,
+	sensor_to_weight_loss: dict,
+	*,
+	title: str | None = None,
+	save_path: Path | None = None,
+	show: bool = True,
+	return_fig: bool = False,
+) -> Path | tuple[Optional[Path], plt.Figure]:
+	"""Create a scatter plot showing correlation between bottle weight changes and total weight loss %.
+	
+	Parameters:
+		sensor_to_weight: Dictionary mapping sensor names to bottle weight changes (grams)
+		sensor_to_weight_loss: Dictionary mapping sensor names to total weight loss % values
+		title: Optional plot title
+		save_path: If provided, saves the figure to this path
+		show: If True, calls plt.show() at the end
+		return_fig: If True, returns (save_path, figure) tuple instead of just save_path
+		
+	Returns:
+		Path to saved file, or tuple of (Path, Figure) if return_fig=True
+	"""
+	# Extract data for plotting
+	weight_changes = []
+	weight_loss_values = []
+	sensor_labels = []
+	
+	# Use keys from sensor_to_weight (should match sensor_to_weight_loss)
+	for sensor in sorted(sensor_to_weight.keys()):
+		weight = sensor_to_weight[sensor]
+		wl = sensor_to_weight_loss.get(sensor, 0)
+		
+		weight_changes.append(weight)
+		weight_loss_values.append(wl)
+		sensor_labels.append(sensor)
+	
+	# Convert to numpy arrays for correlation calculation
+	weight_changes_arr = np.array(weight_changes)
+	weight_loss_arr = np.array(weight_loss_values)
+	
+	# Calculate Pearson correlation coefficient
+	if len(weight_changes_arr) > 1:
+		correlation = np.corrcoef(weight_changes_arr, weight_loss_arr)[0, 1]
+	else:
+		correlation = np.nan
+	
+	# Create scatter plot
+	fig, ax = plt.subplots(figsize=(10, 8))
+	
+	# Plot points
+	ax.scatter(weight_changes, weight_loss_values, s=100, alpha=0.7, color='crimson', edgecolors='black', linewidth=1.5)
+	
+	# Add sensor labels next to each point
+	for i, sensor in enumerate(sensor_labels):
+		# Extract sensor number for cleaner label
+		sensor_num = sensor.split('_')[-1]
+		ax.annotate(sensor_num, (weight_changes[i], weight_loss_values[i]), 
+				   xytext=(5, 5), textcoords='offset points', fontsize=9, alpha=0.8)
+	
+	# Add best-fit line if we have enough points
+	if len(weight_changes_arr) > 1:
+		z = np.polyfit(weight_changes_arr, weight_loss_arr, 1)
+		p = np.poly1d(z)
+		x_line = np.linspace(min(weight_changes_arr), max(weight_changes_arr), 100)
+		ax.plot(x_line, p(x_line), "r--", alpha=0.6, linewidth=2, label=f'Best fit (r = {correlation:.3f})')
+		ax.legend(loc='best', frameon=True, fontsize=11)
+	
+	# Labels and title
+	ax.set_xlabel('Bottle Weight Change (g)', fontsize=12, weight='bold')
+	ax.set_ylabel('Total Weight Loss (%)', fontsize=12, weight='bold')
+	
+	if title is None:
+		if not np.isnan(correlation):
+			title = f'Bottle Weight Change vs. Total Weight Loss %\nPearson r = {correlation:.3f}'
+		else:
+			title = 'Bottle Weight Change vs. Total Weight Loss %'
+	ax.set_title(title, fontsize=14, weight='bold', pad=15)
+	
+	# Grid for easier reading
+	ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+	
+	# Style adjustments
+	ax.spines['top'].set_visible(False)
+	ax.spines['right'].set_visible(False)
+	ax.tick_params(direction='in', which='both', length=5)
+	
+	fig.tight_layout()
+	
+	# Save if requested
+	if save_path is not None:
+		save_path.parent.mkdir(parents=True, exist_ok=True)
+		fig.savefig(save_path, dpi=200, bbox_inches='tight')
+	
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+	
+	return (save_path, fig) if return_fig else save_path
+
+
 def compute_y_limits(df: pd.DataFrame, sensor_cols: List[str], pad_ratio: float = 0.05) -> tuple[float, float]:
 	"""Compute common y-axis limits across given sensors with optional padding.
 
@@ -1058,6 +1474,40 @@ def main() -> None:
 			print(f"{sensor:12s} : {weight:8.2f} g")
 		print("=" * 60 + "\n")
 		
+		# Prompt for total weight loss % (12 values matching the 12 selected sensors)
+		def _prompt_for_weight_loss_percent(sensor_list: List[str]) -> List[float]:
+			while True:
+				print(f"\nEnter 12 total weight loss % values corresponding to the sensors in order:")
+				print(f"Sensors: {', '.join(sensor_list)}")
+				entry = input("Enter 12 values separated by commas: ").strip()
+				
+				# Split on commas and strip whitespace
+				raw_values = [tok.strip() for tok in entry.split(",") if tok.strip()]
+				
+				if len(raw_values) != 12:
+					print(f"Please enter exactly 12 values. You provided {len(raw_values)}. Try again.\n")
+					continue
+				
+				try:
+					# Convert to float
+					percentages = [float(val) for val in raw_values]
+					return percentages
+				except ValueError as ve:
+					print(f"Invalid number format: {ve}\nPlease enter numeric values only.\n")
+		
+		weight_loss_percent = _prompt_for_weight_loss_percent(selected)
+		
+		# Create a mapping of sensor to weight loss %
+		sensor_to_weight_loss = {sensor: wlp for sensor, wlp in zip(selected, weight_loss_percent)}
+		
+		# Display the sensor-weight loss % mapping
+		print("\n" + "=" * 60)
+		print("SENSOR TO TOTAL WEIGHT LOSS % MAPPING")
+		print("=" * 60)
+		for sensor, wlp in sensor_to_weight_loss.items():
+			print(f"{sensor:12s} : {wlp:8.2f} %")
+		print("=" * 60 + "\n")
+		
 		grid_title = f"Selected Sensors (12) — {csv_path.name}"
 		# Compute common y-limits across all 24 sensors so both grids share the same scale
 		all_sensor_cols = get_sensor_columns(df)
@@ -1145,6 +1595,52 @@ def main() -> None:
 			show=True,
 		)
 		
+		# Generate correlation plot of total lick counts vs bottle weight changes
+		print("Generating correlation plot: Total Licks vs. Bottle Weight Change...")
+		lick_corr_title = f"Total Licks vs. Bottle Weight Change — {csv_path.name}"
+		plot_lick_weight_correlation(
+			events_df=events_df,
+			sensor_cols=selected,
+			sensor_to_weight=sensor_to_weight,
+			title=lick_corr_title,
+			save_path=None,
+			show=True,
+		)
+		
+		# Generate correlation plot of bout counts vs total weight loss %
+		print("Generating correlation plot: Lick Bouts vs. Total Weight Loss %...")
+		bout_wl_corr_title = f"Lick Bouts vs. Total Weight Loss % — {csv_path.name}"
+		plot_bout_weightloss_correlation(
+			bout_dict=bout_dict,
+			sensor_to_weight_loss=sensor_to_weight_loss,
+			title=bout_wl_corr_title,
+			save_path=None,
+			show=True,
+		)
+		
+		# Generate correlation plot of total lick counts vs total weight loss %
+		print("Generating correlation plot: Total Licks vs. Total Weight Loss %...")
+		lick_wl_corr_title = f"Total Licks vs. Total Weight Loss % — {csv_path.name}"
+		plot_lick_weightloss_correlation(
+			events_df=events_df,
+			sensor_cols=selected,
+			sensor_to_weight_loss=sensor_to_weight_loss,
+			title=lick_wl_corr_title,
+			save_path=None,
+			show=True,
+		)
+		
+		# Generate correlation plot of bottle weight change vs total weight loss %
+		print("Generating correlation plot: Bottle Weight Change vs. Total Weight Loss %...")
+		weight_wl_corr_title = f"Bottle Weight Change vs. Total Weight Loss % — {csv_path.name}"
+		plot_weight_weightloss_correlation(
+			sensor_to_weight=sensor_to_weight,
+			sensor_to_weight_loss=sensor_to_weight_loss,
+			title=weight_wl_corr_title,
+			save_path=None,
+			show=True,
+		)
+		
 		# Show selected grid first (no save yet)
 		plot_selected_sensors_grid(
 			df=df,
@@ -1213,6 +1709,10 @@ def main() -> None:
 		dev_sel_name = input("SVG filename for selected 12 deviations: ").strip()
 		dev_rem_name = input("SVG filename for remaining 12 deviations: ").strip()
 		corr_name = input("SVG filename for bout-weight correlation plot: ").strip()
+		lick_corr_name = input("SVG filename for lick-weight correlation plot: ").strip()
+		bout_wl_corr_name = input("SVG filename for bout-weightloss% correlation plot: ").strip()
+		lick_wl_corr_name = input("SVG filename for lick-weightloss% correlation plot: ").strip()
+		weight_wl_corr_name = input("SVG filename for weight-weightloss% correlation plot: ").strip()
 		# Only ask for single-sensor save name if a single sensor was plotted
 		sing_name = ""
 		if single_sensor_col is not None:
@@ -1297,6 +1797,60 @@ def main() -> None:
 			)
 			fig_corr.savefig(str(_safe_svg(corr_name)), format="svg", bbox_inches="tight")
 			print(f"Saved SVG: {_safe_svg(corr_name)}")
+
+		# Lick count correlation plot
+		if lick_corr_name:
+			_, fig_lick_corr = plot_lick_weight_correlation(
+				events_df=events_df,
+				sensor_cols=selected,
+				sensor_to_weight=sensor_to_weight,
+				title=lick_corr_title,
+				save_path=None,
+				show=False,
+				return_fig=True,
+			)
+			fig_lick_corr.savefig(str(_safe_svg(lick_corr_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(lick_corr_name)}")
+
+		# Bout-weight loss % correlation plot
+		if bout_wl_corr_name:
+			_, fig_bout_wl_corr = plot_bout_weightloss_correlation(
+				bout_dict=bout_dict,
+				sensor_to_weight_loss=sensor_to_weight_loss,
+				title=bout_wl_corr_title,
+				save_path=None,
+				show=False,
+				return_fig=True,
+			)
+			fig_bout_wl_corr.savefig(str(_safe_svg(bout_wl_corr_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(bout_wl_corr_name)}")
+
+		# Lick-weight loss % correlation plot
+		if lick_wl_corr_name:
+			_, fig_lick_wl_corr = plot_lick_weightloss_correlation(
+				events_df=events_df,
+				sensor_cols=selected,
+				sensor_to_weight_loss=sensor_to_weight_loss,
+				title=lick_wl_corr_title,
+				save_path=None,
+				show=False,
+				return_fig=True,
+			)
+			fig_lick_wl_corr.savefig(str(_safe_svg(lick_wl_corr_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(lick_wl_corr_name)}")
+
+		# Weight-weight loss % correlation plot
+		if weight_wl_corr_name:
+			_, fig_weight_wl_corr = plot_weight_weightloss_correlation(
+				sensor_to_weight=sensor_to_weight,
+				sensor_to_weight_loss=sensor_to_weight_loss,
+				title=weight_wl_corr_title,
+				save_path=None,
+				show=False,
+				return_fig=True,
+			)
+			fig_weight_wl_corr.savefig(str(_safe_svg(weight_wl_corr_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(weight_wl_corr_name)}")
 
 		# Single-sensor figure
 		if sing_name and single_sensor_col is not None:
