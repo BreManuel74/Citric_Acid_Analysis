@@ -1332,6 +1332,118 @@ def normalize_sensor_name(sensor_arg: str, df: pd.DataFrame) -> str:
 	return name
 
 
+def load_metadata_csv(csv_path: Path) -> pd.DataFrame:
+	"""Load the metadata CSV containing sensor mappings, weights, and dates.
+	
+	Expected columns:
+		- date: date string (e.g., '10/22/25')
+		- CA_%: citric acid percentage
+		- animal_ID: animal identifier
+		- BNC_number: BNC connector number
+		- selected_sensors: sensor number
+		- bottle_weight_change: weight change in grams
+		- total_weight_change: total weight change (for weight loss %)
+		- fecal_count: fecal pellet count
+	
+	Returns:
+		DataFrame with cleaned column names (stripped whitespace)
+	"""
+	if not csv_path.exists():
+		raise FileNotFoundError(f"Metadata CSV not found: {csv_path}")
+	
+	# Read CSV and strip whitespace from column names
+	df = pd.read_csv(csv_path)
+	df.columns = df.columns.str.strip()
+	
+	# Strip whitespace from date column if it exists
+	if 'date' in df.columns:
+		df['date'] = df['date'].astype(str).str.strip()
+	
+	return df
+
+
+def get_available_dates(metadata_df: pd.DataFrame) -> List[str]:
+	"""Get sorted list of unique dates from metadata DataFrame."""
+	if 'date' not in metadata_df.columns:
+		raise ValueError("Metadata CSV must have a 'date' column")
+	
+	dates = sorted(metadata_df['date'].unique())
+	return dates
+
+
+def select_date_interactive(metadata_df: pd.DataFrame) -> str:
+	"""Prompt user to select a date from available dates in metadata.
+	
+	Returns:
+		Selected date string
+	"""
+	available_dates = get_available_dates(metadata_df)
+	
+	print("\n" + "=" * 60)
+	print("AVAILABLE DATES")
+	print("=" * 60)
+	for idx, date in enumerate(available_dates, 1):
+		# Count how many entries for this date
+		count = len(metadata_df[metadata_df['date'] == date])
+		print(f"{idx}. {date} ({count} entries)")
+	print("=" * 60 + "\n")
+	
+	while True:
+		choice = input(f"Select date (1-{len(available_dates)}): ").strip()
+		try:
+			idx = int(choice)
+			if 1 <= idx <= len(available_dates):
+				selected_date = available_dates[idx - 1]
+				print(f"Selected date: {selected_date}\n")
+				return selected_date
+			else:
+				print(f"Please enter a number between 1 and {len(available_dates)}")
+		except ValueError:
+			print("Please enter a valid number")
+
+
+def extract_sensor_data_for_date(metadata_df: pd.DataFrame, date: str) -> tuple[List[str], dict, dict]:
+	"""Extract sensor mappings for a specific date from metadata.
+	
+	Parameters:
+		metadata_df: DataFrame with metadata
+		date: Date string to filter by
+		
+	Returns:
+		Tuple of:
+			- selected_sensors: List of sensor column names (e.g., ['Sensor_17', 'Sensor_16', ...])
+			- sensor_to_weight: Dict mapping sensor name to bottle weight change (g)
+			- sensor_to_weight_loss: Dict mapping sensor name to total weight loss %
+	"""
+	# Filter to selected date
+	date_data = metadata_df[metadata_df['date'] == date].copy()
+	
+	if len(date_data) == 0:
+		raise ValueError(f"No data found for date: {date}")
+	
+	# Ensure we have exactly 12 entries
+	if len(date_data) != 12:
+		print(f"Warning: Expected 12 entries for date {date}, but found {len(date_data)}")
+	
+	# Extract sensor numbers and create sensor column names
+	selected_sensors = []
+	sensor_to_weight = {}
+	sensor_to_weight_loss = {}
+	
+	for _, row in date_data.iterrows():
+		sensor_num = int(row['selected_sensors'])
+		sensor_name = f"Sensor_{sensor_num}"
+		
+		selected_sensors.append(sensor_name)
+		sensor_to_weight[sensor_name] = float(row['bottle_weight_change'])
+		
+		# Calculate weight loss % from total_weight_change
+		# Assuming total_weight_change is already a percentage or needs conversion
+		sensor_to_weight_loss[sensor_name] = float(row['total_weight_change'])
+	
+	return selected_sensors, sensor_to_weight, sensor_to_weight_loss
+
+
 def main() -> None:
 	args = parse_args()
 
@@ -1416,7 +1528,63 @@ def main() -> None:
 	except Exception as e:
 		print(str(e))
 
-	# Prompt for 12 sensors to plot in a 2x6 grid
+	# Load metadata CSV and select date
+	print("\n" + "=" * 60)
+	print("METADATA CSV LOADING")
+	print("=" * 60)
+	
+	# Open file picker for metadata CSV
+	print("Opening file picker for metadata CSV (or press Cancel to skip)...")
+	metadata_path = select_csv_via_tkinter(initial_dir=csv_path.parent.parent)
+	
+	if metadata_path is None:
+		# If cancelled, ask if they want to enter path manually or skip
+		entry = input("No file selected. Enter path manually or leave blank to skip metadata and enter sensors manually: ").strip()
+		if entry:
+			candidate = Path(entry)
+			if candidate.exists():
+				metadata_path = candidate
+			else:
+				# Try relative to workspace root
+				workspace_candidate = csv_path.parent.parent / entry
+				if workspace_candidate.exists():
+					metadata_path = workspace_candidate
+				else:
+					print(f"File not found: {candidate}. Skipping metadata CSV.\n")
+		else:
+			print("Skipping metadata CSV. You will enter sensors and weights manually.\n")
+	
+	# Initialize variables
+	selected = None
+	sensor_to_weight = None
+	sensor_to_weight_loss = None
+	
+	if metadata_path is not None:
+		# Load metadata and select date
+		try:
+			metadata_df = load_metadata_csv(metadata_path)
+			selected_date = select_date_interactive(metadata_df)
+			selected, sensor_to_weight, sensor_to_weight_loss = extract_sensor_data_for_date(metadata_df, selected_date)
+			
+			# Display the loaded data
+			print("\n" + "=" * 60)
+			print(f"LOADED DATA FOR {selected_date}")
+			print("=" * 60)
+			print(f"Selected sensors: {', '.join(selected)}")
+			print("\nSENSOR TO BOTTLE WEIGHT CHANGE MAPPING:")
+			for sensor, weight in sensor_to_weight.items():
+				print(f"{sensor:12s} : {weight:8.2f} g")
+			print("\nSENSOR TO TOTAL WEIGHT LOSS % MAPPING:")
+			for sensor, weight_loss in sensor_to_weight_loss.items():
+				print(f"{sensor:12s} : {weight_loss:8.2f} %")
+			print("=" * 60 + "\n")
+			
+		except Exception as e:
+			print(f"Error loading metadata: {e}")
+			print("Falling back to manual input.\n")
+			metadata_path = None
+
+	# Prompt for 12 sensors to plot in a 2x6 grid (only if metadata wasn't loaded)
 	def _prompt_for_sensor_list(df: pd.DataFrame, count: int = 12) -> List[str]:
 		while True:
 			entry = input(
@@ -1438,75 +1606,81 @@ def main() -> None:
 				print(f"{ve}\nPlease correct the list and try again.\n")
 
 	try:
-		selected = _prompt_for_sensor_list(df, count=12)
+		if metadata_path is None:
+			# Manual input path
+			selected = _prompt_for_sensor_list(df, count=12)
+			
+			# Prompt for bottle weight changes (12 values matching the 12 selected sensors)
+			def _prompt_for_bottle_weights(sensor_list: List[str]) -> List[float]:
+				while True:
+					print(f"\nEnter 12 bottle weight change values (in grams) corresponding to the sensors in order:")
+					print(f"Sensors: {', '.join(sensor_list)}")
+					entry = input("Enter 12 values separated by commas: ").strip()
+					
+					# Split on commas and strip whitespace
+					raw_values = [tok.strip() for tok in entry.split(",") if tok.strip()]
+					
+					if len(raw_values) != 12:
+						print(f"Please enter exactly 12 values. You provided {len(raw_values)}. Try again.\n")
+						continue
+					
+					try:
+						# Convert to float
+						weights = [float(val) for val in raw_values]
+						return weights
+					except ValueError as ve:
+						print(f"Invalid number format: {ve}\nPlease enter numeric values only.\n")
+			
+			bottle_weight_change = _prompt_for_bottle_weights(selected)
+			
+			# Create a mapping of sensor to bottle weight change
+			sensor_to_weight = {sensor: weight for sensor, weight in zip(selected, bottle_weight_change)}
+			
+			# Display the sensor-weight mapping
+			print("\n" + "=" * 60)
+			print("SENSOR TO BOTTLE WEIGHT CHANGE MAPPING")
+			print("=" * 60)
+			for sensor, weight in sensor_to_weight.items():
+				print(f"{sensor:12s} : {weight:8.2f} g")
+			print("=" * 60 + "\n")
+			
+			# Prompt for total weight loss % (12 values matching the 12 selected sensors)
+			def _prompt_for_weight_loss_percent(sensor_list: List[str]) -> List[float]:
+				while True:
+					print(f"\nEnter 12 total weight loss % values corresponding to the sensors in order:")
+					print(f"Sensors: {', '.join(sensor_list)}")
+					entry = input("Enter 12 values separated by commas: ").strip()
+					
+					# Split on commas and strip whitespace
+					raw_values = [tok.strip() for tok in entry.split(",") if tok.strip()]
+					
+					if len(raw_values) != 12:
+						print(f"Please enter exactly 12 values. You provided {len(raw_values)}. Try again.\n")
+						continue
+					
+					try:
+						# Convert to float
+						percentages = [float(val) for val in raw_values]
+						return percentages
+					except ValueError as ve:
+						print(f"Invalid number format: {ve}\nPlease enter numeric values only.\n")
+			
+			weight_loss_percent = _prompt_for_weight_loss_percent(selected)
+			
+			# Create a mapping of sensor to weight loss %
+			sensor_to_weight_loss = {sensor: wlp for sensor, wlp in zip(selected, weight_loss_percent)}
+			
+			# Display the sensor-weight loss % mapping
+			print("\n" + "=" * 60)
+			print("SENSOR TO TOTAL WEIGHT LOSS % MAPPING")
+			print("=" * 60)
+			for sensor, wlp in sensor_to_weight_loss.items():
+				print(f"{sensor:12s} : {wlp:8.2f} %")
+			print("=" * 60 + "\n")
 		
-		# Prompt for bottle weight changes (12 values matching the 12 selected sensors)
-		def _prompt_for_bottle_weights(sensor_list: List[str]) -> List[float]:
-			while True:
-				print(f"\nEnter 12 bottle weight change values (in grams) corresponding to the sensors in order:")
-				print(f"Sensors: {', '.join(sensor_list)}")
-				entry = input("Enter 12 values separated by commas: ").strip()
-				
-				# Split on commas and strip whitespace
-				raw_values = [tok.strip() for tok in entry.split(",") if tok.strip()]
-				
-				if len(raw_values) != 12:
-					print(f"Please enter exactly 12 values. You provided {len(raw_values)}. Try again.\n")
-					continue
-				
-				try:
-					# Convert to float
-					weights = [float(val) for val in raw_values]
-					return weights
-				except ValueError as ve:
-					print(f"Invalid number format: {ve}\nPlease enter numeric values only.\n")
-		
-		bottle_weight_change = _prompt_for_bottle_weights(selected)
-		
-		# Create a mapping of sensor to bottle weight change
-		sensor_to_weight = {sensor: weight for sensor, weight in zip(selected, bottle_weight_change)}
-		
-		# Display the sensor-weight mapping
-		print("\n" + "=" * 60)
-		print("SENSOR TO BOTTLE WEIGHT CHANGE MAPPING")
-		print("=" * 60)
-		for sensor, weight in sensor_to_weight.items():
-			print(f"{sensor:12s} : {weight:8.2f} g")
-		print("=" * 60 + "\n")
-		
-		# Prompt for total weight loss % (12 values matching the 12 selected sensors)
-		def _prompt_for_weight_loss_percent(sensor_list: List[str]) -> List[float]:
-			while True:
-				print(f"\nEnter 12 total weight loss % values corresponding to the sensors in order:")
-				print(f"Sensors: {', '.join(sensor_list)}")
-				entry = input("Enter 12 values separated by commas: ").strip()
-				
-				# Split on commas and strip whitespace
-				raw_values = [tok.strip() for tok in entry.split(",") if tok.strip()]
-				
-				if len(raw_values) != 12:
-					print(f"Please enter exactly 12 values. You provided {len(raw_values)}. Try again.\n")
-					continue
-				
-				try:
-					# Convert to float
-					percentages = [float(val) for val in raw_values]
-					return percentages
-				except ValueError as ve:
-					print(f"Invalid number format: {ve}\nPlease enter numeric values only.\n")
-		
-		weight_loss_percent = _prompt_for_weight_loss_percent(selected)
-		
-		# Create a mapping of sensor to weight loss %
-		sensor_to_weight_loss = {sensor: wlp for sensor, wlp in zip(selected, weight_loss_percent)}
-		
-		# Display the sensor-weight loss % mapping
-		print("\n" + "=" * 60)
-		print("SENSOR TO TOTAL WEIGHT LOSS % MAPPING")
-		print("=" * 60)
-		for sensor, wlp in sensor_to_weight_loss.items():
-			print(f"{sensor:12s} : {wlp:8.2f} %")
-		print("=" * 60 + "\n")
+		# Ensure we have all required data before proceeding
+		if selected is None or sensor_to_weight is None or sensor_to_weight_loss is None:
+			raise ValueError("Missing sensor selection or weight data. Cannot proceed.")
 		
 		grid_title = f"Selected Sensors (12) — {csv_path.name}"
 		# Compute common y-limits across all 24 sensors so both grids share the same scale
