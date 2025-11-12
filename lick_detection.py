@@ -1444,6 +1444,220 @@ def extract_sensor_data_for_date(metadata_df: pd.DataFrame, date: str) -> tuple[
 	return selected_sensors, sensor_to_weight, sensor_to_weight_loss
 
 
+def save_lick_bout_data(
+	csv_path: Path,
+	selected_sensors: List[str],
+	events_df: pd.DataFrame,
+	bout_dict: dict,
+	ili_dict: dict,
+	sensor_to_weight: dict,
+	sensor_to_weight_loss: dict,
+	thresholds: pd.Series,
+	selected_date: str = None,
+	save_path: Path = None
+) -> Path:
+	"""Save comprehensive lick and bout analysis data to a text file.
+	
+	Parameters:
+		csv_path: Path to the original capacitive CSV
+		selected_sensors: List of selected sensor names
+		events_df: DataFrame with event detection results
+		bout_dict: Dictionary with bout analysis results
+		ili_dict: Dictionary with inter-lick interval data
+		sensor_to_weight: Dictionary mapping sensors to bottle weight changes
+		sensor_to_weight_loss: Dictionary mapping sensors to total weight loss %
+		thresholds: Series of dynamic thresholds per sensor
+		selected_date: Optional date string if loaded from metadata
+		save_path: Optional custom save path
+		
+	Returns:
+		Path to the saved text file
+	"""
+	if save_path is None:
+		# Generate filename based on capacitive CSV name
+		base_name = csv_path.stem
+		if selected_date:
+			save_path = csv_path.parent / f"{base_name}_{selected_date.replace('/', '-')}_lick_bout_analysis.txt"
+		else:
+			save_path = csv_path.parent / f"{base_name}_lick_bout_analysis.txt"
+	
+	with open(save_path, 'w', encoding='utf-8') as f:
+		f.write("=" * 80 + "\n")
+		f.write("LICK AND BOUT ANALYSIS REPORT\n")
+		f.write("=" * 80 + "\n\n")
+		
+		# Header information
+		f.write(f"Analysis Date: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+		f.write(f"Capacitive Data File: {csv_path.name}\n")
+		if selected_date:
+			f.write(f"Selected Date from Metadata: {selected_date}\n")
+		f.write(f"Number of Selected Sensors: {len(selected_sensors)}\n")
+		f.write(f"Analysis Duration: {events_df['Time_sec'].max():.1f} seconds ({events_df['Time_sec'].max()/60:.1f} minutes)\n")
+		f.write("\n")
+		
+		# Selected sensors and thresholds
+		f.write("SELECTED SENSORS AND DYNAMIC THRESHOLDS\n")
+		f.write("-" * 50 + "\n")
+		f.write(f"{'Sensor':<12} {'Threshold':<12} {'Weight (g)':<12} {'Weight Loss %':<15}\n")
+		f.write("-" * 50 + "\n")
+		for sensor in selected_sensors:
+			threshold = thresholds.get(sensor, 'N/A')
+			weight = sensor_to_weight.get(sensor, 'N/A')
+			weight_loss = sensor_to_weight_loss.get(sensor, 'N/A')
+			f.write(f"{sensor:<12} {threshold:<12.2f} {weight:<12.2f} {weight_loss:<15.2f}\n")
+		f.write("\n")
+		
+		# Summary statistics
+		f.write("SUMMARY STATISTICS\n")
+		f.write("-" * 50 + "\n")
+		total_licks = 0
+		total_bouts = 0
+		total_bout_licks = 0
+		
+		for sensor in selected_sensors:
+			# Count total licks
+			event_col = f"{sensor}_event"
+			if event_col in events_df.columns:
+				sensor_licks = events_df[event_col].sum()
+				total_licks += sensor_licks
+			
+			# Count total bouts and bout licks
+			if sensor in bout_dict:
+				sensor_bouts = bout_dict[sensor]['bout_count']
+				sensor_bout_licks = bout_dict[sensor]['bout_sizes'].sum() if len(bout_dict[sensor]['bout_sizes']) > 0 else 0
+				total_bouts += sensor_bouts
+				total_bout_licks += sensor_bout_licks
+		
+		f.write(f"Total Lick Events: {total_licks}\n")
+		f.write(f"Total Lick Bouts: {total_bouts}\n")
+		f.write(f"Total Licks in Bouts: {total_bout_licks}\n")
+		f.write(f"Average Licks per Bout: {total_bout_licks/total_bouts if total_bouts > 0 else 0:.2f}\n")
+		f.write("\n")
+		
+		# Detailed sensor-by-sensor analysis
+		f.write("DETAILED SENSOR ANALYSIS\n")
+		f.write("=" * 80 + "\n\n")
+		
+		for sensor in selected_sensors:
+			f.write(f"SENSOR: {sensor}\n")
+			f.write("-" * 30 + "\n")
+			
+			# Lick events
+			event_col = f"{sensor}_event"
+			if event_col in events_df.columns:
+				sensor_licks = events_df[event_col].sum()
+				f.write(f"Total Lick Events: {sensor_licks}\n")
+				
+				# Get event times
+				event_times = events_df[events_df[event_col]]['Time_sec'].values
+				if len(event_times) > 0:
+					f.write(f"First Lick Time: {event_times[0]:.2f} seconds\n")
+					f.write(f"Last Lick Time: {event_times[-1]:.2f} seconds\n")
+					f.write(f"Licking Duration: {event_times[-1] - event_times[0]:.2f} seconds\n")
+			else:
+				sensor_licks = 0
+				f.write("No lick events detected\n")
+			
+			# Inter-lick intervals
+			if sensor in ili_dict and len(ili_dict[sensor]) > 0:
+				ilis = ili_dict[sensor]
+				f.write(f"Inter-Lick Intervals: {len(ilis)} intervals\n")
+				f.write(f"  Mean ILI: {np.mean(ilis):.3f} seconds\n")
+				f.write(f"  Median ILI: {np.median(ilis):.3f} seconds\n")
+				f.write(f"  Min ILI: {np.min(ilis):.3f} seconds\n")
+				f.write(f"  Max ILI: {np.max(ilis):.3f} seconds\n")
+				f.write(f"  Std ILI: {np.std(ilis):.3f} seconds\n")
+			else:
+				f.write("No inter-lick intervals (insufficient licks)\n")
+			
+			# Bout analysis
+			if sensor in bout_dict:
+				bout_data = bout_dict[sensor]
+				f.write(f"Lick Bouts: {bout_data['bout_count']}\n")
+				
+				if bout_data['bout_count'] > 0:
+					bout_sizes = bout_data['bout_sizes']
+					bout_durations = bout_data['bout_durations']
+					
+					f.write(f"  Total Licks in Bouts: {bout_sizes.sum()}\n")
+					f.write(f"  Mean Bout Size: {np.mean(bout_sizes):.2f} licks\n")
+					f.write(f"  Median Bout Size: {np.median(bout_sizes):.2f} licks\n")
+					f.write(f"  Min Bout Size: {np.min(bout_sizes)} licks\n")
+					f.write(f"  Max Bout Size: {np.max(bout_sizes)} licks\n")
+					f.write(f"  Mean Bout Duration: {np.mean(bout_durations):.2f} seconds\n")
+					f.write(f"  Median Bout Duration: {np.median(bout_durations):.2f} seconds\n")
+					f.write(f"  Min Bout Duration: {np.min(bout_durations):.2f} seconds\n")
+					f.write(f"  Max Bout Duration: {np.max(bout_durations):.2f} seconds\n")
+					
+					# List individual bouts
+					f.write(f"  Individual Bouts:\n")
+					for i, (size, duration, start_time, end_time) in enumerate(zip(
+						bout_sizes, bout_durations, bout_data['bout_start_times'], bout_data['bout_end_times']
+					)):
+						f.write(f"    Bout {i+1}: {size} licks, {duration:.2f}s duration, {start_time:.2f}-{end_time:.2f}s\n")
+			else:
+				f.write("No bout data available\n")
+			
+			# Weight correlations
+			weight = sensor_to_weight.get(sensor, None)
+			weight_loss = sensor_to_weight_loss.get(sensor, None)
+			if weight is not None:
+				f.write(f"Bottle Weight Change: {weight:.2f} g\n")
+			if weight_loss is not None:
+				f.write(f"Total Weight Loss: {weight_loss:.2f} %\n")
+			
+			f.write("\n")
+		
+		# Correlation summary
+		if len(selected_sensors) > 1:
+			f.write("CORRELATION ANALYSIS\n")
+			f.write("-" * 50 + "\n")
+			
+			# Extract data for correlations
+			lick_counts = []
+			bout_counts = []
+			weights = []
+			weight_losses = []
+			
+			for sensor in selected_sensors:
+				# Lick counts
+				event_col = f"{sensor}_event"
+				if event_col in events_df.columns:
+					lick_counts.append(events_df[event_col].sum())
+				else:
+					lick_counts.append(0)
+				
+				# Bout counts
+				if sensor in bout_dict:
+					bout_counts.append(bout_dict[sensor]['bout_count'])
+				else:
+					bout_counts.append(0)
+				
+				# Weights
+				weights.append(sensor_to_weight.get(sensor, 0))
+				weight_losses.append(sensor_to_weight_loss.get(sensor, 0))
+			
+			# Calculate correlations
+			lick_weight_corr = np.corrcoef(lick_counts, weights)[0, 1] if len(lick_counts) > 1 else np.nan
+			bout_weight_corr = np.corrcoef(bout_counts, weights)[0, 1] if len(bout_counts) > 1 else np.nan
+			lick_weightloss_corr = np.corrcoef(lick_counts, weight_losses)[0, 1] if len(lick_counts) > 1 else np.nan
+			bout_weightloss_corr = np.corrcoef(bout_counts, weight_losses)[0, 1] if len(bout_counts) > 1 else np.nan
+			weight_weightloss_corr = np.corrcoef(weights, weight_losses)[0, 1] if len(weights) > 1 else np.nan
+			
+			f.write(f"Lick Count vs Bottle Weight Change: r = {lick_weight_corr:.3f}\n")
+			f.write(f"Bout Count vs Bottle Weight Change: r = {bout_weight_corr:.3f}\n")
+			f.write(f"Lick Count vs Total Weight Loss %: r = {lick_weightloss_corr:.3f}\n")
+			f.write(f"Bout Count vs Total Weight Loss %: r = {bout_weightloss_corr:.3f}\n")
+			f.write(f"Bottle Weight Change vs Total Weight Loss %: r = {weight_weightloss_corr:.3f}\n")
+			f.write("\n")
+		
+		f.write("=" * 80 + "\n")
+		f.write("END OF REPORT\n")
+		f.write("=" * 80 + "\n")
+	
+	return save_path
+
+
 def main() -> None:
 	args = parse_args()
 
@@ -1558,6 +1772,7 @@ def main() -> None:
 	selected = None
 	sensor_to_weight = None
 	sensor_to_weight_loss = None
+	selected_date = None
 	
 	if metadata_path is not None:
 		# Load metadata and select date
@@ -1814,6 +2029,28 @@ def main() -> None:
 			save_path=None,
 			show=True,
 		)
+		
+		# Save comprehensive lick and bout analysis to text file
+		print("\n" + "=" * 60)
+		print("SAVING ANALYSIS DATA")
+		print("=" * 60)
+		try:
+			# Save the analysis data
+			saved_path = save_lick_bout_data(
+				csv_path=csv_path,
+				selected_sensors=selected,
+				events_df=events_df,
+				bout_dict=bout_dict,
+				ili_dict=ili_dict,
+				sensor_to_weight=sensor_to_weight,
+				sensor_to_weight_loss=sensor_to_weight_loss,
+				thresholds=thresholds,
+				selected_date=selected_date
+			)
+			print(f"✓ Analysis data saved to: {saved_path}")
+		except Exception as e:
+			print(f"Error saving analysis data: {e}")
+		print("=" * 60 + "\n")
 		
 		# Show selected grid first (no save yet)
 		plot_selected_sensors_grid(
