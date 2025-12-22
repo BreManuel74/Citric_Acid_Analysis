@@ -66,6 +66,328 @@ def load_capacitive_csv(csv_path: Path) -> pd.DataFrame:
 	return df
 
 
+def sensors_only_mode(csv_path: Path, df: pd.DataFrame, sensor_cols: List[str], args) -> None:
+	"""Run the sensor visualization mode without weight analysis."""
+	# Compute and display the mode for each sensor
+	print("\n" + "=" * 60)
+	print("MODE VALUES FOR EACH SENSOR")
+	print("=" * 60)
+	sensor_modes = compute_sensor_modes(df, sensor_cols)
+	for sensor, mode_val in sensor_modes.items():
+		print(f"{sensor:12s} : {mode_val}")
+	print("=" * 60 + "\n")
+
+	# Compute mode deviations
+	print("Computing mode deviations for each sensor...")
+	df = compute_mode_deviations(df, sensor_cols, sensor_modes)
+	print(f"Added deviation columns: {', '.join([f'{col}_deviation' for col in sensor_cols[:3]])}...\n")
+
+	# Plot all sensors overview
+	title = f"Capacitive Sensors over Time — {csv_path.name}"
+	plot_sensors_over_time(
+		df=df,
+		sensor_cols=sensor_cols,
+		title=title,
+		save_path=None,
+		show=True,
+	)
+
+	# Plot timestamp series
+	try:
+		ts_title = f"Timestamps over Samples — {csv_path.name}"
+		plot_timestamps_series(
+			df=df,
+			col_name="Arduino_Timestamp",
+			title=ts_title,
+			save_path=None,
+			show=True,
+		)
+	except ValueError as e:
+		print(str(e))
+
+	# Single-sensor interactive prompt
+	single_sensor_col = None
+	single_title = None
+	try:
+		entry = input("Enter a single sensor to plot (e.g., 19 or Sensor_19). Leave blank to skip: ").strip()
+		if entry:
+			resolved = normalize_sensor_name(entry, df)
+			single_sensor_col = resolved
+			single_title = f"{resolved} over Time — {csv_path.name}"
+			plot_single_sensor_over_time(
+				df=df,
+				sensor_col=resolved,
+				title=single_title,
+				save_path=None,
+				show=True,
+			)
+	except Exception as e:
+		print(str(e))
+
+	# Prompt for sensors to plot in grids
+	def _prompt_for_sensor_list(df: pd.DataFrame, count: int = 12) -> List[str]:
+		while True:
+			entry = input(
+				f"Enter {count} sensors as a comma-separated list (e.g., 1, 3, 7, Sensor_10, ...) or 'skip' to skip: "
+			).strip()
+			
+			if entry.lower() == 'skip':
+				return None
+			
+			# Split on commas and strip whitespace; ignore empty tokens
+			raw_items = [tok.strip() for tok in entry.split(",") if tok.strip()]
+			if len(raw_items) != count:
+				print(f"Please enter exactly {count} items. You provided {len(raw_items)}. Try again.\n")
+				continue
+			try:
+				names = [normalize_sensor_name(tok, df) for tok in raw_items]
+				# Enforce uniqueness
+				if len(set(names)) != count:
+					print("Each sensor must be unique. Duplicates detected. Please try again.\n")
+					continue
+				return names
+			except ValueError as ve:
+				print(f"{ve}\nPlease correct the list and try again.\n")
+
+	# Ask for 12 sensors for grid plots
+	print("\n" + "=" * 60)
+	print("SENSOR GRID PLOTS")
+	print("=" * 60)
+	selected = _prompt_for_sensor_list(df, count=12)
+	
+	if selected is not None:
+		# Compute common y-limits across all sensors for consistent scaling
+		all_sensor_cols = get_sensor_columns(df)
+		common_y_limits = compute_y_limits(df, all_sensor_cols)
+		
+		# Plot selected sensors grid
+		grid_title = f"Selected Sensors (12) — {csv_path.name}"
+		plot_selected_sensors_grid(
+			df=df,
+			sensor_cols=selected,
+			title=grid_title,
+			save_path=None,
+			show=True,
+			y_limits=common_y_limits,
+		)
+
+		# Plot remaining sensors grid if there are exactly 12 remaining
+		remaining = [c for c in all_sensor_cols if c not in set(selected)]
+		if len(remaining) == 12:
+			rem_title = f"Remaining Sensors (12) — {csv_path.name}"
+			plot_selected_sensors_grid(
+				df=df,
+				sensor_cols=remaining,
+				title=rem_title,
+				save_path=None,
+				show=True,
+				y_limits=common_y_limits,
+			)
+		else:
+			print(f"Skipping remaining-sensors grid: expected 12 remaining, found {len(remaining)}.")
+
+		# Plot deviations for selected sensors
+		print("\nPlotting deviations for selected sensors...")
+		all_deviation_cols = [f"{col}_deviation" for col in all_sensor_cols]
+		common_dev_y_limits = compute_y_limits(df, all_deviation_cols)
+		
+		dev_sel_title = f"Selected Sensors Deviations (12) — {csv_path.name}"
+		plot_deviations_grid(
+			df=df,
+			sensor_cols=selected,
+			title=dev_sel_title,
+			save_path=None,
+			show=True,
+			y_limits=common_dev_y_limits,
+		)
+
+		# Plot deviations for remaining sensors
+		if len(remaining) == 12:
+			dev_rem_title = f"Remaining Sensors Deviations (12) — {csv_path.name}"
+			plot_deviations_grid(
+				df=df,
+				sensor_cols=remaining,
+				title=dev_rem_title,
+				save_path=None,
+				show=True,
+				y_limits=common_dev_y_limits,
+			)
+
+		# Optional: Show basic lick detection without weight correlation
+		show_lick_detection = input("\nShow lick detection analysis? (y/n, default=n): ").strip().lower()
+		if show_lick_detection in ['y', 'yes']:
+			# Use fixed threshold of 10 for all selected sensors
+			fixed_threshold = 10.0
+			print(f"\nUsing fixed threshold: {fixed_threshold}")
+			thresholds = pd.Series({sensor: fixed_threshold for sensor in selected})
+			
+			# Detect events above threshold
+			print("Detecting events above threshold for selected sensors...")
+			events_df = detect_events_above_threshold(df, selected, thresholds)
+			
+			# Count events per sensor
+			print("\n" + "=" * 60)
+			print(f"EVENT COUNTS (deviation > {fixed_threshold})")
+			print("=" * 60)
+			for sensor in selected:
+				event_col = f"{sensor}_event"
+				if event_col in events_df.columns:
+					count = events_df[event_col].sum()
+					print(f"{sensor:12s} : {count:6d} events")
+			print("=" * 60 + "\n")
+			
+			# Compute and display bout statistics
+			ili_cutoff = 0.3
+			print(f"Computing lick bouts (ILI cutoff = {ili_cutoff}s)...")
+			bout_dict = compute_lick_bouts(events_df, selected, ili_cutoff=ili_cutoff)
+			
+			print("\n" + "=" * 60)
+			print(f"LICK BOUT STATISTICS (ILI cutoff = {ili_cutoff}s)")
+			print("=" * 60)
+			import numpy as np
+			for sensor in selected:
+				bout_info = bout_dict.get(sensor, {})
+				bout_count = bout_info.get('bout_count', 0)
+				bout_sizes = bout_info.get('bout_sizes', np.array([]))
+				bout_durations = bout_info.get('bout_durations', np.array([]))
+				
+				if bout_count > 0:
+					mean_size = np.mean(bout_sizes)
+					mean_duration = np.mean(bout_durations)
+					total_licks = np.sum(bout_sizes)
+					print(f"{sensor:12s} : {bout_count:3d} bouts, {int(total_licks):4d} total licks, "
+					      f"mean size={mean_size:5.1f} licks, mean duration={mean_duration:6.3f}s")
+				else:
+					print(f"{sensor:12s} : No bouts detected")
+			print("=" * 60 + "\n")
+
+	# Optional SVG saving
+	print("\n(Optional) Save figures as SVGs. Leave blank to skip.")
+	
+	def _safe_svg(name: str) -> Path:
+		import re
+		base = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-_.") or "plot"
+		if not base.lower().endswith(".svg"):
+			base += ".svg"
+		return Path.cwd() / base
+
+	ov_name = input("SVG filename for all-sensors overview: ").strip()
+	if single_sensor_col is not None:
+		sing_name = input("SVG filename for single-sensor plot: ").strip()
+	else:
+		sing_name = ""
+	ts_name = input("SVG filename for timestamp deltas: ").strip()
+	
+	if selected is not None:
+		sel_name = input("SVG filename for selected 12 grid: ").strip()
+		rem_name = input("SVG filename for remaining 12 grid: ").strip()
+		dev_sel_name = input("SVG filename for selected 12 deviations: ").strip()
+		dev_rem_name = input("SVG filename for remaining 12 deviations: ").strip()
+	else:
+		sel_name = rem_name = dev_sel_name = dev_rem_name = ""
+
+	# Save figures without re-displaying
+	if ov_name:
+		_, fig_ov = plot_sensors_over_time(
+			df=df,
+			sensor_cols=sensor_cols,
+			title=title,
+			save_path=None,
+			show=False,
+			return_fig=True,
+		)
+		fig_ov.savefig(str(_safe_svg(ov_name)), format="svg", bbox_inches="tight")
+		print(f"Saved SVG: {_safe_svg(ov_name)}")
+
+	if sing_name and single_sensor_col is not None:
+		_, fig_sing = plot_single_sensor_over_time(
+			df=df,
+			sensor_col=single_sensor_col,
+			title=single_title or single_sensor_col,
+			save_path=None,
+			show=False,
+			return_fig=True,
+		)
+		fig_sing.savefig(str(_safe_svg(sing_name)), format="svg", bbox_inches="tight")
+		print(f"Saved SVG: {_safe_svg(sing_name)}")
+
+	if ts_name:
+		_, fig_ts = plot_timestamps_series(
+			df=df,
+			col_name="Arduino_Timestamp",
+			title=f"Timestamps over Samples — {csv_path.name}",
+			save_path=None,
+			show=False,
+			return_fig=True,
+		)
+		fig_ts.savefig(str(_safe_svg(ts_name)), format="svg", bbox_inches="tight")
+		print(f"Saved SVG: {_safe_svg(ts_name)}")
+
+	if selected is not None and sel_name:
+		all_sensor_cols = get_sensor_columns(df)
+		common_y_limits = compute_y_limits(df, all_sensor_cols)
+		_, fig_sel = plot_selected_sensors_grid(
+			df=df,
+			sensor_cols=selected,
+			title=f"Selected Sensors (12) — {csv_path.name}",
+			save_path=None,
+			show=False,
+			y_limits=common_y_limits,
+		)
+		fig_sel.savefig(str(_safe_svg(sel_name)), format="svg", bbox_inches="tight")
+		print(f"Saved SVG: {_safe_svg(sel_name)}")
+
+	if selected is not None and rem_name:
+		all_sensor_cols = get_sensor_columns(df)
+		remaining = [c for c in all_sensor_cols if c not in set(selected)]
+		if len(remaining) == 12:
+			common_y_limits = compute_y_limits(df, all_sensor_cols)
+			_, fig_rem = plot_selected_sensors_grid(
+				df=df,
+				sensor_cols=remaining,
+				title=f"Remaining Sensors (12) — {csv_path.name}",
+				save_path=None,
+				show=False,
+				y_limits=common_y_limits,
+			)
+			fig_rem.savefig(str(_safe_svg(rem_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(rem_name)}")
+
+	if selected is not None and dev_sel_name:
+		all_sensor_cols = get_sensor_columns(df)
+		all_deviation_cols = [f"{col}_deviation" for col in all_sensor_cols]
+		common_dev_y_limits = compute_y_limits(df, all_deviation_cols)
+		_, fig_dev_sel = plot_deviations_grid(
+			df=df,
+			sensor_cols=selected,
+			title=f"Selected Sensors Deviations (12) — {csv_path.name}",
+			save_path=None,
+			show=False,
+			y_limits=common_dev_y_limits,
+		)
+		fig_dev_sel.savefig(str(_safe_svg(dev_sel_name)), format="svg", bbox_inches="tight")
+		print(f"Saved SVG: {_safe_svg(dev_sel_name)}")
+
+	if selected is not None and dev_rem_name:
+		all_sensor_cols = get_sensor_columns(df)
+		remaining = [c for c in all_sensor_cols if c not in set(selected)]
+		if len(remaining) == 12:
+			all_deviation_cols = [f"{col}_deviation" for col in all_sensor_cols]
+			common_dev_y_limits = compute_y_limits(df, all_deviation_cols)
+			_, fig_dev_rem = plot_deviations_grid(
+				df=df,
+				sensor_cols=remaining,
+				title=f"Remaining Sensors Deviations (12) — {csv_path.name}",
+				save_path=None,
+				show=False,
+				y_limits=common_dev_y_limits,
+			)
+			fig_dev_rem.savefig(str(_safe_svg(dev_rem_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(dev_rem_name)}")
+
+	print("\nSensors-only analysis comple2e!")
+
+
 def get_sensor_columns(df: pd.DataFrame) -> List[str]:
 	"""Return list of sensor columns like Sensor_1..Sensor_N in sorted numeric order.
 	
@@ -1281,6 +1603,11 @@ def parse_args() -> argparse.Namespace:
 		default=None,
 		help="Path to save the PNG plot (default: <input> with _plot.png suffix)",
 	)
+	parser.add_argument(
+		"--sensors-only",
+		action="store_true",
+		help="Skip weight analysis and show only sensor plots (lick detection, deviations, etc.)",
+	)
 	return parser.parse_args()
 
 
@@ -1661,11 +1988,41 @@ def save_lick_bout_data(
 def main() -> None:
 	args = parse_args()
 
+	# Ask about analysis mode interactively (unless already specified via command line)
+	if not args.sensors_only:
+		print("\n" + "=" * 60)
+		print("ANALYSIS MODE SELECTION")
+		print("=" * 60)
+		print("Choose your analysis mode:")
+		print("1. Full analysis (sensors + weight correlations)")
+		print("2. Sensors-only (skip all weight analysis)")
+		
+		while True:
+			choice = input("\nEnter your choice (1 or 2, default=1): ").strip()
+			if choice == "" or choice == "1":
+				sensors_only_mode_selected = False
+				break
+			elif choice == "2":
+				sensors_only_mode_selected = True
+				break
+			else:
+				print("Please enter 1 or 2.")
+	else:
+		sensors_only_mode_selected = True
+
 	# Resolve CSV path: use CLI input if provided, otherwise open a file picker, then fallback to console prompt
+	print("\n" + "=" * 60)
+	print("CSV FILE SELECTION")
+	print("=" * 60)
+	
 	csv_path: Optional[Path] = Path(args.input) if args.input else None
 	if csv_path is None:
+		print("Opening file picker to select your capacitive sensor CSV file...")
+		print("Look for a file dialog window (it might appear behind other windows)")
 		csv_path = select_csv_via_tkinter(initial_dir=Path.cwd())
+	
 	if csv_path is None:
+		print("No file selected from file picker.")
 		while True:
 			entry = input("Enter path to the capacitive CSV (or leave blank to cancel): ").strip()
 			if not entry:
@@ -1676,11 +2033,22 @@ def main() -> None:
 				csv_path = candidate
 				break
 			print(f"File not found: {candidate}. Please try again.\n")
+	
+	print(f"Selected CSV file: {csv_path.name}")
+	print("=" * 60 + "\n")
 
 	if not csv_path.exists():
 		raise FileNotFoundError(f"CSV not found: {csv_path}")
 	df = load_capacitive_csv(csv_path)
 	sensor_cols = get_sensor_columns(df)
+	
+	# Check for sensors-only mode
+	if sensors_only_mode_selected:
+		print("\n" + "=" * 60)
+		print("SENSORS-ONLY MODE: Skipping weight analysis")
+		print("=" * 60)
+		sensors_only_mode(csv_path, df, sensor_cols, args)
+		return
 
 	# Compute and display the mode for each sensor
 	print("\n" + "=" * 60)
