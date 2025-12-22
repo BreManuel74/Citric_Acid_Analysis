@@ -21,6 +21,7 @@ from typing import List, Optional
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy import stats
 
 plt.rcParams["font.family"] = "sans-serif"
 plt.rcParams["font.sans-serif"] = ["Arial"]
@@ -68,19 +69,19 @@ def load_capacitive_csv(csv_path: Path) -> pd.DataFrame:
 
 def sensors_only_mode(csv_path: Path, df: pd.DataFrame, sensor_cols: List[str], args) -> None:
 	"""Run the sensor visualization mode without weight analysis."""
-	# Compute and display the mode for each sensor
+	# Compute and display the KDE for each sensor
 	print("\n" + "=" * 60)
-	print("MODE VALUES FOR EACH SENSOR")
+	print("KDE VALUES FOR EACH SENSOR")
 	print("=" * 60)
-	sensor_modes = compute_sensor_modes(df, sensor_cols)
-	for sensor, mode_val in sensor_modes.items():
-		print(f"{sensor:12s} : {mode_val}")
+	sensor_kdes = compute_sensor_KDE(df, sensor_cols)
+	for sensor, kde_val in sensor_kdes.items():
+		print(f"{sensor:12s} : {kde_val}")
 	print("=" * 60 + "\n")
 
-	# Compute mode deviations
-	print("Computing mode deviations for each sensor...")
-	df = compute_mode_deviations(df, sensor_cols, sensor_modes)
-	print(f"Added deviation columns: {', '.join([f'{col}_deviation' for col in sensor_cols[:3]])}...\n")
+	# Compute KDE normalizations
+	print("Computing KDE normalizations for each sensor...")
+	df = compute_KDE_normalizations(df, sensor_cols, sensor_kdes)
+	print(f"Added normalization columns: {', '.join([f'{col}_deviation' for col in sensor_cols[:3]])}...\n")
 
 	# Plot all sensors overview
 	title = f"Capacitive Sensors over Time — {csv_path.name}"
@@ -407,49 +408,59 @@ def get_sensor_columns(df: pd.DataFrame) -> List[str]:
 	return sensor_cols
 
 
-def compute_sensor_modes(df: pd.DataFrame, sensor_cols: List[str]) -> pd.Series:
-	"""Compute the mode (most frequent value) for each sensor column.
+def compute_sensor_KDE(df: pd.DataFrame, sensor_cols: List[str]) -> pd.Series:
+	"""Compute the KDE (Kernel Density Estimation) peak for each sensor column.
 	
-	Returns a Series indexed by sensor column names with their mode values.
-	If multiple modes exist, returns the first one.
+	Returns a Series indexed by sensor column names with their KDE peak values.
+	The KDE peak represents the most probable value in the distribution.
 	"""
-	modes = {}
+	kdes = {}
 	for col in sensor_cols:
 		series = pd.to_numeric(df[col], errors="coerce")
-		# Drop NaN values before computing mode
+		# Drop NaN values before computing KDE
 		series = series.dropna()
-		if len(series) > 0:
-			mode_result = series.mode()
-			# mode() returns a Series; take the first value if multiple modes exist
-			modes[col] = mode_result.iloc[0] if len(mode_result) > 0 else None
+		if len(series) > 1:  # Need at least 2 points for KDE
+			try:
+				# Create KDE
+				kde = stats.gaussian_kde(series)
+				# Create evaluation points around the data range
+				min_val, max_val = series.min(), series.max()
+				x_eval = np.linspace(min_val, max_val, 1000)
+				# Find the peak of the KDE
+				density = kde(x_eval)
+				peak_idx = np.argmax(density)
+				kdes[col] = x_eval[peak_idx]
+			except Exception:
+				# Fall back to mean if KDE fails
+				kdes[col] = series.mean()
 		else:
-			modes[col] = None
-	return pd.Series(modes)
+			kdes[col] = series.iloc[0] if len(series) == 1 else None
+	return pd.Series(kdes)
 
 
-def compute_mode_deviations(df: pd.DataFrame, sensor_cols: List[str], sensor_modes: pd.Series) -> pd.DataFrame:
-	"""Compute absolute difference between each sensor's mode and its values at each time point.
+def compute_KDE_normalizations(df: pd.DataFrame, sensor_cols: List[str], sensor_kdes: pd.Series) -> pd.DataFrame:
+	"""Compute KDE normalization for each sensor: abs((value - KDE) / KDE).
 	
 	For each sensor column, creates a new column with suffix '_deviation' containing
-	the absolute value of (mode - sensor_value) at each time point.
+	the absolute normalized value: abs((capacitance_value - KDE) / KDE).
 	
-	Returns a copy of the dataframe with the new deviation columns added.
+	Returns a copy of the dataframe with the new normalization columns added.
 	"""
-	df_with_deviations = df.copy()
+	df_with_normalizations = df.copy()
 	
 	for col in sensor_cols:
-		mode_val = sensor_modes[col]
-		if mode_val is not None and col in df.columns:
-			# Compute absolute deviation: |mode - value|
+		kde_val = sensor_kdes[col]
+		if kde_val is not None and kde_val != 0 and col in df.columns:
+			# Compute KDE normalization: abs((value - KDE) / KDE)
 			sensor_series = pd.to_numeric(df[col], errors="coerce")
-			deviation_col_name = f"{col}_deviation"
-			df_with_deviations[deviation_col_name] = abs(mode_val - sensor_series)
+			normalization_col_name = f"{col}_deviation"  # Keep same column name for compatibility
+			df_with_normalizations[normalization_col_name] = abs((sensor_series - kde_val) / kde_val)
 		else:
-			# If mode is None or column missing, set deviation to NaN
-			deviation_col_name = f"{col}_deviation"
-			df_with_deviations[deviation_col_name] = pd.NA
+			# If KDE is None or zero, set normalization to NaN
+			normalization_col_name = f"{col}_deviation"
+			df_with_normalizations[normalization_col_name] = pd.NA
 	
-	return df_with_deviations
+	return df_with_normalizations
 
 
 def plot_sensors_over_time(
@@ -663,7 +674,7 @@ def plot_deviations_grid(
 	deviation_cols = [f"{col}_deviation" for col in sensor_cols]
 	for col in deviation_cols:
 		if col not in df.columns:
-			raise ValueError(f"Deviation column '{col}' not found in DataFrame. Did you run compute_mode_deviations()?")
+			raise ValueError(f"Deviation column '{col}' not found in DataFrame. Did you run compute_KDE_normalizations()?")
 
 	# Reasonable figure size for a 2x6 grid
 	fig_w = max(12, ncols * 3)
@@ -732,14 +743,16 @@ def compute_dynamic_thresholds(
 ) -> pd.Series:
 	"""Compute dynamic threshold for each sensor using z-score normalization.
 	
-	For each sensor's deviation column, the threshold is set at:
+	For each sensor's normalized KDE deviation column, the threshold is set at:
 		mean + (z_threshold * std)
 	
 	This identifies values that are more than z_threshold standard deviations
-	above the mean deviation, indicating significant contact/lick events.
+	above the mean normalized deviation, indicating significant contact/lick events.
+	
+	Note: The deviation columns now contain absolute KDE normalized values: abs((value - KDE) / KDE)
 	
 	Parameters:
-		df: DataFrame with deviation columns
+		df: DataFrame with KDE normalized deviation columns
 		sensor_cols: List of sensor column names (e.g., ['Sensor_1', 'Sensor_2'])
 		z_threshold: Number of standard deviations above mean (default 4.0)
 		
@@ -789,12 +802,12 @@ def detect_events_above_threshold(
 	sensor_cols: List[str],
 	thresholds: pd.Series
 ) -> pd.DataFrame:
-	"""Detect time points where deviation exceeds the dynamic threshold for each sensor.
+	"""Detect time points where KDE normalized deviation exceeds the dynamic threshold for each sensor.
 	
-	Creates boolean columns indicating when each sensor's deviation exceeds its threshold.
+	Creates boolean columns indicating when each sensor's normalized deviation exceeds its threshold.
 	
 	Parameters:
-		df: DataFrame with Time_sec and deviation columns
+		df: DataFrame with Time_sec and KDE normalized deviation columns
 		sensor_cols: List of sensor column names
 		thresholds: Series of threshold values per sensor (from compute_dynamic_thresholds)
 		
@@ -2050,19 +2063,19 @@ def main() -> None:
 		sensors_only_mode(csv_path, df, sensor_cols, args)
 		return
 
-	# Compute and display the mode for each sensor
+	# Compute and display the KDE for each sensor
 	print("\n" + "=" * 60)
-	print("MODE VALUES FOR EACH SENSOR")
+	print("KDE VALUES FOR EACH SENSOR")
 	print("=" * 60)
-	sensor_modes = compute_sensor_modes(df, sensor_cols)
-	for sensor, mode_val in sensor_modes.items():
-		print(f"{sensor:12s} : {mode_val}")
+	sensor_kdes = compute_sensor_KDE(df, sensor_cols)
+	for sensor, kde_val in sensor_kdes.items():
+		print(f"{sensor:12s} : {kde_val}")
 	print("=" * 60 + "\n")
 
-	# Compute mode deviations (absolute difference from mode at each time point)
-	print("Computing mode deviations for each sensor...")
-	df = compute_mode_deviations(df, sensor_cols, sensor_modes)
-	print(f"Added deviation columns: {', '.join([f'{col}_deviation' for col in sensor_cols[:3]])}...\n")
+	# Compute KDE normalizations (normalized difference from KDE at each time point)
+	print("Computing KDE normalizations for each sensor...")
+	df = compute_KDE_normalizations(df, sensor_cols, sensor_kdes)
+	print(f"Added normalization columns: {', '.join([f'{col}_deviation' for col in sensor_cols[:3]])}...\n")
 
 	# Do not save PNGs; SVG saving is handled later via prompts
 	save_path = None
