@@ -22,6 +22,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
+from scipy.signal import find_peaks
 
 plt.rcParams["font.family"] = "sans-serif"
 plt.rcParams["font.sans-serif"] = ["Arial"]
@@ -736,65 +737,263 @@ def plot_deviations_grid(
 	return (save_path, fig) if True else save_path
 
 
-def compute_dynamic_thresholds(
+def plot_derivatives_with_events_grid(
 	df: pd.DataFrame,
+	events_df: pd.DataFrame,
 	sensor_cols: List[str],
-	z_threshold: float = 4.0
-) -> pd.Series:
-	"""Compute dynamic threshold for each sensor using z-score normalization.
-	
-	For each sensor's normalized KDE deviation column, the threshold is set at:
-		mean + (z_threshold * std)
-	
-	This identifies values that are more than z_threshold standard deviations
-	above the mean normalized deviation, indicating significant contact/lick events.
-	
-	Note: The deviation columns now contain absolute KDE normalized values: abs((value - KDE) / KDE)
+	*,
+	nrows: int = 2,
+	ncols: int = 6,
+	title: str | None = None,
+	save_path: Path | None = None,
+	show: bool = True,
+	y_limits: tuple[float, float] | None = None,
+) -> Path | tuple[Optional[Path], plt.Figure]:
+	"""Plot sensor derivatives with detected events highlighted in a grid of subplots.
+
+	Each subplot shows one sensor's derivative vs Time_sec (s) with detected events 
+	marked as red vertical lines or scatter points.
+	If y_limits is provided, all subplots use the same y-axis range.
 	
 	Parameters:
-		df: DataFrame with KDE normalized deviation columns
-		sensor_cols: List of sensor column names (e.g., ['Sensor_1', 'Sensor_2'])
-		z_threshold: Number of standard deviations above mean (default 4.0)
-		
-	Returns:
-		pd.Series indexed by sensor name with threshold values
-		
-	Example:
-		>>> thresholds = compute_dynamic_thresholds(df, ['Sensor_1', 'Sensor_2'], z_threshold=4.0)
-		>>> print(thresholds)
-		Sensor_1    45.2
-		Sensor_2    38.7
-		dtype: float64
+		df: Original DataFrame with Time_sec and derivative columns
+		events_df: DataFrame from detect_events_above_threshold with event columns
+		sensor_cols: List of sensor column names
+		nrows: Number of subplot rows (default 2)
+		ncols: Number of subplot columns (default 6)
+		title: Optional plot title
+		save_path: If provided, saves the figure to this path
+		show: If True, calls plt.show() at the end
+		y_limits: Optional tuple of (y_min, y_max) for consistent y-axis scaling
 	"""
-	import numpy as np
+	if "Time_sec" not in df.columns:
+		raise ValueError("'Time_sec' column not found. Did you run load_capacitive_csv()?")
+	needed = nrows * ncols
+	if len(sensor_cols) != needed:
+		raise ValueError(f"Expected exactly {needed} sensors, got {len(sensor_cols)}")
 	
-	thresholds = {}
+	# Build list of derivative column names
+	derivative_cols = [f"{col}_derivative" for col in sensor_cols]
+	for col in derivative_cols:
+		if col not in events_df.columns:
+			raise ValueError(f"Derivative column '{col}' not found in events DataFrame. Did you run detect_events_above_threshold()?")
+
+	# Reasonable figure size for a 2x6 grid
+	fig_w = max(12, ncols * 3)
+	fig_h = max(6, nrows * 3)
+	fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), sharex=False, sharey=False)
+	axes = axes.reshape(nrows, ncols)
+
+	# Determine common y-limits (either provided or computed from the derivative columns)
+	if y_limits is None:
+		y_limits = compute_y_limits(events_df, derivative_cols)
+
+	# Plot each derivative in its subplot with events highlighted
+	for i, col in enumerate(sensor_cols):
+		deriv_col = f"{col}_derivative"
+		event_col = f"{col}_event"
+		r = i // ncols
+		c = i % ncols
+		ax = axes[r][c]
+		
+		# Plot derivative line
+		ax.plot(events_df["Time_sec"], events_df[deriv_col], color="#2ca02c", linewidth=1.2, label="Derivative")
+		
+		# Highlight detected events
+		if event_col in events_df.columns:
+			event_mask = events_df[event_col]
+			event_times = events_df.loc[event_mask, "Time_sec"]
+			event_derivatives = events_df.loc[event_mask, deriv_col]
+			
+			if len(event_times) > 0:
+				# Plot events as red scatter points at their true timepoints
+				ax.scatter(event_times, event_derivatives, color="red", s=30, alpha=0.8, 
+						  marker="o", edgecolors="darkred", linewidth=1, label="Detected Events")
+				
+				# Optionally add vertical lines for better visibility
+				for event_time in event_times:
+					ax.axvline(x=event_time, color="red", linestyle="--", alpha=0.4, linewidth=0.8)
+		
+		ax.set_title(f"{col} (derivative)", fontsize=10)
+		
+		# Only label leftmost y-axes and bottom x-axes to reduce clutter
+		if c == 0:
+			ax.set_ylabel("Derivative (a.u./sample)")
+		else:
+			ax.set_ylabel("")
+		if r == nrows - 1:
+			ax.set_xlabel("Time (s)")
+		else:
+			ax.set_xlabel("")
+
+		# Apply common y-limits
+		if y_limits is not None:
+			ax.set_ylim(*y_limits)
+
+		# Add horizontal line at y=0 for reference
+		ax.axhline(y=0, color="black", linestyle="-", alpha=0.3, linewidth=0.8)
+
+		# Style adjustments per request:
+		# - Start x-axis at 0
+		# - Remove top and right spines (boundaries)
+		# - Tick marks inward and remove extra x-margins
+		left, right = ax.get_xlim()
+		ax.set_xlim(left=0, right=right)
+		ax.margins(x=0)
+		for side in ("top", "right"):
+			ax.spines[side].set_visible(False)
+		ax.tick_params(direction="in", which="both", length=5)
+		
+		# Add legend only to first subplot to avoid clutter
+		if i == 0:
+			ax.legend(loc="upper right", fontsize=8)
+
+	if title:
+		fig.suptitle(title)
+	fig.tight_layout(rect=[0, 0, 1, 0.97] if title else None)
+
+	# Save only if a save_path is provided
+	if save_path is not None:
+		save_path.parent.mkdir(parents=True, exist_ok=True)
+		fig.savefig(save_path, dpi=150)
+
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+
+	return (save_path, fig) if True else save_path
+
+
+def plot_deviations_with_events_grid(
+	df: pd.DataFrame,
+	events_df: pd.DataFrame,
+	sensor_cols: List[str],
+	thresholds: pd.Series,
+	*,
+	nrows: int = 2,
+	ncols: int = 6,
+	title: str | None = None,
+	save_path: Path | None = None,
+	show: bool = True,
+	y_limits: tuple[float, float] | None = None,
+) -> Path | tuple[Optional[Path], plt.Figure]:
+	"""Plot sensor deviations with detected events and threshold highlighted in a grid of subplots.
+
+	Each subplot shows one sensor's deviation vs Time_sec (s) with detected events 
+	marked as red points and the threshold shown as a horizontal line.
+	If y_limits is provided, all subplots use the same y-axis range.
 	
-	for sensor_col in sensor_cols:
-		dev_col = f"{sensor_col}_deviation"
-		if dev_col not in df.columns:
-			print(f"Warning: Deviation column '{dev_col}' not found. Skipping {sensor_col}.")
-			thresholds[sensor_col] = None
-			continue
-		
-		# Get deviation values and compute statistics
-		deviations = pd.to_numeric(df[dev_col], errors="coerce")
-		deviations = deviations.dropna()
-		
-		if len(deviations) == 0:
-			print(f"Warning: No valid deviation data for {sensor_col}. Skipping.")
-			thresholds[sensor_col] = None
-			continue
-		
-		# Compute mean and standard deviation
-		mean_dev = float(deviations.mean())
-		std_dev = float(deviations.std())
-		
-		# Threshold = mean + (z_threshold * std)
-		threshold = mean_dev + (z_threshold * std_dev)
-		thresholds[sensor_col] = threshold
+	Parameters:
+		df: Original DataFrame with Time_sec and deviation columns  
+		events_df: DataFrame from detect_events_above_threshold with event columns
+		sensor_cols: List of sensor column names
+		thresholds: Series of threshold values per sensor
+		nrows: Number of subplot rows (default 2)
+		ncols: Number of subplot columns (default 6)
+		title: Optional plot title
+		save_path: If provided, saves the figure to this path
+		show: If True, calls plt.show() at the end
+		y_limits: Optional tuple of (y_min, y_max) for consistent y-axis scaling
+	"""
+	if "Time_sec" not in df.columns:
+		raise ValueError("'Time_sec' column not found. Did you run load_capacitive_csv()?")
+	needed = nrows * ncols
+	if len(sensor_cols) != needed:
+		raise ValueError(f"Expected exactly {needed} sensors, got {len(sensor_cols)}")
 	
-	return pd.Series(thresholds)
+	# Build list of deviation column names
+	deviation_cols = [f"{col}_deviation" for col in sensor_cols]
+	for col in deviation_cols:
+		if col not in df.columns:
+			raise ValueError(f"Deviation column '{col}' not found in DataFrame. Did you run compute_KDE_normalizations()?")
+
+	# Reasonable figure size for a 2x6 grid
+	fig_w = max(12, ncols * 3)
+	fig_h = max(6, nrows * 3)
+	fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), sharex=False, sharey=False)
+	axes = axes.reshape(nrows, ncols)
+
+	# Determine common y-limits (either provided or computed from the deviation columns)
+	if y_limits is None:
+		y_limits = compute_y_limits(df, deviation_cols)
+
+	# Plot each deviation in its subplot with events and threshold highlighted
+	for i, col in enumerate(sensor_cols):
+		dev_col = f"{col}_deviation"
+		event_col = f"{col}_event"
+		r = i // ncols
+		c = i % ncols
+		ax = axes[r][c]
+		
+		# Plot deviation line
+		ax.plot(df["Time_sec"], df[dev_col], color="#ff7f0e", linewidth=1.2, label="Deviation")
+		
+		# Plot threshold line
+		threshold = thresholds.get(col)
+		if threshold is not None and np.isfinite(threshold):
+			ax.axhline(y=threshold, color="blue", linestyle="--", alpha=0.7, 
+					  linewidth=1.5, label=f"Threshold ({threshold:.3f})")
+		
+		# Highlight detected events
+		if event_col in events_df.columns:
+			event_mask = events_df[event_col]
+			event_times = events_df.loc[event_mask, "Time_sec"]
+			if len(event_times) > 0:
+				# Get deviation values at event times directly from events_df
+				# since events_df should have the same indices and deviation values as df
+				event_deviations = events_df.loc[event_mask, dev_col]
+				
+				# Plot events as red scatter points at their true timepoints
+				ax.scatter(event_times, event_deviations, color="red", s=30, alpha=0.8, 
+						  marker="o", edgecolors="darkred", linewidth=1, label="Detected Events")
+		
+		ax.set_title(f"{col} (deviation)", fontsize=10)
+		
+		# Only label leftmost y-axes and bottom x-axes to reduce clutter
+		if c == 0:
+			ax.set_ylabel("Deviation (a.u.)")
+		else:
+			ax.set_ylabel("")
+		if r == nrows - 1:
+			ax.set_xlabel("Time (s)")
+		else:
+			ax.set_xlabel("")
+
+		# Apply common y-limits
+		if y_limits is not None:
+			ax.set_ylim(*y_limits)
+
+		# Style adjustments per request:
+		# - Start x-axis at 0
+		# - Remove top and right spines (boundaries)
+		# - Tick marks inward and remove extra x-margins
+		left, right = ax.get_xlim()
+		ax.set_xlim(left=0, right=right)
+		ax.margins(x=0)
+		for side in ("top", "right"):
+			ax.spines[side].set_visible(False)
+		ax.tick_params(direction="in", which="both", length=5)
+		
+		# Add legend only to first subplot to avoid clutter
+		if i == 0:
+			ax.legend(loc="upper right", fontsize=8)
+
+	if title:
+		fig.suptitle(title)
+	fig.tight_layout(rect=[0, 0, 1, 0.97] if title else None)
+
+	# Save only if a save_path is provided
+	if save_path is not None:
+		save_path.parent.mkdir(parents=True, exist_ok=True)
+		fig.savefig(save_path, dpi=150)
+
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+
+	return (save_path, fig) if True else save_path
 
 
 def detect_events_above_threshold(
@@ -804,7 +1003,8 @@ def detect_events_above_threshold(
 ) -> pd.DataFrame:
 	"""Detect time points where KDE normalized deviation exceeds the dynamic threshold for each sensor.
 	
-	Creates boolean columns indicating when each sensor's normalized deviation exceeds its threshold.
+	Creates boolean columns indicating when each sensor's normalized deviation peaks above the threshold.
+	Uses scipy.signal.find_peaks for robust peak detection in discrete sampled data.
 	
 	Parameters:
 		df: DataFrame with Time_sec and KDE normalized deviation columns
@@ -814,8 +1014,9 @@ def detect_events_above_threshold(
 	Returns:
 		DataFrame with columns:
 			- Time_sec
-			- For each sensor: {sensor}_event (boolean indicating threshold exceedance)
+			- For each sensor: {sensor}_event (boolean indicating detected peaks above threshold)
 			- For each sensor: {sensor}_deviation (original deviation value)
+			- For each sensor: {sensor}_derivative (first-order derivative of deviation)
 	"""
 	import numpy as np
 	
@@ -825,22 +1026,43 @@ def detect_events_above_threshold(
 	for sensor_col in sensor_cols:
 		dev_col = f"{sensor_col}_deviation"
 		event_col = f"{sensor_col}_event"
+		deriv_col = f"{sensor_col}_derivative"
 		
 		if dev_col not in df.columns:
 			result[event_col] = False
 			result[dev_col] = np.nan
+			result[deriv_col] = np.nan
 			continue
 		
 		threshold = thresholds.get(sensor_col)
 		if threshold is None or not np.isfinite(threshold):
 			result[event_col] = False
 			result[dev_col] = df[dev_col]
+			result[deriv_col] = np.nan
 			continue
 		
-		# Mark events where deviation exceeds threshold
+		# Get deviations and calculate first-order derivative
 		deviations = pd.to_numeric(df[dev_col], errors="coerce")
 		result[dev_col] = deviations
-		result[event_col] = deviations > threshold
+		
+		# Calculate first-order derivative using forward difference
+		# This aligns the derivative with the current time point where the change begins
+		# derivative[i] = deviations[i+1] - deviations[i]
+		clean_deviations = deviations.fillna(0)
+		derivative = np.zeros_like(clean_deviations)
+		derivative[:-1] = np.diff(clean_deviations)  # Forward difference
+		derivative[-1] = derivative[-2] if len(derivative) > 1 else 0  # Handle last point
+		result[deriv_col] = derivative
+		
+		# Find peaks in the deviation signal using scipy.signal.find_peaks
+		# This is much more robust than manual derivative analysis
+		peaks, _ = find_peaks(clean_deviations, height=threshold, distance=1)
+		
+		# Create boolean mask for detected peaks
+		peak_mask = np.zeros(len(clean_deviations), dtype=bool)
+		peak_mask[peaks] = True
+		
+		result[event_col] = peak_mask
 	
 	return result
 
@@ -2283,8 +2505,8 @@ def main() -> None:
 		all_sensor_cols = get_sensor_columns(df)
 		common_y_limits = compute_y_limits(df, all_sensor_cols)
 		
-		# Use fixed threshold of 10 for all selected sensors
-		fixed_threshold = 10.0
+		# Use fixed threshold of 0.01 for all selected sensors
+		fixed_threshold = 0.01
 		print("\n" + "=" * 60)
 		print(f"FIXED THRESHOLD: {fixed_threshold}")
 		print("=" * 60)
@@ -2486,6 +2708,32 @@ def main() -> None:
 				show=True,
 				y_limits=common_dev_y_limits,
 			)
+
+		# Plot derivatives with detected events for selected sensors
+		print("\nPlotting derivatives with detected events for selected sensors...")
+		deriv_event_title = f"Selected Sensors Derivatives with Detected Events (12) — {csv_path.name}"
+		plot_derivatives_with_events_grid(
+			df=df,
+			events_df=events_df,
+			sensor_cols=selected,
+			title=deriv_event_title,
+			save_path=None,
+			show=True,
+		)
+
+		# Plot deviations with threshold and detected events for selected sensors
+		print("\nPlotting deviations with threshold and detected events for selected sensors...")
+		dev_event_title = f"Selected Sensors Deviations with Events and Threshold (12) — {csv_path.name}"
+		plot_deviations_with_events_grid(
+			df=df,
+			events_df=events_df,
+			sensor_cols=selected,
+			thresholds=thresholds,
+			title=dev_event_title,
+			save_path=None,
+			show=True,
+			y_limits=common_dev_y_limits,
+		)
 
 		# After viewing, prompt for SVG filenames to save each figure
 		def _safe_svg(name: str) -> Path:
