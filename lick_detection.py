@@ -218,8 +218,8 @@ def sensors_only_mode(csv_path: Path, df: pd.DataFrame, sensor_cols: List[str], 
 		# Optional: Show basic lick detection without weight correlation
 		show_lick_detection = input("\nShow lick detection analysis? (y/n, default=n): ").strip().lower()
 		if show_lick_detection in ['y', 'yes']:
-			# Use fixed threshold of 10 for all selected sensors
-			fixed_threshold = 10.0
+			# Use fixed threshold of 0.01 for all selected sensors
+			fixed_threshold = 0.01
 			print(f"\nUsing fixed threshold: {fixed_threshold}")
 			thresholds = pd.Series({sensor: fixed_threshold for sensor in selected})
 			
@@ -262,6 +262,32 @@ def sensors_only_mode(csv_path: Path, df: pd.DataFrame, sensor_cols: List[str], 
 				else:
 					print(f"{sensor:12s} : No bouts detected")
 			print("=" * 60 + "\n")
+			
+			# Plot derivatives with detected events for selected sensors
+			print("Plotting derivatives with detected events for selected sensors...")
+			deriv_event_title = f"Selected Sensors Derivatives with Detected Events (12) — {csv_path.name}"
+			plot_derivatives_with_events_grid(
+				df=df,
+				events_df=events_df,
+				sensor_cols=selected,
+				title=deriv_event_title,
+				save_path=None,
+				show=True,
+			)
+
+			# Plot deviations with threshold and detected events for selected sensors
+			print("Plotting deviations with threshold and detected events for selected sensors...")
+			dev_event_title = f"Selected Sensors Deviations with Events and Threshold (12) — {csv_path.name}"
+			plot_deviations_with_events_grid(
+				df=df,
+				events_df=events_df,
+				sensor_cols=selected,
+				thresholds=thresholds,
+				title=dev_event_title,
+				save_path=None,
+				show=True,
+				y_limits=common_dev_y_limits,
+			)
 
 	# Optional SVG saving
 	print("\n(Optional) Save figures as SVGs. Leave blank to skip.")
