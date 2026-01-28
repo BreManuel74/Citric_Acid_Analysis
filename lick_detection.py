@@ -2449,32 +2449,53 @@ def main() -> None:
 			except ValueError as ve:
 				print(f"{ve}\nPlease correct the list and try again.\n")
 
+	# Helper functions for manual input
+	def _prompt_for_bottle_weights(sensor_list: List[str]) -> List[float]:
+		while True:
+			print(f"\nEnter 12 bottle weight change values (in grams) corresponding to the sensors in order:")
+			print(f"Sensors: {', '.join(sensor_list)}")
+			entry = input("Enter 12 values separated by commas: ").strip()
+			
+			# Split on commas and strip whitespace
+			raw_values = [tok.strip() for tok in entry.split(",") if tok.strip()]
+			
+			if len(raw_values) != 12:
+				print(f"Please enter exactly 12 values. You provided {len(raw_values)}. Try again.\n")
+				continue
+			
+			try:
+				# Convert to float
+				weights = [float(val) for val in raw_values]
+				return weights
+			except ValueError as ve:
+				print(f"Invalid number format: {ve}\nPlease enter numeric values only.\n")
+	
+	def _prompt_for_weight_loss_percent(sensor_list: List[str]) -> List[float]:
+		while True:
+			print(f"\nEnter 12 total weight loss % values corresponding to the sensors in order:")
+			print(f"Sensors: {', '.join(sensor_list)}")
+			entry = input("Enter 12 values separated by commas: ").strip()
+			
+			# Split on commas and strip whitespace
+			raw_values = [tok.strip() for tok in entry.split(",") if tok.strip()]
+			
+			if len(raw_values) != 12:
+				print(f"Please enter exactly 12 values. You provided {len(raw_values)}. Try again.\n")
+				continue
+			
+			try:
+				# Convert to float
+				percentages = [float(val) for val in raw_values]
+				return percentages
+			except ValueError as ve:
+				print(f"Invalid number format: {ve}\nPlease enter numeric values only.\n")
+
 	try:
 		if metadata_path is None:
 			# Manual input path
 			selected = _prompt_for_sensor_list(df, count=12)
 			
 			# Prompt for bottle weight changes (12 values matching the 12 selected sensors)
-			def _prompt_for_bottle_weights(sensor_list: List[str]) -> List[float]:
-				while True:
-					print(f"\nEnter 12 bottle weight change values (in grams) corresponding to the sensors in order:")
-					print(f"Sensors: {', '.join(sensor_list)}")
-					entry = input("Enter 12 values separated by commas: ").strip()
-					
-					# Split on commas and strip whitespace
-					raw_values = [tok.strip() for tok in entry.split(",") if tok.strip()]
-					
-					if len(raw_values) != 12:
-						print(f"Please enter exactly 12 values. You provided {len(raw_values)}. Try again.\n")
-						continue
-					
-					try:
-						# Convert to float
-						weights = [float(val) for val in raw_values]
-						return weights
-					except ValueError as ve:
-						print(f"Invalid number format: {ve}\nPlease enter numeric values only.\n")
-			
 			bottle_weight_change = _prompt_for_bottle_weights(selected)
 			
 			# Create a mapping of sensor to bottle weight change
@@ -2489,26 +2510,6 @@ def main() -> None:
 			print("=" * 60 + "\n")
 			
 			# Prompt for total weight loss % (12 values matching the 12 selected sensors)
-			def _prompt_for_weight_loss_percent(sensor_list: List[str]) -> List[float]:
-				while True:
-					print(f"\nEnter 12 total weight loss % values corresponding to the sensors in order:")
-					print(f"Sensors: {', '.join(sensor_list)}")
-					entry = input("Enter 12 values separated by commas: ").strip()
-					
-					# Split on commas and strip whitespace
-					raw_values = [tok.strip() for tok in entry.split(",") if tok.strip()]
-					
-					if len(raw_values) != 12:
-						print(f"Please enter exactly 12 values. You provided {len(raw_values)}. Try again.\n")
-						continue
-					
-					try:
-						# Convert to float
-						percentages = [float(val) for val in raw_values]
-						return percentages
-					except ValueError as ve:
-						print(f"Invalid number format: {ve}\nPlease enter numeric values only.\n")
-			
 			weight_loss_percent = _prompt_for_weight_loss_percent(selected)
 			
 			# Create a mapping of sensor to weight loss %
@@ -2526,46 +2527,89 @@ def main() -> None:
 		if selected is None or sensor_to_weight is None or sensor_to_weight_loss is None:
 			raise ValueError("Missing sensor selection or weight data. Cannot proceed.")
 		
+		# Check if we have exactly 12 sensors for grid plotting
+		if len(selected) != 12:
+			print(f"\nWarning: Expected exactly 12 sensors for grid analysis, got {len(selected)}.")
+			print("The original sensors will be used for lick analysis and correlations.")
+			print("Additional sensors are only needed to fill the 2x6 grid for plotting.\n")
+			
+			# Store the original sensors for analysis
+			original_selected = selected.copy()
+			original_sensor_to_weight = sensor_to_weight.copy()
+			original_sensor_to_weight_loss = sensor_to_weight_loss.copy()
+			
+			# Get 12 sensors for plotting (including the original ones)
+			print("Selecting 12 sensors for grid plotting (must include the original sensors)...")
+			selected_for_plotting = _prompt_for_sensor_list(df, count=12)
+			
+			# Verify that all original sensors are included in the plotting selection
+			missing_originals = [s for s in original_selected if s not in selected_for_plotting]
+			if missing_originals:
+				print(f"\nError: The following original sensors must be included in your selection: {', '.join(missing_originals)}")
+				print("Please select again, making sure to include all original sensors.")
+				return
+			
+			print(f"\nUsing {len(original_selected)} original sensors for analysis: {', '.join(original_selected)}")
+			print(f"Using all 12 sensors for plotting: {', '.join(selected_for_plotting)}")
+			
+			# Use original sensors and weights for analysis
+			selected_for_analysis = original_selected
+			sensor_to_weight = original_sensor_to_weight
+			sensor_to_weight_loss = original_sensor_to_weight_loss
+			
+			# Use 12 sensors for plotting
+			selected = selected_for_plotting
+		else:
+			# We have exactly 12 sensors, use them for both analysis and plotting
+			selected_for_analysis = selected
+		
 		grid_title = f"Selected Sensors (12) — {csv_path.name}"
 		# Compute common y-limits across all 24 sensors so both grids share the same scale
 		all_sensor_cols = get_sensor_columns(df)
 		common_y_limits = compute_y_limits(df, all_sensor_cols)
 		
-		# Use fixed threshold of 0.01 for all selected sensors
+		# Use fixed threshold of 0.01 for all analysis sensors (not plotting sensors)
 		fixed_threshold = 0.01
 		print("\n" + "=" * 60)
 		print(f"FIXED THRESHOLD: {fixed_threshold}")
 		print("=" * 60)
-		thresholds = pd.Series({sensor: fixed_threshold for sensor in selected})
-		for sensor in selected:
+		thresholds_analysis = pd.Series({sensor: fixed_threshold for sensor in selected_for_analysis})
+		for sensor in selected_for_analysis:
 			print(f"{sensor:12s} : {fixed_threshold:8.2f}")
 		print("=" * 60 + "\n")
 		
-		# Detect events above threshold
-		print("Detecting events above threshold for selected sensors...")
-		events_df = detect_events_above_threshold(df, selected, thresholds)
+		# Also create thresholds for all 12 plotting sensors (for derivative plotting)
+		thresholds_plotting = pd.Series({sensor: fixed_threshold for sensor in selected})
 		
-		# Count events per sensor
+		# Detect events above threshold for analysis sensors only
+		print("Detecting events above threshold for analysis sensors...")
+		events_df_analysis = detect_events_above_threshold(df, selected_for_analysis, thresholds_analysis)
+		
+		# Detect events above threshold for all plotting sensors (needed for derivative plots)
+		print("Detecting events above threshold for all plotting sensors (for visualization)...")
+		events_df_plotting = detect_events_above_threshold(df, selected, thresholds_plotting)
+		
+		# Count events per analysis sensor
 		print("\n" + "=" * 60)
 		print("EVENT COUNTS (deviation > 10)")
 		print("=" * 60)
-		for sensor in selected:
+		for sensor in selected_for_analysis:
 			event_col = f"{sensor}_event"
-			if event_col in events_df.columns:
-				count = events_df[event_col].sum()
+			if event_col in events_df_analysis.columns:
+				count = events_df_analysis[event_col].sum()
 				print(f"{sensor:12s} : {count:6d} events")
 		print("=" * 60 + "\n")
 		
-		# Compute inter-lick intervals
-		print("Computing inter-lick intervals for selected sensors...")
-		ili_dict = compute_inter_lick_intervals(events_df, selected)
+		# Compute inter-lick intervals for analysis sensors
+		print("Computing inter-lick intervals for analysis sensors...")
+		ili_dict = compute_inter_lick_intervals(events_df_analysis, selected_for_analysis)
 		
-		# Display ILI statistics
+		# Display ILI statistics for analysis sensors
 		print("\n" + "=" * 60)
 		print("INTER-LICK INTERVAL STATISTICS (seconds)")
 		print("=" * 60)
 		import numpy as np
-		for sensor in selected:
+		for sensor in selected_for_analysis:
 			intervals = ili_dict.get(sensor, np.array([]))
 			if len(intervals) > 0:
 				mean_ili = np.mean(intervals)
@@ -2577,16 +2621,16 @@ def main() -> None:
 				print(f"{sensor:12s} : No intervals (< 2 events)")
 		print("=" * 60 + "\n")
 		
-		# Compute lick bouts using 0.3s cutoff
+		# Compute lick bouts using 0.3s cutoff for analysis sensors
 		ili_cutoff = 0.3
 		print(f"Computing lick bouts (ILI cutoff = {ili_cutoff}s)...")
-		bout_dict = compute_lick_bouts(events_df, selected, ili_cutoff=ili_cutoff)
+		bout_dict = compute_lick_bouts(events_df_analysis, selected_for_analysis, ili_cutoff=ili_cutoff)
 		
-		# Display bout statistics
+		# Display bout statistics for analysis sensors
 		print("\n" + "=" * 60)
 		print(f"LICK BOUT STATISTICS (ILI cutoff = {ili_cutoff}s)")
 		print("=" * 60)
-		for sensor in selected:
+		for sensor in selected_for_analysis:
 			bout_info = bout_dict.get(sensor, {})
 			bout_count = bout_info.get('bout_count', 0)
 			bout_sizes = bout_info.get('bout_sizes', np.array([]))
@@ -2602,7 +2646,7 @@ def main() -> None:
 				print(f"{sensor:12s} : No bouts detected")
 		print("=" * 60 + "\n")
 		
-		# Generate correlation plot of bout counts vs bottle weight changes
+		# Generate correlation plot of bout counts vs bottle weight changes (analysis sensors only)
 		print("Generating correlation plot: Lick Bouts vs. Bottle Weight Change...")
 		corr_title = f"Lick Bouts vs. Bottle Weight Change — {csv_path.name}"
 		plot_bout_weight_correlation(
@@ -2613,19 +2657,19 @@ def main() -> None:
 			show=True,
 		)
 		
-		# Generate correlation plot of total lick counts vs bottle weight changes
+		# Generate correlation plot of total lick counts vs bottle weight changes (analysis sensors only)
 		print("Generating correlation plot: Total Licks vs. Bottle Weight Change...")
 		lick_corr_title = f"Total Licks vs. Bottle Weight Change — {csv_path.name}"
 		plot_lick_weight_correlation(
-			events_df=events_df,
-			sensor_cols=selected,
+			events_df=events_df_analysis,
+			sensor_cols=selected_for_analysis,
 			sensor_to_weight=sensor_to_weight,
 			title=lick_corr_title,
 			save_path=None,
 			show=True,
 		)
 		
-		# Generate correlation plot of bout counts vs total weight loss %
+		# Generate correlation plot of bout counts vs total weight loss % (analysis sensors only)
 		print("Generating correlation plot: Lick Bouts vs. Total Weight Loss %...")
 		bout_wl_corr_title = f"Lick Bouts vs. Total Weight Loss % — {csv_path.name}"
 		plot_bout_weightloss_correlation(
@@ -2636,12 +2680,12 @@ def main() -> None:
 			show=True,
 		)
 		
-		# Generate correlation plot of total lick counts vs total weight loss %
+		# Generate correlation plot of total lick counts vs total weight loss % (analysis sensors only)
 		print("Generating correlation plot: Total Licks vs. Total Weight Loss %...")
 		lick_wl_corr_title = f"Total Licks vs. Total Weight Loss % — {csv_path.name}"
 		plot_lick_weightloss_correlation(
-			events_df=events_df,
-			sensor_cols=selected,
+			events_df=events_df_analysis,
+			sensor_cols=selected_for_analysis,
 			sensor_to_weight_loss=sensor_to_weight_loss,
 			title=lick_wl_corr_title,
 			save_path=None,
@@ -2659,21 +2703,21 @@ def main() -> None:
 			show=True,
 		)
 		
-		# Save comprehensive lick and bout analysis to text file
+		# Save comprehensive lick and bout analysis to text file (analysis sensors only)
 		print("\n" + "=" * 60)
 		print("SAVING ANALYSIS DATA")
 		print("=" * 60)
 		try:
-			# Save the analysis data
+			# Save the analysis data for analysis sensors only
 			saved_path = save_lick_bout_data(
 				csv_path=csv_path,
-				selected_sensors=selected,
-				events_df=events_df,
+				selected_sensors=selected_for_analysis,
+				events_df=events_df_analysis,
 				bout_dict=bout_dict,
 				ili_dict=ili_dict,
 				sensor_to_weight=sensor_to_weight,
 				sensor_to_weight_loss=sensor_to_weight_loss,
-				thresholds=thresholds,
+				thresholds=thresholds_analysis,
 				selected_date=selected_date
 			)
 			print(f"✓ Analysis data saved to: {saved_path}")
@@ -2740,7 +2784,7 @@ def main() -> None:
 		deriv_event_title = f"Selected Sensors Derivatives with Detected Events (12) — {csv_path.name}"
 		plot_derivatives_with_events_grid(
 			df=df,
-			events_df=events_df,
+			events_df=events_df_plotting,
 			sensor_cols=selected,
 			title=deriv_event_title,
 			save_path=None,
@@ -2752,9 +2796,9 @@ def main() -> None:
 		dev_event_title = f"Selected Sensors Deviations with Events and Threshold (12) — {csv_path.name}"
 		plot_deviations_with_events_grid(
 			df=df,
-			events_df=events_df,
+			events_df=events_df_plotting,
 			sensor_cols=selected,
-			thresholds=thresholds,
+			thresholds=thresholds_plotting,
 			title=dev_event_title,
 			save_path=None,
 			show=True,
@@ -2867,8 +2911,8 @@ def main() -> None:
 		# Lick count correlation plot
 		if lick_corr_name:
 			_, fig_lick_corr = plot_lick_weight_correlation(
-				events_df=events_df,
-				sensor_cols=selected,
+				events_df=events_df_analysis,
+				sensor_cols=selected_for_analysis,
 				sensor_to_weight=sensor_to_weight,
 				title=lick_corr_title,
 				save_path=None,
@@ -2894,8 +2938,8 @@ def main() -> None:
 		# Lick-weight loss % correlation plot
 		if lick_wl_corr_name:
 			_, fig_lick_wl_corr = plot_lick_weightloss_correlation(
-				events_df=events_df,
-				sensor_cols=selected,
+				events_df=events_df_analysis,
+				sensor_cols=selected_for_analysis,
 				sensor_to_weight_loss=sensor_to_weight_loss,
 				title=lick_wl_corr_title,
 				save_path=None,
