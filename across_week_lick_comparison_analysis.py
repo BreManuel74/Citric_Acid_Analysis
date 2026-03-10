@@ -21,6 +21,7 @@ import tkinter as tk
 from tkinter import filedialog
 from datetime import datetime
 from scipy import stats
+from scipy.signal import find_peaks
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
 
 plt.rcParams["font.family"] = "sans-serif"
@@ -76,31 +77,64 @@ def get_sensor_columns(df: pd.DataFrame) -> List[str]:
     return sensor_cols
 
 
-def compute_sensor_modes(df: pd.DataFrame, sensor_cols: List[str]) -> pd.Series:
-    """Compute mode values for each sensor."""
-    modes = {}
+def compute_sensor_KDE(df: pd.DataFrame, sensor_cols: List[str]) -> pd.Series:
+    """Compute the KDE (Kernel Density Estimation) peak for each sensor column.
+    
+    Returns a Series indexed by sensor column names with their KDE peak values.
+    The KDE peak represents the most probable value in the distribution.
+    """
+    kdes = {}
     for col in sensor_cols:
-        if col in df.columns:
-            mode_result = df[col].mode()
-            modes[col] = mode_result.iloc[0] if len(mode_result) > 0 else df[col].median()
-    return pd.Series(modes)
+        series = pd.to_numeric(df[col], errors="coerce")
+        # Drop NaN values before computing KDE
+        series = series.dropna()
+        if len(series) > 1:  # Need at least 2 points for KDE
+            try:
+                # Create KDE
+                kde = stats.gaussian_kde(series)
+                # Create evaluation points around the data range
+                min_val, max_val = series.min(), series.max()
+                x_eval = np.linspace(min_val, max_val, 1000)
+                # Find the peak of the KDE
+                density = kde(x_eval)
+                peak_idx = np.argmax(density)
+                kdes[col] = x_eval[peak_idx]
+            except Exception:
+                # Fall back to mean if KDE fails
+                kdes[col] = series.mean()
+        else:
+            kdes[col] = series.iloc[0] if len(series) == 1 else None
+    return pd.Series(kdes)
 
 
-def compute_mode_deviations(df: pd.DataFrame, sensor_cols: List[str], sensor_modes: pd.Series) -> pd.DataFrame:
-    """Add deviation columns to DataFrame."""
-    df_with_deviations = df.copy()
+def compute_KDE_normalizations(df: pd.DataFrame, sensor_cols: List[str], sensor_kdes: pd.Series) -> pd.DataFrame:
+    """Compute KDE normalization for each sensor: abs((value - KDE) / KDE).
+    
+    For each sensor column, creates a new column with suffix '_deviation' containing
+    the absolute normalized value: abs((capacitance_value - KDE) / KDE).
+    
+    Returns a copy of the dataframe with the new normalization columns added.
+    """
+    df_with_normalizations = df.copy()
     
     for col in sensor_cols:
-        if col in df.columns and col in sensor_modes:
-            mode_val = sensor_modes[col]
-            deviation_col = f"{col}_deviation"
-            df_with_deviations[deviation_col] = (df_with_deviations[col] - mode_val).abs()
+        kde_val = sensor_kdes[col]
+        if kde_val is not None and kde_val != 0 and col in df.columns:
+            # Compute KDE normalization: abs((value - KDE) / KDE)
+            sensor_series = pd.to_numeric(df[col], errors="coerce")
+            normalization_col_name = f"{col}_deviation"  # Keep same column name for compatibility
+            df_with_normalizations[normalization_col_name] = abs((sensor_series - kde_val) / kde_val)
+        else:
+            # If KDE is None or zero, set normalization to NaN
+            normalization_col_name = f"{col}_deviation"
+            df_with_normalizations[normalization_col_name] = pd.NA
     
-    return df_with_deviations
+    return df_with_normalizations
 
 
+# Function kept for backward compatibility but not used
 def compute_dynamic_thresholds(df: pd.DataFrame, sensor_cols: List[str], z_threshold: float = 4.0) -> pd.Series:
-    """Compute dynamic thresholds for event detection."""
+    """Compute dynamic thresholds for event detection (DEPRECATED - use fixed threshold)."""
     thresholds = {}
     
     for sensor_col in sensor_cols:
@@ -121,21 +155,63 @@ def compute_dynamic_thresholds(df: pd.DataFrame, sensor_cols: List[str], z_thres
 
 
 def detect_events_above_threshold(df: pd.DataFrame, sensor_cols: List[str], thresholds: pd.Series) -> pd.DataFrame:
-    """Detect lick events above threshold."""
+    """Detect time points where deviation exceeds the threshold for each sensor.
+    
+    Creates boolean columns indicating when each sensor's deviation peaks above the threshold.
+    Uses scipy.signal.find_peaks for robust peak detection in discrete sampled data.
+    
+    Parameters:
+        df: DataFrame with Time_sec and deviation columns
+        sensor_cols: List of sensor column names
+        thresholds: Series of threshold values per sensor
+        
+    Returns:
+        DataFrame with columns:
+            - Time_sec
+            - For each sensor: {sensor}_event (boolean indicating detected peaks above threshold)
+            - For each sensor: {sensor}_deviation (original deviation value)
+            - For each sensor: {sensor}_derivative (first-order derivative of deviation)
+    """
     result = pd.DataFrame()
     result['Time_sec'] = df['Time_sec']
     
     for sensor_col in sensor_cols:
-        deviation_col = f"{sensor_col}_deviation"
+        dev_col = f"{sensor_col}_deviation"
         event_col = f"{sensor_col}_event"
+        deriv_col = f"{sensor_col}_derivative"
         
-        if deviation_col in df.columns and sensor_col in thresholds:
-            threshold = thresholds[sensor_col]
-            result[event_col] = df[deviation_col] > threshold
-            result[f"{sensor_col}_deviation"] = df[deviation_col]
-        else:
+        if dev_col not in df.columns:
             result[event_col] = False
-            result[f"{sensor_col}_deviation"] = 0.0
+            result[dev_col] = np.nan
+            result[deriv_col] = np.nan
+            continue
+        
+        threshold = thresholds.get(sensor_col)
+        if threshold is None or not np.isfinite(threshold):
+            result[event_col] = False
+            result[dev_col] = df[dev_col]
+            result[deriv_col] = np.nan
+            continue
+        
+        # Get deviations and calculate first-order derivative
+        deviations = pd.to_numeric(df[dev_col], errors="coerce")
+        result[dev_col] = deviations
+        
+        # Calculate first-order derivative using forward difference
+        clean_deviations = deviations.fillna(0)
+        derivative = np.zeros_like(clean_deviations)
+        derivative[:-1] = np.diff(clean_deviations)  # Forward difference
+        derivative[-1] = derivative[-2] if len(derivative) > 1 else 0  # Handle last point
+        result[deriv_col] = derivative
+        
+        # Find peaks in the deviation signal using scipy.signal.find_peaks
+        peaks, _ = find_peaks(clean_deviations, height=threshold, distance=1)
+        
+        # Create boolean mask for detected peaks
+        peak_mask = np.zeros(len(clean_deviations), dtype=bool)
+        peak_mask[peaks] = True
+        
+        result[event_col] = peak_mask
     
     return result
 
@@ -907,6 +983,41 @@ def save_weekly_averages_to_file(weekly_averages: Dict, formatted_output: str, s
     return save_path
 
 
+def save_brief_lick_summary(weekly_averages: Dict, save_path: Path) -> Path:
+    """Save a brief summary of weekly lick counts by animal and averages.
+    
+    Parameters:
+        weekly_averages: Dictionary from compute_weekly_averages
+        save_path: Path where to save the text file
+        
+    Returns:
+        Path to the saved text file
+    """
+    with open(save_path, 'w', encoding='utf-8') as f:
+        f.write("WEEKLY LICK COUNTS SUMMARY\n")
+        f.write("=" * 60 + "\n\n")
+        
+        sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+        
+        for i, date in enumerate(sorted_dates, 1):
+            data = weekly_averages[date]
+            
+            f.write(f"Week {i} ({date}):" + "\n")
+            
+            # Individual animal lick counts
+            lick_counts = [int(x) for x in data['avg_licks_per_animal']]
+            f.write(f"  Individual licks by animal: {', '.join(map(str, lick_counts))}" + "\n")
+            
+            # Average licks
+            f.write(f"  Average licks per animal: {data['avg_total_licks']:.1f}" + "\n")
+            
+            f.write("\n")
+        
+        f.write("=" * 60 + "\n")
+    
+    return save_path
+
+
 def parse_date_string(date_str: str) -> datetime:
     """Parse MM/DD/YY date string to datetime object for proper sorting.
     
@@ -1017,11 +1128,12 @@ def select_single_file_tkinter(title: str, filetypes: List[Tuple[str, str]], ini
 def extract_date_from_filename(filename: str) -> Optional[str]:
     """Try to extract date from capacitive log filename.
     
-    Expected format: capacitive_log_2025-MM-DD_HH-MM-SS.csv
+    Expected format: capacitive_log_2025-MM-DD.csv or capacitive_log_2025-M-D.csv
     Returns date in MM/DD/YY format to match master CSV.
     """
-    # Pattern for capacitive_log_YYYY-MM-DD_HH-MM-SS.csv
-    pattern = r'capacitive_log_(\d{4})-(\d{2})-(\d{2})_'
+    # Pattern for capacitive_log_YYYY-M-D.csv or capacitive_log_YYYY-MM-DD.csv
+    # Allows single or double digit months/days
+    pattern = r'capacitive_log_(\d{4})-(\d{1,2})-(\d{1,2})\.csv'
     match = re.search(pattern, filename)
     
     if match:
@@ -1077,7 +1189,7 @@ def process_single_week(
     date: str,
     capacitive_file: Path,
     master_df: pd.DataFrame,
-    z_threshold: float = 4.0,
+    fixed_threshold: float = 0.01,
     ili_cutoff: float = 0.3
 ) -> Dict:
     """Process a single week's data and return summary statistics."""
@@ -1087,12 +1199,12 @@ def process_single_week(
     df = load_capacitive_csv(capacitive_file)
     sensor_cols = get_sensor_columns(df)
     
-    # Compute modes and deviations
-    sensor_modes = compute_sensor_modes(df, sensor_cols)
-    df = compute_mode_deviations(df, sensor_cols, sensor_modes)
+    # Compute KDE baselines and normalizations (same as lick_detection.py)
+    sensor_kdes = compute_sensor_KDE(df, sensor_cols)
+    df = compute_KDE_normalizations(df, sensor_cols, sensor_kdes)
     
-    # Detect events
-    thresholds = compute_dynamic_thresholds(df, sensor_cols, z_threshold)
+    # Use fixed threshold (same as lick_detection.py)
+    thresholds = pd.Series({sensor: fixed_threshold for sensor in sensor_cols})
     events_df = detect_events_above_threshold(df, sensor_cols, thresholds)
     
     # Compute bouts
@@ -1312,6 +1424,11 @@ def main():
         combined_output = formatted_output + "\n" + anova_output + "\n" + tukey_output
         save_weekly_averages_to_file(weekly_averages, combined_output, table_path)
         print(f"Comprehensive statistical analysis saved to: {table_path}")
+    
+    # Always save brief lick summary
+    brief_path = master_csv.parent / "weekly_lick_summary_brief.txt"
+    save_brief_lick_summary(weekly_averages, brief_path)
+    print(f"Brief lick summary saved to: {brief_path}")
     
     # Optional: Save plots
     save_plot = input("\nSave weekly averages plots as SVG? (y/n): ").strip().lower()
