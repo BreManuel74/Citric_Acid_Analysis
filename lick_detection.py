@@ -2246,6 +2246,62 @@ def save_lick_bout_data(
 	return save_path
 
 
+def save_brief_lick_summary(
+	selected_sensors: List[str],
+	events_df: pd.DataFrame,
+	selected_date: str = None,
+	csv_path: Path = None,
+	save_path: Path = None
+) -> Path:
+	"""Save a brief summary of lick counts by animal and average.
+	
+	Parameters:
+		selected_sensors: List of selected sensor names (sorted in animal order)
+		events_df: DataFrame with event detection results
+		selected_date: Optional date string if loaded from metadata
+		csv_path: Optional path to the original CSV (for auto-naming)
+		save_path: Optional custom save path
+		
+	Returns:
+		Path to the saved text file
+	"""
+	if save_path is None and csv_path is not None:
+		# Generate filename based on capacitive CSV name
+		base_name = csv_path.stem
+		if selected_date:
+			save_path = csv_path.parent / f"{base_name}_{selected_date.replace('/', '-')}_lick_summary_brief.txt"
+		else:
+			save_path = csv_path.parent / f"{base_name}_lick_summary_brief.txt"
+	elif save_path is None:
+		save_path = Path("lick_summary_brief.txt")
+	
+	# Collect lick counts for each sensor
+	lick_counts = []
+	for sensor in selected_sensors:
+		event_col = f"{sensor}_event"
+		if event_col in events_df.columns:
+			sensor_licks = int(events_df[event_col].sum())
+			lick_counts.append(sensor_licks)
+		else:
+			lick_counts.append(0)
+	
+	# Calculate average
+	avg_licks = np.mean(lick_counts) if lick_counts else 0.0
+	
+	with open(save_path, 'w', encoding='utf-8') as f:
+		f.write("LICK COUNTS SUMMARY\n")
+		f.write("=" * 60 + "\n\n")
+		
+		if selected_date:
+			f.write(f"Date: {selected_date}\n")
+		f.write(f"Individual licks by animal: {', '.join(map(str, lick_counts))}\n")
+		f.write(f"Average licks per animal: {avg_licks:.1f}\n")
+		
+		f.write("\n" + "=" * 60 + "\n")
+	
+	return save_path
+
+
 def main() -> None:
 	args = parse_args()
 
@@ -2721,6 +2777,15 @@ def main() -> None:
 				selected_date=selected_date
 			)
 			print(f"✓ Analysis data saved to: {saved_path}")
+			
+			# Save brief lick summary
+			brief_path = save_brief_lick_summary(
+				selected_sensors=selected_for_analysis,
+				events_df=events_df_analysis,
+				selected_date=selected_date,
+				csv_path=csv_path
+			)
+			print(f"✓ Brief lick summary saved to: {brief_path}")
 		except Exception as e:
 			print(f"Error saving analysis data: {e}")
 		print("=" * 60 + "\n")
