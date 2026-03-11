@@ -24,6 +24,15 @@ from scipy import stats
 from scipy.signal import find_peaks
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
 
+# Try importing pingouin for repeated measures ANOVA
+try:
+    import pingouin as pg
+    HAS_PINGOUIN = True
+except ImportError:
+    HAS_PINGOUIN = False
+    print("WARNING: pingouin not installed. Repeated measures ANOVA will not be available.")
+    print("Install with: pip install pingouin")
+
 plt.rcParams["font.family"] = "sans-serif"
 plt.rcParams["font.sans-serif"] = ["Arial"]
 plt.rcParams["svg.fonttype"] = "none"
@@ -304,6 +313,8 @@ def compute_lick_bouts(events_df: pd.DataFrame, sensor_cols: List[str], ili_cuto
 def compute_weekly_averages(weekly_results: Dict) -> Dict:
     """Compute average licks, bouts, and weight metrics across all 12 animals for each week.
     
+    NOW PRESERVES ANIMAL IDs FOR REPEATED MEASURES ANALYSIS.
+    
     Parameters:
         weekly_results: Dictionary with results from process_single_week for each date
         
@@ -320,6 +331,7 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
             - std_fecal: Standard deviation of fecal counts across animals
             - std_bottle_weight: Standard deviation of bottle weight loss across animals
             - std_total_weight: Standard deviation of total weight loss across animals
+            - animal_ids: List of animal IDs (for repeated measures tracking)
     """
     averages = {}
     
@@ -403,7 +415,8 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
             'std_total_weight': std_total_weight,
             'total_animals': len(lick_counts),
             'sum_total_licks': result['total_licks'],
-            'sum_total_bouts': result['total_bouts']
+            'sum_total_bouts': result['total_bouts'],
+            'animal_ids': result.get('animal_ids', [])  # NEW: preserve animal IDs for repeated measures
         }
     
     return averages
@@ -411,13 +424,203 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
 
 def perform_anova_analysis(weekly_averages: Dict) -> Dict:
     """
-    Perform one-way ANOVA tests for each of the 5 measures across weeks.
+    Perform one-way REPEATED MEASURES ANOVA tests for each of the 5 measures across weeks.
+    
+    Uses pingouin.rm_anova() to properly account for repeated measurements from the same
+    animals across different weeks. Falls back to standard ANOVA with warning if pingouin
+    is not available.
     
     Parameters:
         weekly_averages: Dictionary from compute_weekly_averages
         
     Returns:
         Dictionary containing ANOVA results for each measure
+    """
+    # Check if pingouin is available for repeated measures ANOVA
+    if not HAS_PINGOUIN:
+        print("\n" + "="*80)
+        print("WARNING: Repeated measures ANOVA requires pingouin library")
+        print("Falling back to standard ANOVA (does NOT account for repeated measures)")
+        print("Install pingouin with: pip install pingouin")
+        print("="*80 + "\n")
+        return _perform_standard_anova_fallback(weekly_averages)
+    
+    # Build long-format dataframe for repeated measures ANOVA
+    # Each row: one animal at one week with one measurement
+    long_data = []
+    
+    sorted_weeks = sort_dates_chronologically(list(weekly_averages.keys()))
+    
+    for week_idx, date in enumerate(sorted_weeks):
+        data = weekly_averages[date]
+        animal_ids = data.get('animal_ids', [])
+        
+        # If no animal IDs, create generic ones based on position
+        if not animal_ids:
+            animal_ids = [f"Animal_{i+1}" for i in range(len(data['avg_licks_per_animal']))]
+        
+        for i, animal_id in enumerate(animal_ids):
+            # Skip bottle weight outlier for 11/12/25 if weight is 0 (placeholder)
+            bottle_weight = data['avg_bottle_weight_per_animal'][i]
+            
+            long_data.append({
+                'Animal': animal_id,
+                'Week': week_idx + 1,  # 1-indexed week number
+                'Date': date,
+                'licks': data['avg_licks_per_animal'][i],
+                'bouts': data['avg_bouts_per_animal'][i],
+                'fecal': data['avg_fecal_per_animal'][i],
+                'bottle_weight': bottle_weight if bottle_weight > 0 else np.nan,  # Exclude outliers as NaN
+                'total_weight': data['avg_total_weight_per_animal'][i]
+            })
+    
+    df_long = pd.DataFrame(long_data)
+    
+    # Perform repeated measures ANOVA for each measure
+    anova_results = {}
+    measures = ['licks', 'bouts', 'fecal', 'bottle_weight', 'total_weight']
+    measure_names = {
+        'licks': 'Total Licks',
+        'bouts': 'Total Bouts', 
+        'fecal': 'Fecal Count',
+        'bottle_weight': 'Bottle Weight Loss',
+        'total_weight': 'Total Weight Loss'
+    }
+    
+    print("\n" + "="*80)
+    print("PERFORMING REPEATED MEASURES ANOVA (ONE-WAY)")
+    print("Within-subjects factor: Week")
+    print("="*80)
+    
+    for measure in measures:
+        print(f"\nAnalyzing: {measure_names[measure]}")
+        
+        # For bottle_weight, drop rows with NaN (outliers)
+        if measure == 'bottle_weight':
+            df_measure = df_long[['Animal', 'Week', measure]].dropna()
+        else:
+            df_measure = df_long[['Animal', 'Week', measure]].copy()
+        
+        # Check if we have enough data
+        n_animals = df_measure['Animal'].nunique()
+        n_weeks = df_measure['Week'].nunique()
+        
+        # DIAGNOSTIC: Check for animals with incomplete data across weeks
+        animals_per_week = df_measure.groupby('Animal')['Week'].nunique()
+        complete_animals = animals_per_week[animals_per_week == n_weeks]
+        incomplete_animals = animals_per_week[animals_per_week < n_weeks]
+        
+        if len(incomplete_animals) > 0:
+            print(f"  WARNING: {len(incomplete_animals)} animals missing data in some weeks:")
+            for animal_id, n_present in incomplete_animals.items():
+                weeks_present = sorted(df_measure[df_measure['Animal'] == animal_id]['Week'].unique())
+                print(f"    {animal_id}: present in {n_present}/{n_weeks} weeks (weeks: {weeks_present})")
+            print(f"  Complete animals (all {n_weeks} weeks): {len(complete_animals)}")
+            print(f"  Filtering to only animals with complete data...")
+            
+            # Filter to only animals with complete data across all weeks
+            df_measure = df_measure[df_measure['Animal'].isin(complete_animals.index)]
+            n_animals = len(complete_animals)
+            print(f"  After filtering: n_animals={n_animals}, n_weeks={n_weeks}")
+        
+        if n_weeks < 2:
+            anova_results[measure] = {
+                'measure_name': measure_names[measure],
+                'f_statistic': np.nan,
+                'p_value': np.nan,
+                'significant': False,
+                'error': 'Insufficient data for ANOVA (need at least 2 weeks)',
+                'is_repeated_measures': True
+            }
+            print(f"  ERROR: Insufficient data ({n_weeks} weeks)")
+            continue
+        
+        try:
+            # Perform repeated measures ANOVA
+            # dv = dependent variable (the measure)
+            # within = within-subjects factor (Week)
+            # subject = subject identifier (Animal)
+            rm_result = pg.rm_anova(
+                dv=measure,
+                within='Week',
+                subject='Animal',
+                data=df_measure,
+                detailed=True
+            )
+            
+            # Extract results
+            f_stat = rm_result.loc[rm_result['Source'] == 'Week', 'F'].values[0]
+            p_value = rm_result.loc[rm_result['Source'] == 'Week', 'p-unc'].values[0]
+            
+            # Check for sphericity violation and use corrected p-value if needed
+            if 'p-GG-corr' in rm_result.columns:
+                p_gg = rm_result.loc[rm_result['Source'] == 'Week', 'p-GG-corr'].values[0]
+                sphericity_violated = (p_gg != p_value)
+            else:
+                p_gg = p_value
+                sphericity_violated = False
+            
+            # Get effect size
+            if 'np2' in rm_result.columns:  # Partial eta-squared
+                effect_size = rm_result.loc[rm_result['Source'] == 'Week', 'np2'].values[0]
+            else:
+                effect_size = np.nan
+            
+            # Compute descriptive statistics per week
+            group_stats = []
+            for week_num in sorted(df_measure['Week'].unique()):
+                week_data = df_measure[df_measure['Week'] == week_num][measure]
+                group_stats.append({
+                    'week': sorted_weeks[week_num - 1],  # Convert back to date
+                    'week_number': week_num,
+                    'n': len(week_data),
+                    'mean': week_data.mean(),
+                    'std': week_data.std(ddof=1),
+                    'min': week_data.min(),
+                    'max': week_data.max()
+                })
+            
+            anova_results[measure] = {
+                'measure_name': measure_names[measure],
+                'f_statistic': f_stat,
+                'p_value': p_value,
+                'p_value_gg_corrected': p_gg,
+                'sphericity_violated': sphericity_violated,
+                'effect_size': effect_size,
+                'significant': p_gg < 0.05,  # Use GG-corrected p-value for significance
+                'group_stats': group_stats,
+                'n_animals': n_animals,
+                'n_weeks': n_weeks,
+                'is_repeated_measures': True,
+                'rm_anova_table': rm_result
+            }
+            
+            sig_marker = "***" if p_gg < 0.05 else ""
+            print(f"  F({n_weeks-1}, {(n_weeks-1)*(n_animals-1)}) = {f_stat:.3f}, p = {p_gg:.4f} {sig_marker}")
+            if sphericity_violated:
+                print(f"  (Greenhouse-Geisser corrected p-value used due to sphericity violation)")
+            print(f"  Partial η² = {effect_size:.3f}")
+            print(f"  Animals: {n_animals}, Complete observations across {n_weeks} weeks")
+            
+        except Exception as e:
+            print(f"  ERROR: {str(e)}")
+            anova_results[measure] = {
+                'measure_name': measure_names[measure],
+                'f_statistic': np.nan,
+                'p_value': np.nan,
+                'significant': False,
+                'error': f'Repeated measures ANOVA failed: {str(e)}',
+                'is_repeated_measures': True
+            }
+    
+    return anova_results
+
+
+def _perform_standard_anova_fallback(weekly_averages: Dict) -> Dict:
+    """Fallback to standard ANOVA when pingouin is not available.
+    
+    WARNING: This does NOT account for repeated measures and treats observations
+    as independent. Results may be invalid for repeated measures designs.
     """
     # Organize data by week (date)
     week_groups = {}
@@ -448,7 +651,7 @@ def perform_anova_analysis(weekly_averages: Dict) -> Dict:
             
         week_groups[date]['total_weight'].extend(data['avg_total_weight_per_animal'])
     
-    # Perform ANOVA for each measure
+    # Perform standard ANOVA for each measure
     anova_results = {}
     measures = ['licks', 'bouts', 'fecal', 'bottle_weight', 'total_weight']
     measure_names = {
@@ -473,7 +676,7 @@ def perform_anova_analysis(weekly_averages: Dict) -> Dict:
                 week_labels.append(week)
         
         if len(groups_data) >= 2:  # Need at least 2 groups for ANOVA
-            # Perform one-way ANOVA
+            # Perform standard one-way ANOVA (DOES NOT ACCOUNT FOR REPEATED MEASURES)
             f_stat, p_value = stats.f_oneway(*groups_data)
             
             # Calculate descriptive statistics for each group
@@ -485,7 +688,7 @@ def perform_anova_analysis(weekly_averages: Dict) -> Dict:
                     'ca_percent': week_groups[week]['ca_percent'],
                     'n': len(data),
                     'mean': np.mean(data),
-                    'std': np.std(data, ddof=1),  # Sample standard deviation
+                    'std': np.std(data, ddof=1),
                     'min': np.min(data),
                     'max': np.max(data)
                 })
@@ -497,7 +700,9 @@ def perform_anova_analysis(weekly_averages: Dict) -> Dict:
                 'significant': p_value < 0.05,
                 'group_stats': group_stats,
                 'week_labels': week_labels,
-                'groups_data': groups_data
+                'groups_data': groups_data,
+                'is_repeated_measures': False,
+                'warning': 'Standard ANOVA used - does NOT account for repeated measures'
             }
         else:
             anova_results[measure] = {
@@ -505,7 +710,8 @@ def perform_anova_analysis(weekly_averages: Dict) -> Dict:
                 'f_statistic': np.nan,
                 'p_value': np.nan,
                 'significant': False,
-                'error': 'Insufficient data for ANOVA (need at least 2 groups)'
+                'error': 'Insufficient data for ANOVA (need at least 2 groups)',
+                'is_repeated_measures': False
             }
     
     return anova_results
@@ -682,8 +888,20 @@ def display_anova_results(anova_results: Dict) -> str:
     """
     lines = []
     lines.append("\n" + "=" * 80)
-    lines.append("ONE-WAY ANOVA RESULTS ACROSS WEEKS")
-    lines.append("=" * 80)
+    
+    # Check if results are repeated measures or standard
+    is_rm = any(results.get('is_repeated_measures', False) for results in anova_results.values())
+    
+    if is_rm:
+        lines.append("ONE-WAY REPEATED MEASURES ANOVA RESULTS ACROSS WEEKS")
+        lines.append("=" * 80)
+        lines.append("Within-subjects factor: Week")
+        lines.append("Subject tracking: Animal ID")
+    else:
+        lines.append("ONE-WAY ANOVA RESULTS ACROSS WEEKS")
+        lines.append("=" * 80)
+        lines.append("WARNING: Standard ANOVA used - does NOT account for repeated measures")
+    
     lines.append("")
     
     for measure, results in anova_results.items():
@@ -691,13 +909,39 @@ def display_anova_results(anova_results: Dict) -> str:
             lines.append(f"{results['measure_name']}: {results['error']}")
             lines.append("")
             continue
+        
+        if 'warning' in results:
+            lines.append(f"WARNING: {results['warning']}")
+            lines.append("")
             
         lines.append(f"MEASURE: {results['measure_name'].upper()}")
         lines.append("-" * 50)
         
+        # Show design type
+        if results.get('is_repeated_measures', False):
+            lines.append("Design: One-way repeated measures (within-subjects)")
+            if 'n_animals' in results and 'n_weeks' in results:
+                lines.append(f"Animals: {results['n_animals']}, Weeks: {results['n_weeks']}")
+        else:
+            lines.append("Design: Standard one-way (between-groups)")
+        
         # ANOVA summary
         lines.append(f"F-statistic: {results['f_statistic']:.4f}")
-        lines.append(f"p-value: {results['p_value']:.6f}")
+        
+        # Show both uncorrected and corrected p-values if available
+        if 'p_value_gg_corrected' in results and results.get('sphericity_violated', False):
+            lines.append(f"p-value (uncorrected): {results['p_value']:.6f}")
+            lines.append(f"p-value (GG-corrected): {results['p_value_gg_corrected']:.6f}")
+            lines.append("  (Greenhouse-Geisser correction applied for sphericity violation)")
+            p_for_sig = results['p_value_gg_corrected']
+        else:
+            lines.append(f"p-value: {results.get('p_value', results.get('p_value_gg_corrected', np.nan)):.6f}")
+            p_for_sig = results.get('p_value', results.get('p_value_gg_corrected', np.nan))
+        
+        # Effect size for repeated measures
+        if 'effect_size' in results and not np.isnan(results['effect_size']):
+            effect_interpretation = "large" if results['effect_size'] > 0.14 else "medium" if results['effect_size'] > 0.06 else "small"
+            lines.append(f"Partial η²: {results['effect_size']:.4f} ({effect_interpretation} effect size)")
         
         if results['significant']:
             lines.append(f"Result: SIGNIFICANT (p < 0.05) - There are significant differences across weeks")
@@ -708,18 +952,36 @@ def display_anova_results(anova_results: Dict) -> str:
         
         # Group descriptive statistics
         lines.append("Week Statistics:")
-        header = f"{'Week':<12} {'CA%':<6} {'N':<4} {'Mean':<10} {'Std':<10} {'Min':<8} {'Max':<8}"
+        
+        # Check if we have CA% information (old format) or week_number (new format)
+        has_ca_percent = 'group_stats' in results and len(results['group_stats']) > 0 and 'ca_percent' in results['group_stats'][0]
+        
+        if has_ca_percent:
+            header = f"{'Week':<12} {'CA%':<6} {'N':<4} {'Mean':<10} {'Std':<10} {'Min':<8} {'Max':<8}"
+        else:
+            header = f"{'Week':<12} {'Week#':<7} {'N':<4} {'Mean':<10} {'Std':<10} {'Min':<8} {'Max':<8}"
+        
         lines.append(header)
         lines.append("-" * 60)
         
         for group_stat in results['group_stats']:
-            row = (f"{group_stat['week']:<12} "
-                   f"{group_stat['ca_percent']:<6} "
-                   f"{group_stat['n']:<4} "
-                   f"{group_stat['mean']:<10.2f} "
-                   f"{group_stat['std']:<10.2f} "
-                   f"{group_stat['min']:<8.2f} "
-                   f"{group_stat['max']:<8.2f}")
+            if has_ca_percent:
+                row = (f"{group_stat['week']:<12} "
+                       f"{group_stat['ca_percent']:<6} "
+                       f"{group_stat['n']:<4} "
+                       f"{group_stat['mean']:<10.2f} "
+                       f"{group_stat['std']:<10.2f} "
+                       f"{group_stat['min']:<8.2f} "
+                       f"{group_stat['max']:<8.2f}")
+            else:
+                week_num = group_stat.get('week_number', '')
+                row = (f"{group_stat['week']:<12} "
+                       f"{week_num:<7} "
+                       f"{group_stat['n']:<4} "
+                       f"{group_stat['mean']:<10.2f} "
+                       f"{group_stat['std']:<10.2f} "
+                       f"{group_stat['min']:<8.2f} "
+                       f"{group_stat['max']:<8.2f}")
             lines.append(row)
         
         lines.append("")
@@ -1547,10 +1809,11 @@ def process_single_week(
     
     print(f"\nMetadata loaded: {len(date_metadata)} animals found in master CSV for {date}")
     
-    # Extract sensor mappings and CA%
+    # Extract sensor mappings, animal IDs, and CA%
     sensor_to_weight = {}
     sensor_to_weight_loss = {}
     sensor_to_fecal = {}
+    sensor_to_animal_id = {}  # NEW: Track animal IDs for repeated measures
     ca_percent = None
     
     print(f"\nSensor assignments from master CSV:")
@@ -1560,7 +1823,14 @@ def process_single_week(
         sensor_to_weight[sensor_name] = float(row['bottle_weight_change'])
         sensor_to_weight_loss[sensor_name] = float(row['total_weight_change'])
         
-        print(f"  Animal {idx}: {sensor_name} (bottle_wt={row['bottle_weight_change']}, total_wt={row['total_weight_change']})")
+        # Extract animal ID if available
+        if 'animal_ID' in row and pd.notna(row['animal_ID']):
+            sensor_to_animal_id[sensor_name] = str(row['animal_ID'])
+        else:
+            # Fallback to generic ID based on sensor if animal_ID not in CSV
+            sensor_to_animal_id[sensor_name] = f"Animal_{sensor_num}"
+        
+        print(f"  Animal {row.get('animal_ID', idx)}: {sensor_name} (bottle_wt={row['bottle_weight_change']}, total_wt={row['total_weight_change']})")
         
         # Extract CA% (should be the same for all rows in this date)
         if ca_percent is None and 'CA_%' in row and pd.notna(row['CA_%']):
@@ -1592,6 +1862,7 @@ def process_single_week(
     weights = []
     weight_losses = []
     fecal_counts = []
+    animal_ids = []  # NEW: Track animal IDs in same order as measurements
     
     print(f"\nPer-sensor data (only selected sensors):")
     for sensor in selected_sensors:
@@ -1636,6 +1907,7 @@ def process_single_week(
         
         weight_losses.append(total_wt)
         fecal_counts.append(fecal)
+        animal_ids.append(sensor_to_animal_id.get(sensor, f"Unknown_{sensor}"))  # NEW: Track animal ID
         
         # Additional detail line for metadata
         if lick_counts[-1] == 0:
@@ -1670,6 +1942,7 @@ def process_single_week(
         'fecal_counts': np.array(fecal_counts),
         'weights': np.array(weights),
         'weight_losses': np.array(weight_losses),
+        'animal_ids': animal_ids,  # NEW: Include animal IDs for repeated measures tracking
         'correlations': {
             'lick_weight': lick_weight_corr,
             'bout_weight': bout_weight_corr,
