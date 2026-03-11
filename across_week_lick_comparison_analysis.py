@@ -24,6 +24,15 @@ from scipy import stats
 from scipy.signal import find_peaks
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
 
+# Try importing pingouin for mixed ANOVA
+try:
+    import pingouin as pg
+    HAS_PINGOUIN = True
+except ImportError:
+    HAS_PINGOUIN = False
+    print("WARNING: pingouin not installed. Mixed ANOVA will not be available.")
+    print("Install with: pip install pingouin")
+
 plt.rcParams["font.family"] = "sans-serif"
 plt.rcParams["font.sans-serif"] = ["Arial"]
 plt.rcParams["svg.fonttype"] = "none"
@@ -353,7 +362,9 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
             'std_total_weight': std_total_weight,
             'total_animals': len(lick_counts),
             'sum_total_licks': result['total_licks'],
-            'sum_total_bouts': result['total_bouts']
+            'sum_total_bouts': result['total_bouts'],
+            'animal_ids': result.get('animal_ids', []),  # Preserve for repeated measures
+            'animal_sexes': result.get('animal_sexes', [])  # Preserve for mixed ANOVA
         }
     
     return averages
@@ -361,15 +372,305 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
 
 def perform_anova_analysis(weekly_averages: Dict) -> Dict:
     """
-    Perform one-way ANOVA tests for each of the 5 measures across CA% concentrations.
+    Perform MIXED ANOVA tests for each of the 5 measures:
+    - Between-subjects factor: Sex (each animal has one sex)
+    - Within-subjects factor: CA% (repeated measures across concentrations)
+    
+    Uses pingouin.mixed_anova() to properly account for both factors and repeated measurements.
+    Falls back to standard ANOVA with warning if pingouin is not available.
     
     Parameters:
         weekly_averages: Dictionary from compute_weekly_averages
         
     Returns:
-        Dictionary containing ANOVA results for each measure
+        Dictionary containing Mixed ANOVA results for each measure
     """
-    # Organize data by CA% concentration
+    # Check if pingouin is available for mixed ANOVA
+    if not HAS_PINGOUIN:
+        print("\n" + "="*80)
+        print("WARNING: Mixed ANOVA requires pingouin library")
+        print("Falling back to standard ANOVA (does NOT account for repeated measures or sex)")
+        print("Install pingouin with: pip install pingouin")
+        print("="*80 + "\n")
+        return _perform_standard_anova_fallback(weekly_averages)
+    
+    # Build long-format dataframe for mixed ANOVA
+    # Each row: one animal at one CA% with one measurement
+    # Need to track Sex for each animal (constant across CA% levels)
+    long_data = []
+    animal_sex_map = {}  # Map animal ID to sex (should be constant across CA%)
+    
+    # Sort by CA% concentration
+    sorted_dates = sorted(weekly_averages.keys(), key=lambda d: weekly_averages[d]['ca_percent'])
+    
+    print("\n" + "="*80)
+    print("DIAGNOSTIC: Checking Animal IDs and Sex Data")
+    print("="*80)
+    
+    for date in sorted_dates:
+        data = weekly_averages[date]
+        ca_percent = data['ca_percent']
+        animal_ids = data.get('animal_ids', [])
+        animal_sexes = data.get('animal_sexes', [])
+        
+        print(f"\n{date} (CA {ca_percent}%):")
+        print(f"  Number of animals: {len(animal_ids) if animal_ids else 0}")
+        print(f"  Animal IDs: {animal_ids}")
+        print(f"  Sexes: {animal_sexes}")
+        
+        # If no animal IDs, create generic ones based on position
+        if not animal_ids:
+            animal_ids = [f"Animal_{i+1}" for i in range(len(data['avg_licks_per_animal']))]
+            print(f"  WARNING: No animal IDs found, using generic IDs: {animal_ids}")
+        
+        # If no sex data, use Unknown
+        if not animal_sexes or len(animal_sexes) != len(animal_ids):
+            animal_sexes = ["Unknown"] * len(animal_ids)
+            print(f"  WARNING: No sex data found, using 'Unknown'")
+        
+        for i, animal_id in enumerate(animal_ids):
+            # Track sex for each animal (should be consistent across CA%)
+            if animal_id not in animal_sex_map:
+                animal_sex_map[animal_id] = animal_sexes[i]
+            elif animal_sex_map[animal_id] != animal_sexes[i]:
+                print(f"  WARNING: Animal {animal_id} has inconsistent sex: {animal_sex_map[animal_id]} vs {animal_sexes[i]}")
+            
+            # Skip bottle weight outlier for 11/12/25 if weight is 0 (placeholder)
+            bottle_weight = data['avg_bottle_weight_per_animal'][i]
+            
+            long_data.append({
+                'Animal': animal_id,
+                'Sex': animal_sex_map[animal_id],
+                'CA_Percent': ca_percent,
+                'Date': date,
+                'licks': data['avg_licks_per_animal'][i],
+                'bouts': data['avg_bouts_per_animal'][i],
+                'fecal': data['avg_fecal_per_animal'][i],
+                'bottle_weight': bottle_weight if bottle_weight > 0 else np.nan,  # Exclude outliers as NaN
+                'total_weight': data['avg_total_weight_per_animal'][i]
+            })
+    
+    print("\n" + "="*80)
+    print(f"Total unique animals across all weeks: {len(animal_sex_map)}")
+    print(f"Animal → Sex mapping:")
+    for animal_id, sex in sorted(animal_sex_map.items()):
+        print(f"  {animal_id}: {sex}")
+    print("="*80 + "\n")
+    
+    df_long = pd.DataFrame(long_data)
+    
+    # Check if we have sex data
+    has_sex_data = 'Sex' in df_long.columns and df_long['Sex'].nunique() > 1 and 'Unknown' not in df_long['Sex'].values
+    
+    if not has_sex_data:
+        print("\n" + "="*80)
+        print("WARNING: Sex data not found or incomplete in master CSV")
+        print("Falling back to one-way repeated measures ANOVA (CA% only)")
+        print("="*80 + "\n")
+    
+    # Perform repeated measures ANOVA for each measure
+    anova_results = {}
+    measures = ['licks', 'bouts', 'fecal', 'bottle_weight', 'total_weight']
+    measure_names = {
+        'licks': 'Total Licks',
+        'bouts': 'Total Bouts', 
+        'fecal': 'Fecal Count',
+        'bottle_weight': 'Bottle Weight Loss',
+        'total_weight': 'Total Weight Loss'
+    }
+    
+    print("\n" + "="*80)
+    if has_sex_data:
+        print("PERFORMING MIXED ANOVA")
+        print("Between-subjects factor: Sex")
+        print("Within-subjects factor: CA% (repeated measures)")
+    else:
+        print("PERFORMING REPEATED MEASURES ANOVA (ONE-WAY)")
+        print("Within-subjects factor: CA%")
+    print("="*80)
+    
+    for measure in measures:
+        print(f"\nAnalyzing: {measure_names[measure]}")
+        
+        # For bottle_weight, drop rows with NaN (outliers)
+        # Include Sex column if available
+        if has_sex_data:
+            if measure == 'bottle_weight':
+                df_measure = df_long[['Animal', 'Sex', 'CA_Percent', measure]].dropna()
+            else:
+                df_measure = df_long[['Animal', 'Sex', 'CA_Percent', measure]].copy()
+        else:
+            if measure == 'bottle_weight':
+                df_measure = df_long[['Animal', 'CA_Percent', measure]].dropna()
+            else:
+                df_measure = df_long[['Animal', 'CA_Percent', measure]].copy()
+        
+        # Check if we have enough data
+        n_animals = df_measure['Animal'].nunique()
+        n_ca_levels = df_measure['CA_Percent'].nunique()
+        
+        # DIAGNOSTIC: Check for animals with incomplete data across CA%
+        animals_per_ca = df_measure.groupby('Animal')['CA_Percent'].nunique()
+        complete_animals = animals_per_ca[animals_per_ca == n_ca_levels]
+        incomplete_animals = animals_per_ca[animals_per_ca < n_ca_levels]
+        
+        if len(incomplete_animals) > 0:
+            print(f"  WARNING: {len(incomplete_animals)} animals missing data at some CA% levels")
+            print(f"  Complete animals (all {n_ca_levels} CA% levels): {len(complete_animals)}")
+            print(f"  Incomplete animals:")
+            for animal_id, n_levels in incomplete_animals.items():
+                ca_levels_present = df_measure[df_measure['Animal'] == animal_id]['CA_Percent'].unique()
+                print(f"    {animal_id}: present in {n_levels}/{n_ca_levels} CA% levels ({sorted(ca_levels_present)})")
+            print(f"  Filtering to only animals with complete data...")
+            
+            # Filter to only animals with complete data across all CA% levels
+            df_measure = df_measure[df_measure['Animal'].isin(complete_animals.index)]
+            n_animals = len(complete_animals)
+            print(f"  After filtering: n_animals={n_animals}, n_ca_levels={n_ca_levels}")
+        else:
+            print(f"  All {n_animals} animals have complete data across all {n_ca_levels} CA% levels")
+        
+        if n_ca_levels < 2:
+            anova_results[measure] = {
+                'measure_name': measure_names[measure],
+                'error': 'Insufficient data for ANOVA (need at least 2 CA% levels)',
+                'significant': False,
+                'is_mixed_anova': has_sex_data
+            }
+            print(f"  ERROR: Insufficient data ({n_ca_levels} CA% levels)")
+            continue
+        
+        try:
+            if has_sex_data:
+                # MIXED ANOVA with Sex (between) and CA% (within)
+                result_table = pg.mixed_anova(
+                    dv=measure,
+                    within='CA_Percent',
+                    between='Sex',
+                    subject='Animal',
+                    data=df_measure
+                )
+                
+                # Extract main effects and interaction
+                sex_row = result_table[result_table['Source'] == 'Sex']
+                ca_row = result_table[result_table['Source'] == 'CA_Percent']
+                interaction_row = result_table[result_table['Source'] == 'Interaction']
+                
+                # Sex main effect (between-subjects)
+                f_stat_sex = sex_row['F'].values[0] if len(sex_row) > 0 else np.nan
+                p_value_sex = sex_row['p-unc'].values[0] if len(sex_row) > 0 else np.nan
+                
+                # CA% main effect (within-subjects)
+                f_stat_ca = ca_row['F'].values[0] if len(ca_row) > 0 else np.nan
+                p_value_ca = ca_row['p-unc'].values[0] if len(ca_row) > 0 else np.nan
+                
+                # Interaction
+                f_stat_interaction = interaction_row['F'].values[0] if len(interaction_row) > 0 else np.nan
+                p_value_interaction = interaction_row['p-unc'].values[0] if len(interaction_row) > 0 else np.nan
+                
+            else:
+                # ONE-WAY REPEATED MEASURES ANOVA (CA% only)
+                result_table = pg.rm_anova(
+                    dv=measure,
+                    within='CA_Percent',
+                    subject='Animal',
+                    data=df_measure,
+                    detailed=True
+                )
+                
+                # Extract results
+                f_stat_ca = result_table.loc[result_table['Source'] == 'CA_Percent', 'F'].values[0]
+                p_value_ca = result_table.loc[result_table['Source'] == 'CA_Percent', 'p-unc'].values[0]
+                
+                # Set sex/interaction to NaN for one-way design
+                f_stat_sex = np.nan
+                p_value_sex = np.nan
+                f_stat_interaction = np.nan
+                p_value_interaction = np.nan
+            
+            # Compute descriptive statistics per CA%
+            group_stats = []
+            for ca_percent in sorted(df_measure['CA_Percent'].unique()):
+                ca_data = df_measure[df_measure['CA_Percent'] == ca_percent][measure]
+                group_stats.append({
+                    'ca_percent': ca_percent,
+                    'n': len(ca_data),
+                    'mean': ca_data.mean(),
+                    'std': ca_data.std(ddof=1),
+                    'min': ca_data.min(),
+                    'max': ca_data.max()
+                })
+            
+            # If mixed ANOVA, also compute descriptive stats per Sex
+            sex_stats = []
+            if has_sex_data:
+                for sex_val in sorted(df_measure['Sex'].unique()):
+                    sex_data = df_measure[df_measure['Sex'] == sex_val][measure]
+                    sex_stats.append({
+                        'sex': sex_val,
+                        'n': len(sex_data),
+                        'mean': sex_data.mean(),
+                        'std': sex_data.std(ddof=1)
+                    })
+            
+            anova_results[measure] = {
+                'measure_name': measure_names[measure],
+                # CA% effect (main for mixed, only for RM)
+                'f_statistic': f_stat_ca,
+                'p_value': p_value_ca,
+                'significant': p_value_ca < 0.05,
+                # Sex effect (only for mixed ANOVA)
+                'f_statistic_sex': f_stat_sex,
+                'p_value_sex': p_value_sex,
+                'significant_sex': p_value_sex < 0.05 if not np.isnan(p_value_sex) else False,
+                # Interaction effect (only for mixed ANOVA)
+                'f_statistic_interaction': f_stat_interaction,
+                'p_value_interaction': p_value_interaction,
+                'significant_interaction': p_value_interaction < 0.05 if not np.isnan(p_value_interaction) else False,
+                # Descriptive stats
+                'group_stats': group_stats,
+                'sex_stats': sex_stats,
+                'ca_labels': sorted(df_measure['CA_Percent'].unique()),
+                'n_animals': n_animals,
+                'n_ca_levels': n_ca_levels,
+                'is_mixed_anova': has_sex_data,
+                'anova_table': result_table
+            }
+            
+            # Print results
+            print(f"  Results:")
+            if has_sex_data:
+                sig_marker_sex = "***" if p_value_sex < 0.05 else ""
+                sig_marker_ca = "***" if p_value_ca < 0.05 else ""
+                sig_marker_int = "***" if p_value_interaction < 0.05 else ""
+                print(f"    Sex: F = {f_stat_sex:.3f}, p = {p_value_sex:.4f} {sig_marker_sex}")
+                print(f"    CA%: F = {f_stat_ca:.3f}, p = {p_value_ca:.4f} {sig_marker_ca}")
+                print(f"    Sex × CA%: F = {f_stat_interaction:.3f}, p = {p_value_interaction:.4f} {sig_marker_int}")
+            else:
+                sig_marker = "***" if p_value_ca < 0.05 else ""
+                print(f"  F = {f_stat_ca:.3f}, p = {p_value_ca:.4f} {sig_marker}")
+            
+            print(f"  Animals: {n_animals}, CA% levels: {n_ca_levels}")
+            
+        except Exception as e:
+            print(f"  ERROR: {str(e)}")
+            anova_results[measure] = {
+                'measure_name': measure_names[measure],
+                'error': f'ANOVA failed: {str(e)}',
+                'significant': False,
+                'is_mixed_anova': has_sex_data
+            }
+    
+    return anova_results
+
+
+def _perform_standard_anova_fallback(weekly_averages: Dict) -> Dict:
+    """Fallback to standard ANOVA when pingouin is not available.
+    
+    WARNING: This does NOT account for repeated measures and treats observations
+    as independent. Results may be invalid for repeated measures designs.
+    """
+    # Original one-way ANOVA implementation
     ca_groups = {}
     
     for date, data in weekly_averages.items():
@@ -419,7 +720,6 @@ def perform_anova_analysis(weekly_averages: Dict) -> Dict:
             if len(ca_groups[ca_percent][measure]) > 0:
                 groups_data.append(ca_groups[ca_percent][measure])
                 ca_labels.append(ca_percent)
-        
         if len(groups_data) >= 2:  # Need at least 2 groups for ANOVA
             # Perform one-way ANOVA
             f_stat, p_value = stats.f_oneway(*groups_data)
@@ -458,12 +758,19 @@ def perform_anova_analysis(weekly_averages: Dict) -> Dict:
     return anova_results
 
 
-def perform_tukey_hsd(anova_results: Dict) -> Dict:
+def perform_tukey_hsd(anova_results: Dict, weekly_averages: Dict) -> Dict:
     """
-    Perform Tukey's HSD post-hoc test for significant ANOVA results.
+    Perform Tukey's HSD post-hoc test for significant CA% main effects.
+    
+    For mixed ANOVA or repeated measures ANOVA with significant CA% effects,
+    performs pairwise comparisons across CA% levels.
+    
+    Note: For repeated measures data, this is an approximation. Proper RM post-hoc
+    tests would account for the correlated nature of repeated observations.
     
     Parameters:
         anova_results: Dictionary from perform_anova_analysis
+        weekly_averages: Dictionary from compute_weekly_averages (needed to reconstruct data)
         
     Returns:
         Dictionary containing Tukey HSD results for significant measures
@@ -471,52 +778,88 @@ def perform_tukey_hsd(anova_results: Dict) -> Dict:
     tukey_results = {}
     
     for measure, anova_data in anova_results.items():
-        # Only perform Tukey HSD for significant ANOVA results
-        if anova_data.get('significant', False) and 'groups_data' in anova_data:
-            try:
-                # Prepare data for Tukey HSD
-                all_data = []
-                group_labels = []
+        # Check if CA% effect is significant (either in one-way RM or mixed ANOVA)
+        if not anova_data.get('significant', False):
+            continue
+        
+        # Skip if there's an error
+        if 'error' in anova_data:
+            continue
+        
+        try:
+            # Reconstruct long-format data from weekly_averages
+            all_data = []
+            group_labels = []
+            
+            # Get group stats from ANOVA results (contains CA% info)
+            if 'group_stats' not in anova_data or not anova_data['group_stats']:
+                continue
+            
+            # Map measure name to data key in weekly_averages
+            measure_to_key = {
+                'licks': 'avg_licks_per_animal',
+                'bouts': 'avg_bouts_per_animal',
+                'fecal': 'avg_fecal_per_animal',
+                'bottle_weight': 'avg_bottle_weight_per_animal',
+                'total_weight': 'avg_total_weight_per_animal'
+            }
+            
+            data_key = measure_to_key.get(measure)
+            if not data_key:
+                continue
+            
+            # Reconstruct data for each CA%
+            sorted_dates = sorted(weekly_averages.keys(), key=lambda d: weekly_averages[d]['ca_percent'])
+            
+            for date in sorted_dates:
+                ca_percent = weekly_averages[date]['ca_percent']
+                ca_data = weekly_averages[date][data_key]
                 
-                for i, ca_percent in enumerate(anova_data['ca_labels']):
-                    group_data = anova_data['groups_data'][i]
-                    all_data.extend(group_data)
-                    group_labels.extend([f"{ca_percent}%"] * len(group_data))
+                # For bottle_weight, exclude zeros (outliers)
+                if measure == 'bottle_weight':
+                    ca_data = [x for x in ca_data if x > 0]
                 
-                # Perform Tukey HSD
-                tukey_result = pairwise_tukeyhsd(endog=all_data, groups=group_labels, alpha=0.05)
+                # Add to combined data
+                all_data.extend(ca_data)
+                group_labels.extend([f"{ca_percent}%"] * len(ca_data))
+            
+            if len(all_data) == 0 or len(set(group_labels)) < 2:
+                continue
+            
+            # Perform Tukey HSD
+            tukey_result = pairwise_tukeyhsd(endog=all_data, groups=group_labels, alpha=0.05)
+            
+            # Parse results into a more accessible format
+            comparisons = []
+            
+            # Extract pairwise comparison results directly from tukey_result
+            # The tukey HSD result contains arrays for each comparison
+            summary_data = tukey_result.summary().data[1:]  # Skip header row
+            
+            for row in summary_data:
+                group1, group2, meandiff, p_adj, lower_ci, upper_ci, reject = row
                 
-                # Parse results into a more accessible format
-                comparisons = []
-                
-                # Extract pairwise comparison results directly from tukey_result
-                # The tukey HSD result contains arrays for each comparison
-                summary_data = tukey_result.summary().data[1:]  # Skip header row
-                
-                for row in summary_data:
-                    group1, group2, meandiff, p_adj, lower_ci, upper_ci, reject = row
-                    
-                    comparisons.append({
-                        'group1': str(group1),
-                        'group2': str(group2), 
-                        'meandiff': float(meandiff),
-                        'p_adj': float(p_adj),
-                        'lower_ci': float(lower_ci),
-                        'upper_ci': float(upper_ci),
-                        'significant': bool(reject)
-                    })
-                
-                tukey_results[measure] = {
-                    'measure_name': anova_data['measure_name'],
-                    'comparisons': comparisons,
-                    'tukey_object': tukey_result  # Store the full result for summary table
-                }
-                
-            except Exception as e:
-                tukey_results[measure] = {
-                    'measure_name': anova_data['measure_name'],
-                    'error': f"Error performing Tukey HSD: {str(e)}"
-                }
+                comparisons.append({
+                    'group1': str(group1),
+                    'group2': str(group2), 
+                    'meandiff': float(meandiff),
+                    'p_adj': float(p_adj),
+                    'lower_ci': float(lower_ci),
+                    'upper_ci': float(upper_ci),
+                    'significant': bool(reject)
+                })
+            
+            tukey_results[measure] = {
+                'measure_name': anova_data['measure_name'],
+                'comparisons': comparisons,
+                'tukey_object': tukey_result  # Store the full result for summary table
+            }
+            
+        except Exception as e:
+            tukey_results[measure] = {
+                'measure_name': anova_data['measure_name'],
+                'error': f"Error performing Tukey HSD: {str(e)}"
+            }
     
     return tukey_results
 
@@ -532,14 +875,15 @@ def display_tukey_results(tukey_results: Dict) -> str:
         Formatted string with Tukey HSD results
     """
     if not tukey_results:
-        return "\n" + "=" * 80 + "\nNo significant ANOVA results found - Tukey HSD not performed.\n" + "=" * 80 + "\n"
+        return "\n" + "=" * 80 + "\nNo significant CA% effects found - Tukey HSD post-hoc tests not needed.\n" + "=" * 80 + "\n"
     
     lines = []
     lines.append("\n" + "=" * 80)
     lines.append("TUKEY HSD POST-HOC TEST RESULTS")
     lines.append("=" * 80)
     lines.append("")
-    lines.append("Tukey HSD performed only for measures with significant ANOVA results.")
+    lines.append("Tukey HSD performed for measures with significant CA% main effects.")
+    lines.append("Pairwise comparisons across CA% levels (collapsed across Sex if applicable).")
     lines.append("Alpha = 0.05 (family-wise error rate controlled)")
     lines.append("")
     
@@ -620,6 +964,7 @@ def display_tukey_results(tukey_results: Dict) -> str:
 def display_anova_results(anova_results: Dict) -> str:
     """
     Display ANOVA results in a formatted table and return formatted string.
+    Handles mixed ANOVA, repeated measures, and standard ANOVA output formats.
     
     Parameters:
         anova_results: Dictionary from perform_anova_analysis
@@ -629,8 +974,22 @@ def display_anova_results(anova_results: Dict) -> str:
     """
     lines = []
     lines.append("\n" + "=" * 80)
-    lines.append("ONE-WAY ANOVA RESULTS ACROSS CA% CONCENTRATIONS")
-    lines.append("=" * 80)
+    
+    # Check if results are mixed ANOVA or standard
+    is_mixed = any(results.get('is_mixed_anova', False) for results in anova_results.values())
+    
+    if is_mixed:
+        lines.append("MIXED ANOVA RESULTS ACROSS CA% CONCENTRATIONS")
+        lines.append("=" * 80)
+        lines.append("Between-subjects factor: Sex")
+        lines.append("Within-subjects factor: CA% (repeated measures)")
+        lines.append("Subject tracking: Animal ID")
+    else:
+        lines.append("REPEATED MEASURES ANOVA RESULTS ACROSS CA% CONCENTRATIONS")
+        lines.append("=" * 80)
+        lines.append("Within-subjects factor: CA%")
+        lines.append("Subject tracking: Animal ID")
+    
     lines.append("")
     
     for measure, results in anova_results.items():
@@ -642,19 +1001,61 @@ def display_anova_results(anova_results: Dict) -> str:
         lines.append(f"MEASURE: {results['measure_name'].upper()}")
         lines.append("-" * 50)
         
-        # ANOVA summary
-        lines.append(f"F-statistic: {results['f_statistic']:.4f}")
-        lines.append(f"p-value: {results['p_value']:.6f}")
-        
-        if results['significant']:
-            lines.append(f"Result: SIGNIFICANT (p < 0.05) - There are significant differences between CA% groups")
+        # Show design type
+        if results.get('is_mixed_anova', False):
+            lines.append("Design: Mixed ANOVA (Sex between-subjects × CA% within-subjects)")
+            if 'n_animals' in results and 'n_ca_levels' in results:
+                lines.append(f"Animals: {results['n_animals']}, CA% levels: {results['n_ca_levels']}")
+            lines.append("")
+            
+            # Sex main effect (between-subjects)
+            lines.append("SEX MAIN EFFECT (between-subjects):")
+            lines.append(f"  F-statistic: {results.get('f_statistic_sex', np.nan):.4f}")
+            lines.append(f"  p-value: {results.get('p_value_sex', np.nan):.6f}")
+            if results.get('significant_sex', False):
+                lines.append(f"  Result: SIGNIFICANT (p < 0.05) - Significant differences between sexes")
+            else:
+                lines.append(f"  Result: NOT SIGNIFICANT (p ≥ 0.05) - No significant sex differences")
+            lines.append("")
+            
+            # CA% main effect (within-subjects)
+            lines.append("CA% MAIN EFFECT (within-subjects):")
+            lines.append(f"  F-statistic: {results['f_statistic']:.4f}")
+            lines.append(f"  p-value: {results['p_value']:.6f}")
+            if results.get('significant', False):
+                lines.append(f"  Result: SIGNIFICANT (p < 0.05) - Significant differences across CA% concentrations")
+            else:
+                lines.append(f"  Result: NOT SIGNIFICANT (p ≥ 0.05) - No significant CA% differences")
+            lines.append("")
+            
+            # Interaction (Sex × CA%)
+            lines.append("SEX × CA% INTERACTION:")
+            lines.append(f"  F-statistic: {results.get('f_statistic_interaction', np.nan):.4f}")
+            lines.append(f"  p-value: {results.get('p_value_interaction', np.nan):.6f}")
+            if results.get('significant_interaction', False):
+                lines.append(f"  Result: SIGNIFICANT (p < 0.05) - CA% effect differs by sex")
+            else:
+                lines.append(f"  Result: NOT SIGNIFICANT (p ≥ 0.05) - CA% effect similar across sexes")
+            lines.append("")
+            
         else:
-            lines.append(f"Result: NOT SIGNIFICANT (p ≥ 0.05) - No significant differences between CA% groups")
-        
-        lines.append("")
+            # One-way repeated measures ANOVA
+            lines.append("Design: One-way repeated measures (within-subjects)")
+            if 'n_animals' in results and 'n_ca_levels' in results:
+                lines.append(f"Animals: {results['n_animals']}, CA% levels: {results['n_ca_levels']}")
+            lines.append("")
+            
+            lines.append(f"F-statistic: {results['f_statistic']:.4f}")
+            lines.append(f"p-value: {results['p_value']:.6f}")
+            
+            if results['significant']:
+                lines.append(f"Result: SIGNIFICANT (p < 0.05) - Significant differences across CA% concentrations")
+            else:
+                lines.append(f"Result: NOT SIGNIFICANT (p ≥ 0.05) - No significant differences")
+            lines.append("")
         
         # Group descriptive statistics
-        lines.append("Group Statistics:")
+        lines.append("CA% Statistics:")
         header = f"{'CA%':<6} {'N':<4} {'Mean':<10} {'Std':<10} {'Min':<8} {'Max':<8}"
         lines.append(header)
         lines.append("-" * 50)
@@ -668,22 +1069,53 @@ def display_anova_results(anova_results: Dict) -> str:
                    f"{group_stat['max']:<8.2f}")
             lines.append(row)
         
+        # If mixed ANOVA, also show sex stats
+        if results.get('is_mixed_anova', False) and 'sex_stats' in results and results['sex_stats']:
+            lines.append("")
+            lines.append("Sex Statistics:")
+            sex_header = f"{'Sex':<8} {'N':<4} {'Mean':<10} {'Std':<10}"
+            lines.append(sex_header)
+            lines.append("-" * 35)
+            
+            for sex_stat in results['sex_stats']:
+                sex_row = (f"{sex_stat['sex']:<8} "
+                           f"{sex_stat['n']:<4} "
+                           f"{sex_stat['mean']:<10.2f} "
+                           f"{sex_stat['std']:<10.2f}")
+                lines.append(sex_row)
+        
         lines.append("")
         lines.append("")
     
     # Summary of significant results
-    significant_measures = [results['measure_name'] for results in anova_results.values() 
-                          if results.get('significant', False)]
+    significant_ca = [results['measure_name'] for results in anova_results.values() 
+                      if results.get('significant', False)]
+    significant_sex = [results['measure_name'] for results in anova_results.values() 
+                       if results.get('significant_sex', False)]
+    significant_int = [results['measure_name'] for results in anova_results.values() 
+                       if results.get('significant_interaction', False)]
     
     lines.append("SUMMARY OF SIGNIFICANT RESULTS:")
     lines.append("-" * 40)
     
-    if significant_measures:
-        lines.append(f"Significant differences found in: {', '.join(significant_measures)}")
-        lines.append("\nThese measures show statistically significant differences across CA% concentrations.")
-        lines.append("Consider post-hoc tests (e.g., Tukey's HSD) for pairwise comparisons.")
+    if is_mixed:
+        if significant_ca:
+            lines.append(f"CA% main effects: {', '.join(significant_ca)}")
+        if significant_sex:
+            lines.append(f"Sex main effects: {', '.join(significant_sex)}")
+        if significant_int:
+            lines.append(f"Sex × CA% interactions: {', '.join(significant_int)}")
+        
+        if not significant_ca and not significant_sex and not significant_int:
+            lines.append("No significant effects found.")
     else:
-        lines.append("No significant differences found in any measure across CA% concentrations.")
+        if significant_ca:
+            lines.append(f"CA% effects: {', '.join(significant_ca)}")
+        else:
+            lines.append("No significant CA% effects found.")
+    
+    if significant_ca:
+        lines.append("\nConsider Tukey HSD post-hoc tests for pairwise CA% comparisons.")
     
     lines.append("\n" + "=" * 80)
     lines.append("")
@@ -1116,6 +1548,7 @@ def compute_weekly_lick_rate_averages(weekly_results: Dict, max_duration_min: fl
             - mean_licks: Mean licks per bin (array of length max_duration_min/bin_size_min)
             - sem_licks: SEM of licks per bin (array of length max_duration_min/bin_size_min)
             - n_animals: Number of animals
+            - animal_ids: List of animal IDs
             - bin_size_min: Bin size in minutes
     """
     lick_rate_data = {}
@@ -1129,6 +1562,7 @@ def compute_weekly_lick_rate_averages(weekly_results: Dict, max_duration_min: fl
         
         events_df = result['events_df']
         selected_sensors = result['selected_sensors']
+        animal_ids = result.get('animal_ids', [])
         
         # Collect lick counts per minute for each animal
         all_animal_lick_rates = []
@@ -1155,6 +1589,7 @@ def compute_weekly_lick_rate_averages(weekly_results: Dict, max_duration_min: fl
             'mean_licks': mean_licks,
             'sem_licks': sem_licks,
             'n_animals': len(selected_sensors),
+            'animal_ids': animal_ids,  # NEW: Track animal IDs for unique count
             'all_animal_data': all_animal_lick_rates,  # Keep for comprehensive plot
             'bin_size_min': bin_size_min
         }
@@ -1257,6 +1692,7 @@ def plot_comprehensive_lick_rate_by_ca(
     # Organize data by CA% concentration
     ca_groups = {}
     bin_size_min = None
+    all_unique_animal_ids = set()  # Track unique animal IDs across all weeks/CA%
     
     for date, data in lick_rate_data.items():
         ca_percent = data['ca_percent']
@@ -1266,13 +1702,24 @@ def plot_comprehensive_lick_rate_by_ca(
         
         ca_groups[ca_percent].append(data['all_animal_data'])
         
+        # Track unique animal IDs
+        if 'animal_ids' in data and data['animal_ids']:
+            print(f"  {date} (CA {ca_percent}%): Adding {len(data['animal_ids'])} animal IDs: {data['animal_ids'][:3]}..." if len(data['animal_ids']) > 3 else f"  {date} (CA {ca_percent}%): Adding animal IDs: {data['animal_ids']}")
+            all_unique_animal_ids.update(data['animal_ids'])
+        else:
+            print(f"  {date} (CA {ca_percent}%): No animal IDs found in data")
+        
         if bin_size_min is None:
             bin_size_min = data.get('bin_size_min', 5.0)
+    
+    print(f"\nCollected {len(all_unique_animal_ids)} unique animal IDs total")
+    if all_unique_animal_ids:
+        print(f"Unique IDs: {sorted(all_unique_animal_ids)}")
     
     # Print summary of data by CA%
     for ca_percent in sorted(ca_groups.keys()):
         total_animals = sum(arr.shape[0] for arr in ca_groups[ca_percent])
-        print(f"  CA {ca_percent}%: {total_animals} animals across {len(ca_groups[ca_percent])} week(s)")
+        print(f"  CA {ca_percent}%: {total_animals} observations across {len(ca_groups[ca_percent])} week(s)")
     
     # Concatenate all animal data from all CA% concentrations
     all_data = []
@@ -1280,7 +1727,10 @@ def plot_comprehensive_lick_rate_by_ca(
         all_data.extend(ca_groups[ca_percent])
     
     all_animals_all_ca = np.vstack(all_data)
-    print(f"\nTotal data: {all_animals_all_ca.shape[0]} animals across {len(ca_groups)} CA% concentrations")
+    n_unique_animals = len(all_unique_animal_ids) if all_unique_animal_ids else all_animals_all_ca.shape[0]
+    
+    print(f"\nTotal observations: {all_animals_all_ca.shape[0]}")
+    print(f"Unique mice: {n_unique_animals}")
     
     # Compute mean and SEM across all animals from all CA% concentrations
     mean_licks = np.mean(all_animals_all_ca, axis=0)
@@ -1305,7 +1755,7 @@ def plot_comprehensive_lick_rate_by_ca(
     # Labels and title
     ax.set_xlabel('Time (minutes)', fontsize=12, weight='bold')
     ax.set_ylabel(f'Licks per {bin_size_min}-Minute Bin (Mean ± SEM)', fontsize=12, weight='bold')
-    ax.set_title(f'Comprehensive Lick Rate - All CA% Combined (n={all_animals_all_ca.shape[0]} animals, {len(ca_groups)} CA% concentrations)',
+    ax.set_title(f'Comprehensive Lick Rate - All CA% Combined (n={n_unique_animals} unique mice, {len(ca_groups)} CA% concentrations)',
                 fontsize=14, weight='bold')
     
     # Format x-axis to show bin edges
@@ -1491,10 +1941,12 @@ def process_single_week(
     # Get metadata for this date
     date_metadata = master_df[master_df['date'] == date].copy()
     
-    # Extract sensor mappings and CA%
+    # Extract sensor mappings, animal IDs, sex, and CA%
     sensor_to_weight = {}
     sensor_to_weight_loss = {}
     sensor_to_fecal = {}
+    sensor_to_animal_id = {}  # Track animal IDs for repeated measures
+    sensor_to_sex = {}  # Track sex for mixed ANOVA
     ca_percent = None
     
     for _, row in date_metadata.iterrows():
@@ -1506,6 +1958,26 @@ def process_single_week(
         # Extract CA% (should be the same for all rows in this date)
         if ca_percent is None and 'CA_%' in row and pd.notna(row['CA_%']):
             ca_percent = int(row['CA_%'])
+        
+        # Extract animal ID (check multiple possible column names)
+        if 'animal_ID' in row and pd.notna(row['animal_ID']):
+            sensor_to_animal_id[sensor_name] = str(row['animal_ID']).strip()
+        elif 'animal_id' in row and pd.notna(row['animal_id']):
+            sensor_to_animal_id[sensor_name] = str(row['animal_id']).strip()
+        elif 'ID' in row and pd.notna(row['ID']):
+            sensor_to_animal_id[sensor_name] = str(row['ID']).strip()
+        elif 'mouse_id' in row and pd.notna(row['mouse_id']):
+            sensor_to_animal_id[sensor_name] = str(row['mouse_id']).strip()
+        else:
+            sensor_to_animal_id[sensor_name] = sensor_name  # Fallback to sensor name
+        
+        # Extract sex (use sex or Sex column)
+        if 'sex' in row and pd.notna(row['sex']):
+            sensor_to_sex[sensor_name] = str(row['sex']).upper().strip()
+        elif 'Sex' in row and pd.notna(row['Sex']):
+            sensor_to_sex[sensor_name] = str(row['Sex']).upper().strip()
+        else:
+            sensor_to_sex[sensor_name] = "Unknown"
         
         # Add fecal count if available in the CSV
         if 'fecal_count' in row and pd.notna(row['fecal_count']):
@@ -1530,6 +2002,7 @@ def process_single_week(
     weights = []
     weight_losses = []
     fecal_counts = []
+    animal_ids = []  # Track animal IDs in same order as measurements
     
     for sensor in selected_sensors:
         # Lick counts
@@ -1561,6 +2034,10 @@ def process_single_week(
         
         weight_losses.append(sensor_to_weight_loss.get(sensor, 0))
         fecal_counts.append(sensor_to_fecal.get(sensor, 0))
+        animal_ids.append(sensor_to_animal_id.get(sensor, sensor))
+    
+    # Extract sex information for each animal (in same order as other data)
+    animal_sexes = [sensor_to_sex.get(sensor, "Unknown") for sensor in selected_sensors]
     
     # Calculate correlations
     lick_weight_corr = np.corrcoef(lick_counts, weights)[0, 1] if len(lick_counts) > 1 else np.nan
@@ -1583,6 +2060,8 @@ def process_single_week(
         'fecal_counts': np.array(fecal_counts),
         'weights': np.array(weights),
         'weight_losses': np.array(weight_losses),
+        'animal_ids': animal_ids,  # NEW: Track animal IDs for repeated measures
+        'animal_sexes': animal_sexes,  # NEW: Track sex for mixed ANOVA
         'correlations': {
             'lick_weight': lick_weight_corr,
             'bout_weight': bout_weight_corr,
@@ -1687,7 +2166,7 @@ def main():
     print("\nStep 6: Performing Tukey HSD Post-Hoc Tests")
     print("-" * 40)
     
-    tukey_results = perform_tukey_hsd(anova_results)
+    tukey_results = perform_tukey_hsd(anova_results, weekly_averages)
     tukey_output = display_tukey_results(tukey_results)
     
     # Compute and plot lick rate histograms (5-minute bins over 30 minutes)

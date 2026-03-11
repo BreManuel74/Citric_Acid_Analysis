@@ -1796,6 +1796,7 @@ def compute_weekly_lick_rate_averages(weekly_results: Dict, max_duration_min: fl
             'sem_licks': sem_licks,
             'n_animals': len(selected_sensors),
             'all_animal_data': all_animal_lick_rates,  # Keep for comprehensive plot
+            'animal_ids': result.get('animal_ids', []),  # Preserve animal IDs for unique counting
             'bin_size_min': bin_size_min
         }
     
@@ -1894,9 +1895,9 @@ def plot_comprehensive_lick_rate(
     print("CREATING COMPREHENSIVE LICK RATE PLOT (ALL WEEKS COMBINED)")
     print("=" * 80)
     
-    # Collect all animal data from all weeks
+    # Collect all animal data from all weeks and track unique animal IDs
     all_data = []
-    total_animals = 0
+    all_unique_animal_ids = set()
     bin_size_min = None
     
     sorted_dates = sort_dates_chronologically(list(lick_rate_data.keys()))
@@ -1904,14 +1905,21 @@ def plot_comprehensive_lick_rate(
     for date in sorted_dates:
         data = lick_rate_data[date]
         all_data.append(data['all_animal_data'])
-        total_animals += data['n_animals']
+        
+        # Track unique animal IDs
+        animal_ids = data.get('animal_ids', [])
+        if animal_ids:
+            all_unique_animal_ids.update(animal_ids)
+        
         if bin_size_min is None:
             bin_size_min = data.get('bin_size_min', 5.0)
         print(f"  Week {date}: {data['n_animals']} animals, CA {data['ca_percent']}%")
     
     # Concatenate all animal data (all weeks, all animals)
     all_animals_all_weeks = np.vstack(all_data)
-    print(f"\nTotal data: {all_animals_all_weeks.shape[0]} animals across {len(sorted_dates)} weeks")
+    n_unique_animals = len(all_unique_animal_ids)
+    print(f"\nTotal observations: {all_animals_all_weeks.shape[0]} across {len(sorted_dates)} weeks")
+    print(f"Unique mice: {n_unique_animals}")
     
     # Compute mean and SEM across all animals from all weeks
     mean_licks = np.mean(all_animals_all_weeks, axis=0)
@@ -1936,7 +1944,7 @@ def plot_comprehensive_lick_rate(
     # Labels and title
     ax.set_xlabel('Time (minutes)', fontsize=12, weight='bold')
     ax.set_ylabel(f'Licks per {bin_size_min}-Minute Bin (Mean ± SEM)', fontsize=12, weight='bold')
-    ax.set_title(f'Comprehensive Lick Rate - All Weeks Combined (n={all_animals_all_weeks.shape[0]} animals, {len(sorted_dates)} weeks)',
+    ax.set_title(f'Comprehensive Lick Rate - All Weeks Combined (n={n_unique_animals} mice, {len(sorted_dates)} weeks)',
                 fontsize=14, weight='bold')
     
     # Format x-axis to show bin edges
