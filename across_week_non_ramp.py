@@ -1113,6 +1113,275 @@ def sort_dates_chronologically(dates: List[str]) -> List[str]:
     return [date_str for date_str, _ in date_tuples]
 
 
+def bin_licks_by_minute(events_df: pd.DataFrame, sensor_col: str, max_duration_min: float = 30.0, bin_size_min: float = 5.0) -> np.ndarray:
+    """Bin lick events into time intervals for a single sensor.
+    
+    Parameters:
+        events_df: DataFrame with Time_sec and event columns
+        sensor_col: Sensor column name (e.g., 'Sensor_20')
+        max_duration_min: Maximum duration to consider in minutes (default: 30)
+        bin_size_min: Size of each bin in minutes (default: 5)
+        
+    Returns:
+        Array of lick counts for each bin (length = max_duration_min / bin_size_min)
+    """
+    event_col = f"{sensor_col}_event"
+    
+    # Calculate number of bins
+    num_bins = int(max_duration_min / bin_size_min)
+    
+    if event_col not in events_df.columns:
+        # Return zeros if sensor has no events
+        return np.zeros(num_bins)
+    
+    # Get event times in seconds
+    event_times = events_df[events_df[event_col]]['Time_sec'].values
+    
+    # Convert to minutes
+    event_times_min = event_times / 60.0
+    
+    # Filter to only events within max_duration
+    event_times_min = event_times_min[event_times_min < max_duration_min]
+    
+    # Create bins (0-5 min, 5-10 min, ..., 25-30 min for bin_size=5)
+    bins = np.arange(0, max_duration_min + bin_size_min, bin_size_min)
+    
+    # Count licks in each bin
+    lick_counts, _ = np.histogram(event_times_min, bins=bins)
+    
+    return lick_counts
+
+
+def compute_weekly_lick_rate_averages(weekly_results: Dict, max_duration_min: float = 30.0, bin_size_min: float = 5.0) -> Dict:
+    """Compute average lick rate across all animals for each week.
+    
+    For each week, bins licks into time intervals and computes mean and SEM
+    across all animals.
+    
+    Parameters:
+        weekly_results: Dictionary from process_single_week
+        max_duration_min: Maximum duration in minutes (default: 30)
+        bin_size_min: Size of each bin in minutes (default: 5)
+        
+    Returns:
+        Dictionary with keys:
+            - date: Date string
+            - ca_percent: CA percentage
+            - mean_licks: Mean licks per bin (array of length max_duration_min/bin_size_min)
+            - sem_licks: SEM of licks per bin (array of length max_duration_min/bin_size_min)
+            - n_animals: Number of animals
+            - bin_size_min: Bin size in minutes
+    """
+    lick_rate_data = {}
+    
+    print("\n" + "=" * 80)
+    print(f"COMPUTING LICK RATE AVERAGES ({bin_size_min}-MINUTE BINS)")
+    print("=" * 80)
+    
+    for date, result in weekly_results.items():
+        print(f"\nProcessing {date} (CA {result['ca_percent']}%):")
+        
+        events_df = result['events_df']
+        selected_sensors = result['selected_sensors']
+        
+        # Collect lick counts per minute for each animal
+        all_animal_lick_rates = []
+        
+        for sensor in selected_sensors:
+            lick_counts = bin_licks_by_minute(events_df, sensor, max_duration_min, bin_size_min)
+            all_animal_lick_rates.append(lick_counts)
+            print(f"  {sensor}: Total licks in {int(max_duration_min)} min = {lick_counts.sum()}")
+        
+        # Convert to array (animals x time_bins)
+        all_animal_lick_rates = np.array(all_animal_lick_rates)
+        
+        # Compute mean and SEM across animals for each time bin
+        mean_licks = np.mean(all_animal_lick_rates, axis=0)
+        sem_licks = np.std(all_animal_lick_rates, axis=0, ddof=1) / np.sqrt(len(selected_sensors))
+        
+        print(f"  Mean licks per {bin_size_min}-min bin (across {len(selected_sensors)} animals):")
+        print(f"    Total in {int(max_duration_min)} min: {mean_licks.sum():.1f}")
+        print(f"    Mean per {bin_size_min}-min bin: {mean_licks.mean():.2f} ± {sem_licks.mean():.2f}")
+        
+        lick_rate_data[date] = {
+            'date': date,
+            'ca_percent': result['ca_percent'],
+            'mean_licks': mean_licks,
+            'sem_licks': sem_licks,
+            'n_animals': len(selected_sensors),
+            'all_animal_data': all_animal_lick_rates,  # Keep for comprehensive plot
+            'bin_size_min': bin_size_min
+        }
+    
+    print("\n" + "=" * 80)
+    return lick_rate_data
+
+
+def plot_lick_rate_histogram(
+    date: str,
+    mean_licks: np.ndarray,
+    sem_licks: np.ndarray,
+    ca_percent: int,
+    n_animals: int,
+    bin_size_min: float = 5.0,
+    save_path: Optional[Path] = None,
+    show: bool = True
+) -> plt.Figure:
+    """Plot lick rate histogram for a single week.
+    
+    Parameters:
+        date: Date string
+        mean_licks: Mean licks per bin (array)
+        sem_licks: SEM of licks per bin (array)
+        ca_percent: CA percentage
+        n_animals: Number of animals
+        bin_size_min: Size of each bin in minutes
+        save_path: Optional path to save figure
+        show: Whether to display the plot
+        
+    Returns:
+        Figure object
+    """
+    fig, ax = plt.subplots(figsize=(14, 6))
+    
+    # X-axis: bin centers (for positioning bars)
+    num_bins = len(mean_licks)
+    bin_edges = np.arange(0, num_bins * bin_size_min + bin_size_min, bin_size_min)
+    bin_centers = bin_edges[:-1] + bin_size_min / 2
+    
+    # Create bar plot with error bars - width equals bin size for continuous bars
+    ax.bar(bin_centers, mean_licks, width=bin_size_min, color='steelblue', alpha=0.7, 
+           edgecolor='black', linewidth=1.2, yerr=sem_licks, capsize=3,
+           error_kw={'elinewidth': 1.5, 'capthick': 1.5}, align='center')
+    
+    # Labels and title
+    ax.set_xlabel('Time (minutes)', fontsize=12, weight='bold')
+    ax.set_ylabel(f'Licks per {bin_size_min}-Minute Bin (Mean ± SEM)', fontsize=12, weight='bold')
+    ax.set_title(f'Lick Rate - Week: {date} (CA {ca_percent}%, n={n_animals})', 
+                fontsize=14, weight='bold')
+    
+    # Format x-axis to show bin edges
+    ax.set_xlim(0, num_bins * bin_size_min)
+    ax.set_xticks(bin_edges)
+    ax.set_xticklabels([f'{int(x)}' for x in bin_edges])
+    
+    # Format y-axis to start at 0
+    ax.set_ylim(bottom=0)
+    
+    # Remove top and right spines
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # Add grid for readability
+    ax.grid(axis='y', alpha=0.3, linestyle='--')
+    
+    plt.tight_layout()
+    
+    if save_path:
+        fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+        print(f"Lick rate plot saved to: {save_path}")
+    
+    if not show:
+        plt.close(fig)
+    
+    return fig
+
+
+def plot_comprehensive_lick_rate(
+    lick_rate_data: Dict,
+    save_path: Optional[Path] = None,
+    show: bool = True
+) -> plt.Figure:
+    """Plot comprehensive lick rate histogram collapsing all weeks.
+    
+    Averages lick rates across all weeks and all animals.
+    
+    Parameters:
+        lick_rate_data: Dictionary from compute_weekly_lick_rate_averages
+        save_path: Optional path to save figure
+        show: Whether to display the plot
+        
+    Returns:
+        Figure object
+    """
+    print("\n" + "=" * 80)
+    print("CREATING COMPREHENSIVE LICK RATE PLOT (ALL WEEKS COMBINED)")
+    print("=" * 80)
+    
+    # Collect all animal data from all weeks
+    all_data = []
+    total_animals = 0
+    bin_size_min = None
+    
+    sorted_dates = sort_dates_chronologically(list(lick_rate_data.keys()))
+    
+    for date in sorted_dates:
+        data = lick_rate_data[date]
+        all_data.append(data['all_animal_data'])
+        total_animals += data['n_animals']
+        if bin_size_min is None:
+            bin_size_min = data.get('bin_size_min', 5.0)
+        print(f"  Week {date}: {data['n_animals']} animals, CA {data['ca_percent']}%")
+    
+    # Concatenate all animal data (all weeks, all animals)
+    all_animals_all_weeks = np.vstack(all_data)
+    print(f"\nTotal data: {all_animals_all_weeks.shape[0]} animals across {len(sorted_dates)} weeks")
+    
+    # Compute mean and SEM across all animals from all weeks
+    mean_licks = np.mean(all_animals_all_weeks, axis=0)
+    sem_licks = np.std(all_animals_all_weeks, axis=0, ddof=1) / np.sqrt(all_animals_all_weeks.shape[0])
+    
+    print(f"Overall mean licks per {bin_size_min}-min bin: {mean_licks.mean():.2f} ± {sem_licks.mean():.2f}")
+    print(f"Total licks in 30 min: {mean_licks.sum():.1f}")
+    
+    # Create plot
+    fig, ax = plt.subplots(figsize=(14, 6))
+    
+    # X-axis: bin centers (for positioning bars)
+    num_bins = len(mean_licks)
+    bin_edges = np.arange(0, num_bins * bin_size_min + bin_size_min, bin_size_min)
+    bin_centers = bin_edges[:-1] + bin_size_min / 2
+    
+    # Create bar plot with error bars - width equals bin size for continuous bars
+    ax.bar(bin_centers, mean_licks, width=bin_size_min, color='darkgreen', alpha=0.7,
+           edgecolor='black', linewidth=1.2, yerr=sem_licks, capsize=3,
+           error_kw={'elinewidth': 1.5, 'capthick': 1.5}, align='center')
+    
+    # Labels and title
+    ax.set_xlabel('Time (minutes)', fontsize=12, weight='bold')
+    ax.set_ylabel(f'Licks per {bin_size_min}-Minute Bin (Mean ± SEM)', fontsize=12, weight='bold')
+    ax.set_title(f'Comprehensive Lick Rate - All Weeks Combined (n={all_animals_all_weeks.shape[0]} animals, {len(sorted_dates)} weeks)',
+                fontsize=14, weight='bold')
+    
+    # Format x-axis to show bin edges
+    ax.set_xlim(0, num_bins * bin_size_min)
+    ax.set_xticks(bin_edges)
+    ax.set_xticklabels([f'{int(x)}' for x in bin_edges])
+    
+    # Format y-axis to start at 0
+    ax.set_ylim(bottom=0)
+    
+    # Remove top and right spines
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # Add grid for readability
+    ax.grid(axis='y', alpha=0.3, linestyle='--')
+    
+    plt.tight_layout()
+    
+    print("=" * 80 + "\n")
+    
+    if save_path:
+        fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+        print(f"Comprehensive lick rate plot saved to: {save_path}")
+    
+    if not show:
+        plt.close(fig)
+    
+    return fig
+
+
 def load_master_csv(csv_path: Path) -> pd.DataFrame:
     """Load the master metadata CSV with all weeks of data."""
     if not csv_path.exists():
@@ -1508,8 +1777,34 @@ def main():
     tukey_results = perform_tukey_hsd(anova_results)
     tukey_output = display_tukey_results(tukey_results)
     
+    # Compute and plot lick rate histograms (5-minute bins over 30 minutes)
+    print("\nStep 7: Computing Lick Rate Averages (5-Minute Bins)")
+    print("-" * 40)
+    
+    lick_rate_data = compute_weekly_lick_rate_averages(weekly_results, max_duration_min=30.0, bin_size_min=5.0)
+    
+    # Plot individual week lick rate histograms
+    print("\nPlotting individual week lick rate histograms...")
+    sorted_dates = sort_dates_chronologically(list(lick_rate_data.keys()))
+    
+    for date in sorted_dates:
+        data = lick_rate_data[date]
+        plot_lick_rate_histogram(
+            date=date,
+            mean_licks=data['mean_licks'],
+            sem_licks=data['sem_licks'],
+            ca_percent=data['ca_percent'],
+            n_animals=data['n_animals'],
+            bin_size_min=data['bin_size_min'],
+            show=True  # Show plots as they're created
+        )
+    
+    # Plot comprehensive lick rate histogram (all weeks combined)
+    print("\nPlotting comprehensive lick rate histogram (all weeks combined)...")
+    plot_comprehensive_lick_rate(lick_rate_data, show=True)
+    
     # Plot comprehensive weekly averages
-    print("Plotting comprehensive weekly averages (licks, bouts, fecal, weights)...")
+    print("\nPlotting comprehensive weekly averages (licks, bouts, fecal, weights)...")
     plot_weekly_averages(weekly_averages, show=True)
     
     # Optional: Save comprehensive summary with all statistical results
@@ -1533,12 +1828,39 @@ def main():
         plot_weekly_averages(weekly_averages, save_path=save_path, show=False)
         print("Note: Two separate files created - one for behavioral metrics, one for physiological metrics")
     
+    # Optional: Save lick rate histogram plots
+    save_lick_rate = input("\nSave lick rate histogram plots as SVG? (y/n): ").strip().lower()
+    if save_lick_rate in ['y', 'yes']:
+        # Save individual week plots
+        sorted_dates = sort_dates_chronologically(list(lick_rate_data.keys()))
+        for i, date in enumerate(sorted_dates, 1):
+            data = lick_rate_data[date]
+            save_path = master_csv.parent / f"lick_rate_week_{i}_{date.replace('/', '-')}.svg"
+            fig = plot_lick_rate_histogram(
+                date=date,
+                mean_licks=data['mean_licks'],
+                sem_licks=data['sem_licks'],
+                ca_percent=data['ca_percent'],
+                n_animals=data['n_animals'],
+                bin_size_min=data['bin_size_min'],
+                save_path=save_path,
+                show=False
+            )
+            plt.close(fig)  # Close after saving to free memory
+        
+        # Save comprehensive plot
+        comprehensive_save_path = master_csv.parent / "lick_rate_comprehensive_all_weeks.svg"
+        fig_comp = plot_comprehensive_lick_rate(lick_rate_data, save_path=comprehensive_save_path, show=False)
+        plt.close(fig_comp)  # Close after saving
+        print(f"Saved {len(sorted_dates)} individual week plots + 1 comprehensive plot")
+    
     print("\n" + "=" * 80)
     print("COMPREHENSIVE STATISTICAL ANALYSIS COMPLETED")
     print("=" * 80)
     print(f"Analyzed: Licks, Bouts, Fecal Counts, Bottle Weight Loss, Total Weight Loss")
     print(f"Statistical Analysis: One-way ANOVA across weeks and Tukey HSD post-hoc tests completed")
     print(f"All pairwise week comparisons identified for significant measures")
+    print(f"Lick Rate Analysis: 5-minute bins over 30 minutes for each week + comprehensive combined plot")
     
     return weekly_results, weekly_averages, anova_results, tukey_results
 
