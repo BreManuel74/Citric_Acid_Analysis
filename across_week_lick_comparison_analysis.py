@@ -1787,6 +1787,166 @@ def plot_comprehensive_lick_rate_by_ca(
     return fig
 
 
+def plot_interaction_effects(
+    anova_results: Dict,
+    weekly_averages: Dict,
+    save_dir: Optional[Path] = None,
+    show: bool = True
+) -> Dict[str, plt.Figure]:
+    """Plot interaction effects for measures with significant Sex × CA% interactions.
+    
+    Creates line plots showing how the effect of CA% differs between sexes.
+    
+    Parameters:
+        anova_results: Dictionary from perform_anova_analysis
+        weekly_averages: Dictionary from compute_weekly_averages
+        save_dir: Optional directory to save plots
+        show: Whether to display the plots
+        
+    Returns:
+        Dictionary mapping measure names to figure objects
+    """
+    # Check if we have any significant interactions
+    significant_interactions = {
+        measure: results for measure, results in anova_results.items()
+        if results.get('significant_interaction', False) and not results.get('error')
+    }
+    
+    if not significant_interactions:
+        print("\nNo significant Sex × CA% interactions found - skipping interaction plots.")
+        return {}
+    
+    print("\n" + "=" * 80)
+    print("CREATING INTERACTION PLOTS FOR SIGNIFICANT SEX × CA% INTERACTIONS")
+    print("=" * 80)
+    
+    # Map measure codes to data keys
+    measure_to_key = {
+        'licks': 'avg_licks_per_animal',
+        'bouts': 'avg_bouts_per_animal',
+        'fecal': 'avg_fecal_per_animal',
+        'bottle_weight': 'avg_bottle_weight_per_animal',
+        'total_weight': 'avg_total_weight_per_animal'
+    }
+    
+    measure_to_ylabel = {
+        'licks': 'Total Licks',
+        'bouts': 'Total Bouts',
+        'fecal': 'Fecal Count',
+        'bottle_weight': 'Bottle Weight Loss (g)',
+        'total_weight': 'Total Weight Loss (g)'
+    }
+    
+    figures = {}
+    
+    # Sort by CA% for proper x-axis ordering
+    sorted_dates = sorted(weekly_averages.keys(), key=lambda d: weekly_averages[d]['ca_percent'])
+    
+    for measure, results in significant_interactions.items():
+        measure_name = results['measure_name']
+        print(f"\nCreating interaction plot for: {measure_name}")
+        
+        # Collect data organized by Sex and CA%
+        data_by_sex_ca = {'M': {}, 'F': {}}
+        
+        for date in sorted_dates:
+            data = weekly_averages[date]
+            ca_percent = data['ca_percent']
+            animal_ids = data.get('animal_ids', [])
+            animal_sexes = data.get('animal_sexes', [])
+            measure_values = data.get(measure_to_key[measure], [])
+            
+            # Skip if no animal data
+            if not animal_ids or not animal_sexes:
+                continue
+            
+            # Organize by sex
+            for i, (animal_id, sex, value) in enumerate(zip(animal_ids, animal_sexes, measure_values)):
+                sex = sex.upper().strip()
+                if sex in ['M', 'F']:
+                    if ca_percent not in data_by_sex_ca[sex]:
+                        data_by_sex_ca[sex][ca_percent] = []
+                    data_by_sex_ca[sex][ca_percent].append(value)
+        
+        # Compute means and SEMs for each Sex × CA% combination
+        ca_levels = sorted(set(list(data_by_sex_ca['M'].keys()) + list(data_by_sex_ca['F'].keys())))
+        
+        males_means = []
+        males_sems = []
+        females_means = []
+        females_sems = []
+        
+        for ca in ca_levels:
+            # Males
+            if ca in data_by_sex_ca['M'] and len(data_by_sex_ca['M'][ca]) > 0:
+                m_values = np.array(data_by_sex_ca['M'][ca])
+                males_means.append(np.mean(m_values))
+                males_sems.append(np.std(m_values, ddof=1) / np.sqrt(len(m_values)) if len(m_values) > 1 else 0)
+            else:
+                males_means.append(np.nan)
+                males_sems.append(np.nan)
+            
+            # Females
+            if ca in data_by_sex_ca['F'] and len(data_by_sex_ca['F'][ca]) > 0:
+                f_values = np.array(data_by_sex_ca['F'][ca])
+                females_means.append(np.mean(f_values))
+                females_sems.append(np.std(f_values, ddof=1) / np.sqrt(len(f_values)) if len(f_values) > 1 else 0)
+            else:
+                females_means.append(np.nan)
+                females_sems.append(np.nan)
+        
+        # Create plot
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # Plot lines for each sex
+        ax.errorbar(ca_levels, males_means, yerr=males_sems,
+                   marker='o', markersize=8, linewidth=2, capsize=5,
+                   color='steelblue', markerfacecolor='lightblue', markeredgecolor='steelblue',
+                   label='Male', linestyle='-')
+        
+        ax.errorbar(ca_levels, females_means, yerr=females_sems,
+                   marker='s', markersize=8, linewidth=2, capsize=5,
+                   color='coral', markerfacecolor='lightcoral', markeredgecolor='coral',
+                   label='Female', linestyle='--')
+        
+        # Labels and title
+        ax.set_xlabel('Citric Acid Concentration (%)', fontsize=12, weight='bold')
+        ax.set_ylabel(measure_to_ylabel[measure], fontsize=12, weight='bold')
+        ax.set_title(f'Sex × CA% Interaction: {measure_name}\n(p = {results["p_value_interaction"]:.4f})',
+                    fontsize=14, weight='bold')
+        
+        # Format x-axis
+        ax.set_xticks(ca_levels)
+        ax.set_xticklabels([f'{int(ca)}%' for ca in ca_levels])
+        
+        # Add legend
+        ax.legend(loc='best', fontsize=11, frameon=True, shadow=True)
+        
+        # Remove top and right spines
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        
+        # Add grid for readability
+        ax.grid(axis='both', alpha=0.3, linestyle='--')
+        
+        plt.tight_layout()
+        
+        # Save if requested
+        if save_dir:
+            save_path = save_dir / f"interaction_plot_{measure}.svg"
+            fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+            print(f"  Saved to: {save_path}")
+        
+        figures[measure] = fig
+        
+        if not show:
+            plt.close(fig)
+    
+    print("=" * 80 + "\n")
+    
+    return figures
+
+
 def load_master_csv(csv_path: Path) -> pd.DataFrame:
     """Load the master metadata CSV with all weeks of data."""
     if not csv_path.exists():
@@ -2169,6 +2329,12 @@ def main():
     tukey_results = perform_tukey_hsd(anova_results, weekly_averages)
     tukey_output = display_tukey_results(tukey_results)
     
+    # Plot interaction effects for significant interactions
+    print("\nStep 6b: Plotting Interaction Effects")
+    print("-" * 40)
+    
+    interaction_figures = plot_interaction_effects(anova_results, weekly_averages, show=True)
+    
     # Compute and plot lick rate histograms (5-minute bins over 30 minutes)
     print("\nStep 7: Computing Lick Rate Averages (5-Minute Bins)")
     print("-" * 40)
@@ -2246,12 +2412,24 @@ def main():
         plt.close(fig_comp)  # Close after saving
         print(f"Saved {len(sorted_dates)} individual week plots + 1 comprehensive plot")
     
+    # Optional: Save interaction plots
+    if interaction_figures:
+        save_interaction = input("\nSave interaction plots as SVG? (y/n): ").strip().lower()
+        if save_interaction in ['y', 'yes']:
+            interaction_figs = plot_interaction_effects(anova_results, weekly_averages, 
+                                                       save_dir=master_csv.parent, show=False)
+            for fig in interaction_figs.values():
+                plt.close(fig)
+            print(f"Saved {len(interaction_figs)} interaction plots")
+    
     print("\n" + "=" * 80)
     print("COMPREHENSIVE STATISTICAL ANALYSIS COMPLETED")
     print("=" * 80)
     print(f"Analyzed: Licks, Bouts, Fecal Counts, Bottle Weight Loss, Total Weight Loss")
-    print(f"Statistical Analysis: One-way ANOVA and Tukey HSD post-hoc tests completed")
+    print(f"Statistical Analysis: Mixed ANOVA (Sex × CA%) and Tukey HSD post-hoc tests completed")
     print(f"All pairwise comparisons identified for significant measures")
+    if interaction_figures:
+        print(f"Interaction plots created for {len(interaction_figures)} measure(s) with significant Sex × CA% interactions")
     print(f"Lick Rate Analysis: 5-minute bins over 30 minutes for each week + comprehensive combined plot")
     
     return weekly_results, weekly_averages, anova_results, tukey_results

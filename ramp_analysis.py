@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 import math
 import re
 
@@ -3140,6 +3140,303 @@ def display_two_way_anova_results(weight_results: dict, behavioral_results: dict
 	return "\n".join(lines)
 
 
+def plot_interaction_effects(
+	weight_results: dict,
+	behavioral_results: dict,
+	df: pd.DataFrame,
+	save_dir: Optional[Path] = None,
+	show: bool = True
+) -> Dict[str, plt.Figure]:
+	"""Plot interaction effects for measures with significant Sex × CA% interactions.
+	
+	Creates line plots showing how the effect of CA% differs between sexes.
+	For binary behavioral measures, plots percentage/proportion of 'yes' responses.
+	
+	Parameters:
+		weight_results: Dictionary from perform_two_way_anova_weight
+		behavioral_results: Dictionary from perform_two_way_chi_square_behavioral
+		df: Master DataFrame
+		save_dir: Optional directory to save plots
+		show: Whether to display the plots
+		
+	Returns:
+		Dictionary mapping measure names to figure objects
+	"""
+	# Check if we have any significant interactions
+	significant_weight = {
+		measure: results for measure, results in weight_results.items()
+		if results.get('interaction', {}).get('significant', False)
+	}
+	
+	significant_behavioral = {}
+	for measure, results in behavioral_results.items():
+		# Check if any sex-stratified tests were significant
+		if 'by_sex' in results.get('interaction', {}):
+			for sex_results in results['interaction']['by_sex'].values():
+				if sex_results.get('p', 1.0) < 0.05:
+					significant_behavioral[measure] = results
+					break
+	
+	if not significant_weight and not significant_behavioral:
+		print("\nNo significant Sex × CA% interactions found - skipping interaction plots.")
+		return {}
+	
+	print("\n" + "=" * 80)
+	print("CREATING INTERACTION PLOTS FOR SIGNIFICANT SEX × CA% INTERACTIONS")
+	print("=" * 80)
+	
+	figures = {}
+	cdf = clean_master_dataframe(df)
+	cdf = _add_day_number_column(cdf)
+	cdf = cdf[cdf["Day"] >= 0]
+	cdf["CA (%)"] = cdf["CA (%)"].astype(int)
+	
+	# Debug: show available columns and sample
+	print(f"\nDataframe info:")
+	print(f"  Columns: {cdf.columns.tolist()}")
+	print(f"  'ID' in columns: {'ID' in cdf.columns}")
+	print(f"  'Sex' in columns: {'Sex' in cdf.columns}")
+	if 'ID' in cdf.columns:
+		print(f"  Unique IDs: {cdf['ID'].nunique()}")
+	print(f"  Total rows: {len(cdf)}")
+	
+	# Plot weight measure interactions (continuous data)
+	for measure_name, results in significant_weight.items():
+		print(f"\nCreating interaction plot for: {measure_name}")
+		
+		# Map measure names to column names
+		column_map = {
+			'Daily Change': 'Daily Change',
+			'Total Change': 'Total Change'
+		}
+		
+		column = column_map.get(measure_name)
+		if not column or column not in cdf.columns:
+			print(f"  Skipping: column '{column}' not found")
+			continue
+		
+		# Organize data by Sex and CA% - need to aggregate by subject first for repeated measures
+		measure_df = cdf[["ID", "Sex", "CA (%)", column]].copy()
+		measure_df = measure_df.dropna()
+		
+		# For repeated measures, first compute mean for each subject at each CA% level
+		# Then compute group means and SEMs across subjects
+		subject_means = measure_df.groupby(['ID', 'Sex', 'CA (%)'])[column].mean().reset_index()
+		
+		# Compute means and SEMs for each Sex × CA% combination
+		ca_levels = sorted(subject_means['CA (%)'].unique())
+		
+		print(f"  CA% levels found: {ca_levels}")
+		print(f"  Unique subjects: {len(subject_means['ID'].unique())}")
+		
+		males_means = []
+		males_sems = []
+		females_means = []
+		females_sems = []
+		
+		for ca in ca_levels:
+			# Males
+			m_vals = subject_means[(subject_means['Sex'] == 'M') & (subject_means['CA (%)'] == ca)][column]
+			if len(m_vals) > 0:
+				males_means.append(m_vals.mean())
+				males_sems.append(m_vals.std(ddof=1) / np.sqrt(len(m_vals)) if len(m_vals) > 1 else 0)
+				print(f"  Males at {ca}%: n={len(m_vals)}, mean={m_vals.mean():.3f}")
+			else:
+				males_means.append(np.nan)
+				males_sems.append(np.nan)
+				print(f"  Males at {ca}%: no data")
+			
+			# Females
+			f_vals = subject_means[(subject_means['Sex'] == 'F') & (subject_means['CA (%)'] == ca)][column]
+			if len(f_vals) > 0:
+				females_means.append(f_vals.mean())
+				females_sems.append(f_vals.std(ddof=1) / np.sqrt(len(f_vals)) if len(f_vals) > 1 else 0)
+				print(f"  Females at {ca}%: n={len(f_vals)}, mean={f_vals.mean():.3f}")
+			else:
+				females_means.append(np.nan)
+				females_sems.append(np.nan)
+				print(f"  Females at {ca}%: no data")
+		
+		# Create plot with larger size for better readability
+		fig, ax = plt.subplots(figsize=(12, 8))
+		
+		ax.errorbar(ca_levels, males_means, yerr=males_sems,
+				   marker='o', markersize=10, linewidth=2.5, capsize=6, capthick=2,
+				   color='steelblue', markerfacecolor='lightblue', markeredgecolor='steelblue',
+				   label='Male', linestyle='-', markeredgewidth=2)
+		
+		ax.errorbar(ca_levels, females_means, yerr=females_sems,
+				   marker='s', markersize=10, linewidth=2.5, capsize=6, capthick=2,
+				   color='coral', markerfacecolor='lightcoral', markeredgecolor='coral',
+				   label='Female', linestyle='--', markeredgewidth=2)
+		
+		ax.set_xlabel('Citric Acid Concentration (%)', fontsize=14, weight='bold')
+		ax.set_ylabel(f'{measure_name} (g)', fontsize=14, weight='bold')
+		p_val = results['interaction']['p']
+		ax.set_title(f'Sex × CA% Interaction: {measure_name}\n(p = {p_val:.4f})',
+					fontsize=16, weight='bold', pad=20)
+		
+		ax.set_xticks(ca_levels)
+		ax.set_xticklabels([f'{int(ca)}%' for ca in ca_levels], fontsize=12)
+		ax.tick_params(axis='y', labelsize=12)
+		ax.legend(loc='best', fontsize=13, frameon=True, shadow=True, fancybox=True)
+		ax.spines['top'].set_visible(False)
+		ax.spines['right'].set_visible(False)
+		ax.spines['left'].set_linewidth(1.5)
+		ax.spines['bottom'].set_linewidth(1.5)
+		ax.grid(axis='both', alpha=0.3, linestyle='--', linewidth=1)
+		
+		plt.tight_layout(pad=1.5)
+		
+		if save_dir:
+			save_path = save_dir / f"interaction_plot_{measure_name.replace(' ', '_')}.svg"
+			fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+			print(f"  Saved to: {save_path}")
+		
+		figures[measure_name] = fig
+		
+		if show:
+			plt.show()
+		else:
+			plt.close(fig)
+	
+	# Plot behavioral measure interactions (binary data - show proportions)
+	behavioral_column_map = {
+		'Nest Made': 'Nest Made?',
+		'Lethargy': 'Lethargy?',
+		'CA Spot Digging': 'CA Spot Digging?',
+		'Anxious Behaviors': 'Anxious Behaviors?'
+	}
+	
+	for measure_name, results in significant_behavioral.items():
+		print(f"\nCreating interaction plot for: {measure_name}")
+		
+		column = behavioral_column_map.get(measure_name)
+		if not column or column not in cdf.columns:
+			print(f"  Skipping: column '{column}' not found")
+			continue
+		
+		# Organize data by Sex and CA% - aggregate by subject first
+		measure_df = cdf[["ID", "Sex", "CA (%)", column]].copy()
+		measure_df = measure_df.dropna()
+		
+		# Debug: show raw values
+		print(f"  Raw values in '{column}': {measure_df[column].unique()[:10]}")
+		
+		# Convert to binary (same logic as chi-square function)
+		measure_df["Response"] = measure_df[column].apply(
+			lambda x: 1 if (x is True or str(x).strip().upper() in ["YES", "TRUE", "1"]) else 0
+		)
+		
+		print(f"  Total 'yes' responses: {measure_df['Response'].sum()} ({100*measure_df['Response'].mean():.1f}%)")
+		
+		# For binary data, compute proportion for each subject at each CA% level
+		# (proportion of 'yes' responses across observations for that subject/CA combo)
+		def compute_subject_proportion(group):
+			return group.mean() if len(group) > 0 else np.nan
+		
+		subject_props = measure_df.groupby(['ID', 'Sex', 'CA (%)'])['Response'].apply(compute_subject_proportion).reset_index()
+		subject_props.columns = ['ID', 'Sex', 'CA (%)', 'proportion']
+		
+		# Compute proportions for each Sex × CA% combination (now averaging subject proportions)
+		ca_levels = sorted(subject_props['CA (%)'].unique())
+		
+		print(f"  CA% levels found: {ca_levels}")
+		print(f"  Unique subjects: {len(subject_props['ID'].unique())}")
+		
+		males_props = []
+		males_sems = []
+		females_props = []
+		females_sems = []
+		
+		for ca in ca_levels:
+			# Males
+			m_vals = subject_props[(subject_props['Sex'] == 'M') & (subject_props['CA (%)'] == ca)]['proportion']
+			if len(m_vals) > 0:
+				mean_prop = m_vals.mean()
+				males_props.append(mean_prop * 100)  # Convert to percentage
+				# SEM for proportion: SD / sqrt(n)
+				sem = (m_vals.std(ddof=1) / np.sqrt(len(m_vals))) * 100 if len(m_vals) > 1 else 0
+				males_sems.append(sem)
+				print(f"  Males at {ca}%: n={len(m_vals)}, mean={mean_prop*100:.1f}%")
+			else:
+				males_props.append(np.nan)
+				males_sems.append(np.nan)
+				print(f"  Males at {ca}%: no data")
+			
+			# Females
+			f_vals = subject_props[(subject_props['Sex'] == 'F') & (subject_props['CA (%)'] == ca)]['proportion']
+			if len(f_vals) > 0:
+				mean_prop = f_vals.mean()
+				females_props.append(mean_prop * 100)  # Convert to percentage
+				# SEM for proportion: SD / sqrt(n)
+				sem = (f_vals.std(ddof=1) / np.sqrt(len(f_vals))) * 100 if len(f_vals) > 1 else 0
+				females_sems.append(sem)
+				print(f"  Females at {ca}%: n={len(f_vals)}, mean={mean_prop*100:.1f}%")
+			else:
+				females_props.append(np.nan)
+				females_sems.append(np.nan)
+				print(f"  Females at {ca}%: no data")
+		
+		# Create plot with larger size for better readability
+		fig, ax = plt.subplots(figsize=(12, 8))
+		
+		ax.errorbar(ca_levels, males_props, yerr=males_sems,
+				   marker='o', markersize=10, linewidth=2.5, capsize=6, capthick=2,
+				   color='steelblue', markerfacecolor='lightblue', markeredgecolor='steelblue',
+				   label='Male', linestyle='-', markeredgewidth=2)
+		
+		ax.errorbar(ca_levels, females_props, yerr=females_sems,
+				   marker='s', markersize=10, linewidth=2.5, capsize=6, capthick=2,
+				   color='coral', markerfacecolor='lightcoral', markeredgecolor='coral',
+				   label='Female', linestyle='--', markeredgewidth=2)
+		
+		ax.set_xlabel('Citric Acid Concentration (%)', fontsize=14, weight='bold')
+		ax.set_ylabel(f'{measure_name} (% Yes)', fontsize=14, weight='bold')
+		ax.set_title(f'Sex × CA% Interaction: {measure_name}\n(Stratified Analysis)',
+					fontsize=16, weight='bold', pad=20)
+		
+		ax.set_xticks(ca_levels)
+		ax.set_xticklabels([f'{int(ca)}%' for ca in ca_levels], fontsize=12)
+		
+		# Set y-axis limits based on actual data range
+		all_values = [v for v in males_props + females_props if not np.isnan(v)]
+		all_errors = [e for e in males_sems + females_sems if not np.isnan(e)]
+		if all_values:
+			max_val = max([v + e for v, e in zip(males_props + females_props, males_sems + females_sems) if not np.isnan(v) and not np.isnan(e)])
+			y_max = max_val * 1.2  # Add 20% margin above highest point
+			ax.set_ylim(0, y_max)
+		
+		ax.tick_params(axis='y', labelsize=12)
+		ax.legend(loc='best', fontsize=13, frameon=True, shadow=True, fancybox=True)
+		ax.spines['top'].set_visible(False)
+		ax.spines['right'].set_visible(False)
+		ax.spines['left'].set_linewidth(1.5)
+		ax.spines['bottom'].set_linewidth(1.5)
+		ax.grid(axis='both', alpha=0.3, linestyle='--', linewidth=1)
+		
+		plt.tight_layout(pad=1.5)
+		
+		if save_dir:
+			save_path = save_dir / f"interaction_plot_{measure_name.replace(' ', '_')}.svg"
+			fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+			print(f"  Saved to: {save_path}")
+		
+		figures[measure_name] = fig
+		
+		if show:
+			plt.show()
+		else:
+			plt.close(fig)
+	
+	if show and figures:
+		print("\nInteraction plots displayed. Close plot windows to continue...")
+	
+	print("=" * 80 + "\n")
+	
+	return figures
+
+
 def main() -> None:
 	"""Interactive entrypoint: select and load the master CSV, then preview it."""
 	try:
@@ -3391,6 +3688,39 @@ def main() -> None:
 			print("\nSave canceled.")
 		except Exception as e:
 			print(f"\nWarning: failed to save results: {e}")
+		
+		# Generate interaction plots if any significant interactions detected
+		print("\n" + "="*80)
+		print("CHECKING FOR SIGNIFICANT INTERACTIONS TO VISUALIZE")
+		print("="*80)
+		interaction_figures = plot_interaction_effects(weight_results, behavioral_results, cdf)
+		
+		if interaction_figures:
+			print(f"\nGenerated {len(interaction_figures)} interaction plot(s).")
+			
+			# Ask user if they want to save the interaction plots
+			try:
+				response = input("\nWould you like to save the interaction plots to SVG? (y/n): ").strip().lower()
+				if response == 'y':
+					from datetime import datetime
+					timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+					
+					for measure_name, fig in interaction_figures.items():
+						# Clean measure name for filename
+						clean_name = measure_name.replace(" ", "_").replace("?", "").replace("/", "_")
+						svg_filename = f"interaction_plot_{clean_name}_{timestamp}.svg"
+						svg_path = Path.cwd() / svg_filename
+						
+						fig.savefig(svg_path, format='svg', bbox_inches='tight')
+						print(f"  Saved: {svg_path}")
+					
+					print(f"\nAll interaction plots saved successfully!")
+			except KeyboardInterrupt:
+				print("\nSave canceled.")
+			except Exception as e:
+				print(f"\nWarning: failed to save interaction plots: {e}")
+		else:
+			print("No significant interactions detected - no plots generated.")
 			
 	except Exception as e:
 		print(f"\nWarning: failed to perform two-way ANOVA analysis: {e}")
