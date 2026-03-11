@@ -1,4 +1,4 @@
-"""
+﻿"""
 CAH Cohort Weight Analysis
 Analyzes weight changes across CA% concentrations and sex for the CAH cohort.
 Adapted from ramp_analysis.py structure.
@@ -9,6 +9,9 @@ from typing import Dict, Optional, Tuple, Union
 import pandas as pd
 import numpy as np
 from scipy import stats
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import re
 
 # Try to import pingouin for mixed ANOVA (repeated measures)
 try:
@@ -28,6 +31,151 @@ except ImportError:
 	print("Warning: statsmodels not installed. Tukey HSD post-hoc tests will not be available.")
 	print("Install with: pip install statsmodels")
 
+
+# ==============================================================================
+# PLOTTING HELPER FUNCTIONS (adapted from ramp_analysis.py)
+# ==============================================================================
+
+def _get_id_sex_map(df: pd.DataFrame) -> dict:
+	"""
+	Build a mapping from ID -> Sex ("M" or "F") using the first non-null value per ID.
+	If Sex isn't available, returns an empty mapping.
+	"""
+	cdf = clean_cah_dataframe(df)
+	if "ID" not in cdf.columns or "Sex" not in cdf.columns:
+		return {}
+
+	def _norm_sex(x: pd.Series) -> Optional[str]:
+		vals = x.dropna().astype(str).str.strip().str.upper()
+		if vals.empty:
+			return None
+		v = vals.iloc[0]
+		if v.startswith("M"):
+			return "M"
+		if v.startswith("F"):
+			return "F"
+		return None
+
+	sex_map = cdf.groupby("ID")["Sex"].apply(_norm_sex).to_dict()
+	return {str(k): v for k, v in sex_map.items()}
+
+
+def _sex_to_style(sex: Optional[str]) -> Tuple[str, str]:
+	"""Return (color, marker) based on sex: M=green/square, F=purple/circle, unknown=gray/triangle."""
+	if sex == "M":
+		return ("green", "s")
+	if sex == "F":
+		return ("purple", "o")
+	return ("gray", "^")
+
+
+def _ca_to_style(ca_pct: Optional[int]) -> Tuple[str, str]:
+	"""Return (color, marker) based on CA%: 0=dodgerblue/triangle-up, 2=orangered/triangle-down."""
+	if ca_pct == 0:
+		return ("dodgerblue", "x")
+	if ca_pct == 2:
+		return ("orangered", "v")
+	return ("gray", "d")  # diamond for unknown
+
+
+def build_daily_change_series_by_id(df: pd.DataFrame, index: str = "day") -> dict:
+	"""
+	For each ID, return a pandas Series of 'Daily Change' indexed by Day number.
+	
+	Parameters:
+		df: DataFrame with ID, Day, Daily Change columns
+		index: "day" or "date" (CAH cohort uses day numbers)
+		
+	Returns:
+		dict[str, pd.Series]: Mapping from ID to Series of daily changes
+	"""
+	required = {"ID", "Day", "Daily Change"}
+	missing = required - set(df.columns)
+	if missing:
+		raise ValueError(f"DataFrame missing required columns: {sorted(missing)}")
+
+	cdf = clean_cah_dataframe(df)
+	if "Day" not in cdf.columns:
+		cdf = add_day_number_column(cdf)
+
+	series_by_id: dict = {}
+	for gid, g in cdf.groupby("ID", dropna=True):
+		g = g.dropna(subset=["Daily Change"])
+		if g.empty:
+			continue
+		
+		g["Day"] = g["Day"].astype("Int64")
+		ser = g.set_index("Day")["Daily Change"].sort_index()
+		s = ser.groupby(level=0).last()
+		s.name = str(gid)
+		series_by_id[str(gid)] = s
+
+	return series_by_id
+
+
+def build_total_change_series_by_id(df: pd.DataFrame, index: str = "day") -> dict:
+	"""
+	For each ID, return a pandas Series of 'Total Change' indexed by Day number.
+	
+	Parameters:
+		df: DataFrame with ID, Day, Total Change columns
+		index: "day" or "date" (CAH cohort uses day numbers)
+		
+	Returns:
+		dict[str, pd.Series]: Mapping from ID to Series of total changes
+	"""
+	required = {"ID", "Day", "Total Change"}
+	missing = required - set(df.columns)
+	if missing:
+		raise ValueError(f"DataFrame missing required columns: {sorted(missing)}")
+
+	cdf = clean_cah_dataframe(df)
+	if "Day" not in cdf.columns:
+		cdf = add_day_number_column(cdf)
+
+	series_by_id: dict = {}
+	for gid, g in cdf.groupby("ID", dropna=True):
+		g = g.dropna(subset=["Total Change"])
+		if g.empty:
+			continue
+		
+		g["Day"] = g["Day"].astype("Int64")
+		ser = g.set_index("Day")["Total Change"].sort_index()
+		s = ser.groupby(level=0).last()
+		s.name = str(gid)
+		series_by_id[str(gid)] = s
+
+	return series_by_id
+
+
+def apply_common_plot_style(
+	ax: plt.Axes,
+	start_x_at_zero: bool = False,
+	remove_top_right: bool = True,
+	remove_x_margins: bool = True,
+	remove_y_margins: bool = True,
+	ticks_in: bool = True,
+) -> None:
+	"""
+	Apply common styling to plots: remove spines, set tick directions, adjust margins.
+	"""
+	if remove_top_right:
+		ax.spines['top'].set_visible(False)
+		ax.spines['right'].set_visible(False)
+	
+	if ticks_in:
+		ax.tick_params(axis='both', direction='in', which='both')
+	
+	if remove_x_margins:
+		ax.margins(x=0)
+	
+	if remove_y_margins:
+		ax.margins(y=0)
+
+
+# ==============================================================================
+# DATA LOADING AND CLEANING
+# ==============================================================================
 
 def load_cah_data(csv_path: Union[str, Path]) -> pd.DataFrame:
 	"""
@@ -252,13 +400,13 @@ def summarize_dataframe(df: pd.DataFrame) -> None:
 		
 		# If all animals have only 1 CA% level, it's between-subjects
 		if all(subjects_per_ca == 1):
-			print(f"\n✓ Experimental Design: CA% is BETWEEN-SUBJECTS")
+			print(f"\n[OK] Experimental Design: CA% is BETWEEN-SUBJECTS")
 			print(f"  Each animal assigned to one CA% level: {sorted(df['CA (%)'].unique())}")
 			
 			# Check for balance across groups
 			group_sizes = df.groupby(['Sex', 'CA (%)'])['ID'].nunique()
 			if group_sizes.nunique() == 1:
-				print(f"  ✓ Balanced design: {group_sizes.iloc[0]} animals per group")
+				print(f"  [OK] Balanced design: {group_sizes.iloc[0]} animals per group")
 			else:
 				print(f"  ⚠ Unbalanced design:")
 				for (sex, ca), n in group_sizes.items():
@@ -287,7 +435,7 @@ def summarize_dataframe(df: pd.DataFrame) -> None:
 			complete_subjects = subjects_per_ca[subjects_per_ca == total_ca_levels].index.tolist()
 			incomplete_subjects = subjects_per_ca[subjects_per_ca < total_ca_levels].index.tolist()
 			
-			print(f"\n✓ Experimental Design: CA% is WITHIN-SUBJECTS")
+			print(f"\n[OK] Experimental Design: CA% is WITHIN-SUBJECTS")
 			print(f"  Total CA% levels: {total_ca_levels}")
 			print(f"  Animals with complete data (all CA% levels): {len(complete_subjects)}")
 			if incomplete_subjects:
@@ -777,7 +925,7 @@ def generate_analysis_report(
 							report_lines.append("⚠ WARNING: Sphericity assumption violated (ε < 0.75)")
 							report_lines.append("  → Greenhouse-Geisser correction applied")
 						else:
-							report_lines.append("✓ Sphericity assumption met (ε ≥ 0.75)")
+							report_lines.append("[OK] Sphericity assumption met (ε ≥ 0.75)")
 					else:
 						report_lines.append("Note: Sphericity test not available")
 				else:
@@ -938,6 +1086,812 @@ def perform_tukey_hsd(df: pd.DataFrame, measure: str, factor: str) -> dict:
 	}
 
 
+def plot_interaction_effects(
+	between_results: Optional[dict] = None,
+	mixed_results: Optional[dict] = None,
+	df: Optional[pd.DataFrame] = None,
+	save_dir: Optional[Path] = None,
+	show: bool = True
+) -> Dict[str, plt.Figure]:
+	"""
+	Plot Sex × CA% interaction effects for CAH cohort (between-subjects design).
+	
+	Creates line plots showing how the effect of CA% differs between sexes.
+	Displays mean weight measures (±SEM) for each Sex × CA% combination.
+	
+	IMPORTANT: Assumes BETWEEN-SUBJECTS design where:
+	- Each animal is assigned to ONE sex (M or F)
+	- Each animal is assigned to ONE CA% level (not repeated measures on CA%)
+	- Error bars represent between-subjects variability (SEM across animals in each group)
+	
+	The plot shows 4 data points representing the 2×2 factorial design:
+	- Male-0%, Male-2%, Female-0%, Female-2%
+	
+	Parameters:
+		between_results: Results from perform_two_way_between_anova()
+		mixed_results: Results from perform_mixed_anova_time()
+		df: Original DataFrame with weight data
+		save_dir: Optional directory to save plots
+		show: Whether to display the plots
+		
+	Returns:
+		Dictionary mapping measure names to figure objects
+	"""
+	print("\n" + "=" * 80)
+	print("CREATING INTERACTION PLOTS: SEX × CA%")
+	print("=" * 80)
+	
+	figures = {}
+	
+	if df is None:
+		print("\nNo DataFrame provided - skipping interaction plots")
+		return figures
+	
+	# Clean and prepare dataframe
+	cdf = clean_cah_dataframe(df)
+	if 'Day' not in cdf.columns:
+		cdf = add_day_number_column(cdf)
+	
+	# Get the measure being analyzed
+	measure = None
+	if between_results:
+		measure = between_results.get('measure', 'Total Change')
+	elif mixed_results:
+		measure = mixed_results.get('measure', 'Total Change')
+	else:
+		print("\nNo ANOVA results provided - skipping interaction plots")
+		return figures
+	
+	# Check if measure column exists
+	if measure not in cdf.columns:
+		print(f"\nColumn '{measure}' not found in dataframe - skipping interaction plots")
+		return figures
+	
+	# Check for significant interaction
+	interaction_significant = False
+	interaction_p = np.nan
+	
+	if between_results and 'interaction' in between_results:
+		interaction_significant = between_results['interaction'].get('significant', False)
+		interaction_p = between_results['interaction'].get('p', np.nan)
+	
+	# Even if not significant, we can still plot to show the pattern
+	print(f"\nCreating interaction plot for: {measure}")
+	if not np.isnan(interaction_p):
+		sig_marker = '***' if interaction_p < 0.001 else '**' if interaction_p < 0.01 else '*' if interaction_p < 0.05 else 'ns'
+		print(f"  Sex × CA% interaction: p = {interaction_p:.4f} {sig_marker}")
+	
+	# Organize data by Sex and CA% - BETWEEN-SUBJECTS DESIGN
+	# Each animal has ONE sex and ONE CA% assignment (not repeated measures on CA%)
+	measure_df = cdf[["ID", "Sex", "CA (%)", measure]].copy()
+	measure_df = measure_df.dropna()
+	
+	# Verify between-subjects design: each animal should have only one CA% level
+	ca_per_subject = measure_df.groupby('ID')['CA (%)'].nunique()
+	if any(ca_per_subject > 1):
+		print(f"\n  WARNING: Some animals have multiple CA% levels (within-subjects design detected)")
+		print(f"  This plot assumes between-subjects design (one CA% per animal)")
+	
+	# Compute mean for each subject (averaging over days/timepoints)
+	# Since CA% is between-subjects, each ID appears in only ONE CA% group
+	subject_means = measure_df.groupby(['ID', 'Sex', 'CA (%)'])[measure].mean().reset_index()
+	
+	# Get unique CA% levels
+	ca_levels = sorted(subject_means['CA (%)'].unique())
+	
+	print(f"  CA% levels: {ca_levels}")
+	print(f"  Unique subjects: {subject_means['ID'].nunique()}")
+	print(f"  Between-subjects design: Each animal assigned to one Sex × CA% group")
+	
+	# Compute means and SEMs for each Sex × CA% combination
+	# Error bars represent between-subjects variability (SD across animals in each group)
+	males_means = []
+	males_sems = []
+	females_means = []
+	females_sems = []
+	
+	for ca in ca_levels:
+		# Males at this CA% level (independent group of animals)
+		m_vals = subject_means[(subject_means['Sex'] == 'M') & (subject_means['CA (%)'] == ca)][measure]
+		if len(m_vals) > 0:
+			males_means.append(m_vals.mean())
+			males_sems.append(m_vals.std(ddof=1) / np.sqrt(len(m_vals)) if len(m_vals) > 1 else 0)
+			print(f"  Males at {ca}%: n={len(m_vals)}, M={m_vals.mean():.3f}, SEM={males_sems[-1]:.3f}")
+		else:
+			males_means.append(np.nan)
+			males_sems.append(np.nan)
+			print(f"  Males at {ca}%: no data")
+		
+		# Females at this CA% level (independent group of animals)
+		f_vals = subject_means[(subject_means['Sex'] == 'F') & (subject_means['CA (%)'] == ca)][measure]
+		if len(f_vals) > 0:
+			females_means.append(f_vals.mean())
+			females_sems.append(f_vals.std(ddof=1) / np.sqrt(len(f_vals)) if len(f_vals) > 1 else 0)
+			print(f"  Females at {ca}%: n={len(f_vals)}, M={f_vals.mean():.3f}, SEM={females_sems[-1]:.3f}")
+		else:
+			females_means.append(np.nan)
+			females_sems.append(np.nan)
+			print(f"  Females at {ca}%: no data")
+	
+	# Create plot with larger size for better readability
+	fig, ax = plt.subplots(figsize=(12, 8))
+	
+	ax.errorbar(ca_levels, males_means, yerr=males_sems,
+			   marker='o', markersize=10, linewidth=2.5, capsize=6, capthick=2,
+			   color='steelblue', markerfacecolor='lightblue', markeredgecolor='steelblue',
+			   label='Male', linestyle='-', markeredgewidth=2)
+	
+	ax.errorbar(ca_levels, females_means, yerr=females_sems,
+			   marker='s', markersize=10, linewidth=2.5, capsize=6, capthick=2,
+			   color='coral', markerfacecolor='lightcoral', markeredgecolor='coral',
+			   label='Female', linestyle='--', markeredgewidth=2)
+	
+	ax.set_xlabel('Citric Acid Concentration (%)', fontsize=14, weight='bold')
+	ax.set_ylabel(f'{measure} (g)', fontsize=14, weight='bold')
+	
+	# Title with p-value if available
+	if not np.isnan(interaction_p):
+		sig_marker = '***' if interaction_p < 0.001 else '**' if interaction_p < 0.01 else '*' if interaction_p < 0.05 else 'ns'
+		ax.set_title(f'Sex × CA% Interaction: {measure}\n(p = {interaction_p:.4f} {sig_marker})',
+					fontsize=16, weight='bold', pad=20)
+	else:
+		ax.set_title(f'Sex × CA% Interaction: {measure}',
+					fontsize=16, weight='bold', pad=20)
+	
+	ax.set_xticks(ca_levels)
+	ax.set_xticklabels([f'{ca:.0f}%' for ca in ca_levels], fontsize=12)
+	ax.tick_params(axis='y', labelsize=12)
+	ax.legend(loc='best', fontsize=13, frameon=True, shadow=True, fancybox=True)
+	ax.spines['top'].set_visible(False)
+	ax.spines['right'].set_visible(False)
+	ax.spines['left'].set_linewidth(1.5)
+	ax.spines['bottom'].set_linewidth(1.5)
+	ax.grid(axis='both', alpha=0.3, linestyle='--', linewidth=1)
+	
+	plt.tight_layout(pad=1.5)
+	
+	if save_dir:
+		save_dir = Path(save_dir)
+		save_dir.mkdir(parents=True, exist_ok=True)
+		save_path = save_dir / f"CAH_interaction_plot_{measure.replace(' ', '_')}.svg"
+		fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+		print(f"\n  [OK] Saved to: {save_path}")
+	
+	figures[measure] = fig
+	
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+	
+	print("=" * 80 + "\n")
+	
+	return figures
+
+
+def plot_total_change_by_id(
+	df: pd.DataFrame,
+	ids: Optional[list] = None,
+	title: Optional[str] = None,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> plt.Figure:
+	"""
+	Create a plot showing Total Change over Day for each animal (ID),
+	with colors and markers indicating sex (M=green/square, F=purple/circle).
+	
+	Adapted from ramp_analysis.py for CAH cohort (no CA% ramping background).
+	
+	Parameters:
+		df: DataFrame with ID, Day, Sex, Total Change columns
+		ids: Optional list of IDs to plot (None = all)
+		title: Plot title
+		save_path: Optional path to save figure
+		show: Whether to display the plot
+		save_svg: Whether to save as SVG
+		svg_filename: Custom SVG filename
+		
+	Returns:
+		matplotlib Figure object
+	"""
+	series_by_id = build_total_change_series_by_id(df, index="day")
+	sex_map = _get_id_sex_map(df)
+
+	# Filter to requested IDs if provided
+	if ids is not None:
+		series_by_id = {k: v for k, v in series_by_id.items() if k in set(ids)}
+
+	if not series_by_id:
+		raise ValueError("No series available to plot. Check input DataFrame and 'ids' filter.")
+
+	fig, ax = plt.subplots(figsize=(11, 6))
+
+	# Plot each ID as a separate line
+	for mid, s in series_by_id.items():
+		if s.empty:
+			continue
+		color, marker = _sex_to_style(sex_map.get(mid))
+		ax.plot(
+			s.index,
+			s.values,
+			label=str(mid),
+			marker=marker,
+			markersize=3,
+			linewidth=1.5,
+			alpha=0.9,
+			color=color,
+		)
+
+	ax.set_xlabel("Day", fontsize=12)
+	ax.set_ylabel("Total Change (g)", fontsize=12)
+	ax.grid(False)
+	ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+
+	if title is None:
+		title = "Total Weight Change by Day per Animal"
+	ax.set_title(title, fontsize=14, weight='bold')
+
+	apply_common_plot_style(
+		ax,
+		start_x_at_zero=False,
+		remove_top_right=True,
+		remove_x_margins=True,
+		remove_y_margins=True,
+		ticks_in=True,
+	)
+
+	# Legend placement
+	if len(series_by_id) > 6:
+		ax.legend(title="ID", bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0., fontsize=9)
+		fig.tight_layout(rect=[0, 0, 0.85, 1])
+	else:
+		ax.legend(title="ID", loc="best", fontsize=10)
+		fig.tight_layout()
+
+	if save_path is not None:
+		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+
+	if save_svg:
+		base = svg_filename or (title or "total_change_by_id")
+		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+		if not safe.lower().endswith(".svg"):
+			safe += ".svg"
+		out_path = Path.cwd() / safe
+		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		print(f"  [OK] Saved SVG: {out_path}")
+
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+
+	return fig
+
+
+def plot_daily_change_by_id(
+	df: pd.DataFrame,
+	ids: Optional[list] = None,
+	title: Optional[str] = None,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> plt.Figure:
+	"""
+	Create a plot showing Daily Change over Day for each animal (ID),
+	with colors and markers indicating sex (M=green/square, F=purple/circle).
+	
+	Adapted from ramp_analysis.py for CAH cohort (no CA% ramping background).
+	
+	Parameters:
+		df: DataFrame with ID, Day, Sex, Daily Change columns
+		ids: Optional list of IDs to plot (None = all)
+		title: Plot title
+		save_path: Optional path to save figure
+		show: Whether to display the plot
+		save_svg: Whether to save as SVG
+		svg_filename: Custom SVG filename
+		
+	Returns:
+		matplotlib Figure object
+	"""
+	series_by_id = build_daily_change_series_by_id(df, index="day")
+	sex_map = _get_id_sex_map(df)
+
+	# Filter to requested IDs if provided
+	if ids is not None:
+		series_by_id = {k: v for k, v in series_by_id.items() if k in set(ids)}
+
+	if not series_by_id:
+		raise ValueError("No series available to plot. Check input DataFrame and 'ids' filter.")
+
+	fig, ax = plt.subplots(figsize=(11, 6))
+
+	# Plot each ID as a separate line
+	for mid, s in series_by_id.items():
+		if s.empty:
+			continue
+		color, marker = _sex_to_style(sex_map.get(mid))
+		ax.plot(
+			s.index,
+			s.values,
+			label=str(mid),
+			marker=marker,
+			markersize=3,
+			linewidth=1.5,
+			alpha=0.9,
+			color=color,
+		)
+
+	ax.set_xlabel("Day", fontsize=12)
+	ax.set_ylabel("Daily Change (g)", fontsize=12)
+	ax.grid(False)
+	ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+
+	if title is None:
+		title = "Daily Weight Change by Day per Animal"
+	ax.set_title(title, fontsize=14, weight='bold')
+
+	apply_common_plot_style(
+		ax,
+		start_x_at_zero=False,
+		remove_top_right=True,
+		remove_x_margins=True,
+		remove_y_margins=True,
+		ticks_in=True,
+	)
+
+	# Legend placement
+	if len(series_by_id) > 6:
+		ax.legend(title="ID", bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0., fontsize=9)
+		fig.tight_layout(rect=[0, 0, 0.85, 1])
+	else:
+		ax.legend(title="ID", loc="best", fontsize=10)
+		fig.tight_layout()
+
+	if save_path is not None:
+		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+
+	if save_svg:
+		base = svg_filename or (title or "daily_change_by_id")
+		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+		if not safe.lower().endswith(".svg"):
+			safe += ".svg"
+		out_path = Path.cwd() / safe
+		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		print(f"  [OK] Saved SVG: {out_path}")
+
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+
+	return fig
+
+
+def plot_total_change_by_sex(
+	df: pd.DataFrame,
+	title: Optional[str] = None,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> plt.Figure:
+	"""
+	Plot sex-averaged Total Change with SEM error bars.
+
+
+	For each sex (M/F), computes mean and SEM across all animals at each day.
+	Uses green for males and purple for females matching individual plots.
+	
+	Parameters:
+		df: DataFrame with ID, Day, Sex, Total Change columns
+		title: Plot title
+		save_path: Optional path to save figure
+		show: Whether to display the plot
+		save_svg: Whether to save as SVG
+		svg_filename: Custom SVG filename
+		
+	Returns:
+		matplotlib Figure object
+	"""
+	series_by_id = build_total_change_series_by_id(df, index="day")
+	sex_map = _get_id_sex_map(df)
+	
+	# Separate series by sex
+	male_series = {mid: s for mid, s in series_by_id.items() if sex_map.get(mid) == "M"}
+	female_series = {mid: s for mid, s in series_by_id.items() if sex_map.get(mid) == "F"}
+	
+	# Compute mean and SEM for each sex
+	def _compute_mean_sem(series_dict: dict) -> Tuple[pd.Series, pd.Series]:
+		if not series_dict:
+			return pd.Series(dtype=float), pd.Series(dtype=float)
+		combined = pd.DataFrame(series_dict)
+		mean = combined.mean(axis=1)
+		sem = combined.sem(axis=1)
+		return mean, sem
+	
+	male_mean, male_sem = _compute_mean_sem(male_series)
+	female_mean, female_sem = _compute_mean_sem(female_series)
+	
+	fig, ax = plt.subplots(figsize=(11, 6))
+	
+	# Plot male data
+	if not male_mean.empty:
+		ax.plot(male_mean.index, male_mean.values, label="Male", color="green", marker="s", 
+				markersize=4, linewidth=2, alpha=0.9)
+		ax.fill_between(male_mean.index, 
+						male_mean - male_sem, 
+						male_mean + male_sem,
+						color="green", alpha=0.2)
+	
+	# Plot female data
+	if not female_mean.empty:
+		ax.plot(female_mean.index, female_mean.values, label="Female", color="purple", marker="o",
+				markersize=4, linewidth=2, alpha=0.9)
+		ax.fill_between(female_mean.index,
+						female_mean - female_sem,
+						female_mean + female_sem,
+						color="purple", alpha=0.2)
+	
+	ax.set_xlabel("Day", fontsize=12)
+	ax.set_ylabel("Total Change (g, Mean ± SEM)", fontsize=12)
+	ax.grid(False)
+	ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+	
+	if title is None:
+		title = "Total Weight Change by Sex (Mean ± SEM)"
+	ax.set_title(title, fontsize=14, weight='bold')
+	
+	apply_common_plot_style(ax, start_x_at_zero=False, remove_top_right=True,
+							remove_x_margins=True, remove_y_margins=True, ticks_in=True)
+	
+	ax.legend(title="Sex", loc="best", fontsize=11)
+	fig.tight_layout()
+	
+	if save_path is not None:
+		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+	
+	if save_svg:
+		base = svg_filename or (title or "total_change_by_sex")
+		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+		if not safe.lower().endswith(".svg"):
+			safe += ".svg"
+		out_path = Path.cwd() / safe
+		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		print(f"  [OK] Saved SVG: {out_path}")
+	
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+	
+	return fig
+
+
+def plot_daily_change_by_sex(
+	df: pd.DataFrame,
+	title: Optional[str] = None,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> plt.Figure:
+	"""
+	Plot sex-averaged Daily Change with SEM error bars.
+	
+	For each sex (M/F), computes mean and SEM across all animals at each day.
+	Uses green for males and purple for females matching individual plots.
+	
+	Parameters:
+		df: DataFrame with ID, Day, Sex, Daily Change columns
+		title: Plot title
+		save_path: Optional path to save figure
+		show: Whether to display the plot
+		save_svg: Whether to save as SVG
+		svg_filename: Custom SVG filename
+		
+	Returns:
+		matplotlib Figure object
+	"""
+	series_by_id = build_daily_change_series_by_id(df, index="day")
+	sex_map = _get_id_sex_map(df)
+	
+	# Separate series by sex
+	male_series = {mid: s for mid, s in series_by_id.items() if sex_map.get(mid) == "M"}
+	female_series = {mid: s for mid, s in series_by_id.items() if sex_map.get(mid) == "F"}
+	
+	# Compute mean and SEM for each sex
+	def _compute_mean_sem(series_dict: dict) -> Tuple[pd.Series, pd.Series]:
+		if not series_dict:
+			return pd.Series(dtype=float), pd.Series(dtype=float)
+		combined = pd.DataFrame(series_dict)
+		mean = combined.mean(axis=1)
+		sem = combined.sem(axis=1)
+		return mean, sem
+	
+	male_mean, male_sem = _compute_mean_sem(male_series)
+	female_mean, female_sem = _compute_mean_sem(female_series)
+	
+	fig, ax = plt.subplots(figsize=(11, 6))
+	
+	# Plot male data
+	if not male_mean.empty:
+		ax.plot(male_mean.index, male_mean.values, label="Male", color="green", marker="s",
+				markersize=4, linewidth=2, alpha=0.9)
+		ax.fill_between(male_mean.index,
+						male_mean - male_sem,
+						male_mean + male_sem,
+						color="green", alpha=0.2)
+	
+	# Plot female data
+	if not female_mean.empty:
+		ax.plot(female_mean.index, female_mean.values, label="Female", color="purple", marker="o",
+				markersize=4, linewidth=2, alpha=0.9)
+		ax.fill_between(female_mean.index,
+						female_mean - female_sem,
+						female_mean + female_sem,
+						color="purple", alpha=0.2)
+	
+	ax.set_xlabel("Day", fontsize=12)
+	ax.set_ylabel("Daily Change (g, Mean ± SEM)", fontsize=12)
+	ax.grid(False)
+	ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+	
+	if title is None:
+		title = "Daily Weight Change by Sex (Mean ± SEM)"
+	ax.set_title(title, fontsize=14, weight='bold')
+	
+	apply_common_plot_style(ax, start_x_at_zero=False, remove_top_right=True,
+							remove_x_margins=True, remove_y_margins=True, ticks_in=True)
+	
+	ax.legend(title="Sex", loc="best", fontsize=11)
+	fig.tight_layout()
+	
+	if save_path is not None:
+		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+	
+	if save_svg:
+		base = svg_filename or (title or "daily_change_by_sex")
+		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+		if not safe.lower().endswith(".svg"):
+			safe += ".svg"
+		out_path = Path.cwd() / safe
+		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		print(f"  [OK] Saved SVG: {out_path}")
+	
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+	
+	return fig
+
+
+def plot_total_change_by_ca(
+	df: pd.DataFrame,
+	title: Optional[str] = None,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> plt.Figure:
+	"""
+	Plot CA%-averaged Total Change with SEM error bars.
+	
+	For each CA% group (0%, 2%), computes mean and SEM across all animals at each day.
+	Uses dodgerblue for 0% and orangered for 2% with triangle markers.
+	
+	Parameters:
+		df: DataFrame with ID, Day, CA (%), Total Change columns
+		title: Plot title
+		save_path: Optional path to save figure
+		show: Whether to display the plot
+		save_svg: Whether to save as SVG
+		svg_filename: Custom SVG filename
+		
+	Returns:
+		matplotlib Figure object
+	"""
+	series_by_id = build_total_change_series_by_id(df, index="day")
+	
+	# Get CA% for each animal
+	ca_map = {}
+	for animal_id in df["ID"].unique():
+		animal_data = df[df["ID"] == animal_id]
+		if len(animal_data) > 0 and "CA (%)" in animal_data.columns:
+			ca_values = animal_data["CA (%)"].dropna().unique()
+			if len(ca_values) > 0:
+				ca_map[animal_id] = int(ca_values[0])
+	
+	# Separate series by CA%
+	ca0_series = {mid: s for mid, s in series_by_id.items() if ca_map.get(mid) == 0}
+	ca2_series = {mid: s for mid, s in series_by_id.items() if ca_map.get(mid) == 2}
+	
+	# Compute mean and SEM for each CA% group
+	def _compute_mean_sem(series_dict: dict) -> Tuple[pd.Series, pd.Series]:
+		if not series_dict:
+			return pd.Series(dtype=float), pd.Series(dtype=float)
+		combined = pd.DataFrame(series_dict)
+		mean = combined.mean(axis=1)
+		sem = combined.sem(axis=1)
+		return mean, sem
+	
+	ca0_mean, ca0_sem = _compute_mean_sem(ca0_series)
+	ca2_mean, ca2_sem = _compute_mean_sem(ca2_series)
+	
+	# Get colors and markers from helper
+	ca0_color, ca0_marker = _ca_to_style(0)
+	ca2_color, ca2_marker = _ca_to_style(2)
+	
+	fig, ax = plt.subplots(figsize=(11, 6))
+	
+	# Plot 0% CA data
+	if not ca0_mean.empty:
+		ax.plot(ca0_mean.index, ca0_mean.values, label="0% CA", color=ca0_color, marker=ca0_marker,
+				markersize=5, linewidth=2, alpha=0.9)
+		ax.fill_between(ca0_mean.index,
+						ca0_mean - ca0_sem,
+						ca0_mean + ca0_sem,
+						color=ca0_color, alpha=0.2)
+	
+	# Plot 2% CA data
+	if not ca2_mean.empty:
+		ax.plot(ca2_mean.index, ca2_mean.values, label="2% CA", color=ca2_color, marker=ca2_marker,
+				markersize=5, linewidth=2, alpha=0.9)
+		ax.fill_between(ca2_mean.index,
+						ca2_mean - ca2_sem,
+						ca2_mean + ca2_sem,
+						color=ca2_color, alpha=0.2)
+	
+	ax.set_xlabel("Day", fontsize=12)
+	ax.set_ylabel("Total Change (g, Mean ± SEM)", fontsize=12)
+	ax.grid(False)
+	ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+	
+	if title is None:
+		title = "Total Weight Change by CA% (Mean ± SEM)"
+	ax.set_title(title, fontsize=14, weight='bold')
+	
+	apply_common_plot_style(ax, start_x_at_zero=False, remove_top_right=True,
+							remove_x_margins=True, remove_y_margins=True, ticks_in=True)
+	
+	ax.legend(title="CA%", loc="best", fontsize=11)
+	fig.tight_layout()
+	
+	if save_path is not None:
+		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+	
+	if save_svg:
+		base = svg_filename or (title or "total_change_by_ca")
+		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+		if not safe.lower().endswith(".svg"):
+			safe += ".svg"
+		out_path = Path.cwd() / safe
+		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		print(f"  [OK] Saved SVG: {out_path}")
+	
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+	
+	return fig
+
+
+def plot_daily_change_by_ca(
+	df: pd.DataFrame,
+	title: Optional[str] = None,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> plt.Figure:
+	"""
+	Plot CA%-averaged Daily Change with SEM error bars.
+	
+	For each CA% group (0%, 2%), computes mean and SEM across all animals at each day.
+	Uses dodgerblue for 0% and orangered for 2% with triangle markers.
+	
+	Parameters:
+		df: DataFrame with ID, Day, CA (%), Daily Change columns
+		title: Plot title
+		save_path: Optional path to save figure
+		show: Whether to display the plot
+		save_svg: Whether to save as SVG
+		svg_filename: Custom SVG filename
+		
+	Returns:
+		matplotlib Figure object
+	"""
+	series_by_id = build_daily_change_series_by_id(df, index="day")
+	
+	# Get CA% for each animal
+	ca_map = {}
+	for animal_id in df["ID"].unique():
+		animal_data = df[df["ID"] == animal_id]
+		if len(animal_data) > 0 and "CA (%)" in animal_data.columns:
+			ca_values = animal_data["CA (%)"].dropna().unique()
+			if len(ca_values) > 0:
+				ca_map[animal_id] = int(ca_values[0])
+	
+	# Separate series by CA%
+	ca0_series = {mid: s for mid, s in series_by_id.items() if ca_map.get(mid) == 0}
+	ca2_series = {mid: s for mid, s in series_by_id.items() if ca_map.get(mid) == 2}
+	
+	# Compute mean and SEM for each CA% group
+	def _compute_mean_sem(series_dict: dict) -> Tuple[pd.Series, pd.Series]:
+		if not series_dict:
+			return pd.Series(dtype=float), pd.Series(dtype=float)
+		combined = pd.DataFrame(series_dict)
+		mean = combined.mean(axis=1)
+		sem = combined.sem(axis=1)
+		return mean, sem
+	
+	ca0_mean, ca0_sem = _compute_mean_sem(ca0_series)
+	ca2_mean, ca2_sem = _compute_mean_sem(ca2_series)
+	
+	# Get colors and markers from helper
+	ca0_color, ca0_marker = _ca_to_style(0)
+	ca2_color, ca2_marker = _ca_to_style(2)
+	
+	fig, ax = plt.subplots(figsize=(11, 6))
+	
+	# Plot 0% CA data
+	if not ca0_mean.empty:
+		ax.plot(ca0_mean.index, ca0_mean.values, label="0% CA", color=ca0_color, marker=ca0_marker,
+				markersize=5, linewidth=2, alpha=0.9)
+		ax.fill_between(ca0_mean.index,
+						ca0_mean - ca0_sem,
+						ca0_mean + ca0_sem,
+						color=ca0_color, alpha=0.2)
+	
+	# Plot 2% CA data
+	if not ca2_mean.empty:
+		ax.plot(ca2_mean.index, ca2_mean.values, label="2% CA", color=ca2_color, marker=ca2_marker,
+				markersize=5, linewidth=2, alpha=0.9)
+		ax.fill_between(ca2_mean.index,
+						ca2_mean - ca2_sem,
+						ca2_mean + ca2_sem,
+						color=ca2_color, alpha=0.2)
+	
+	ax.set_xlabel("Day", fontsize=12)
+	ax.set_ylabel("Daily Change (g, Mean ± SEM)", fontsize=12)
+	ax.grid(False)
+	ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+	
+	if title is None:
+		title = "Daily Weight Change by CA% (Mean ± SEM)"
+	ax.set_title(title, fontsize=14, weight='bold')
+	
+	apply_common_plot_style(ax, start_x_at_zero=False, remove_top_right=True,
+							remove_x_margins=True, remove_y_margins=True, ticks_in=True)
+	
+	ax.legend(title="CA%", loc="best", fontsize=11)
+	fig.tight_layout()
+	
+	if save_path is not None:
+		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+	
+	if save_svg:
+		base = svg_filename or (title or "daily_change_by_ca")
+		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+		if not safe.lower().endswith(".svg"):
+			safe += ".svg"
+		out_path = Path.cwd() / safe
+		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		print(f"  [OK] Saved SVG: {out_path}")
+	
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+	
+	return fig
+
+
 def main():
 	"""
 	Main function: Load, clean, and summarize CAH cohort data.
@@ -993,7 +1947,7 @@ def main():
 		print("\n⚠ WARNING: pingouin not installed. ANOVA will not be available.")
 		print("Install with: pip install pingouin")
 	else:
-		print("\n✓ pingouin is installed and ready")
+		print("\n[OK] pingouin is installed and ready")
 	
 	# Check for required columns
 	required_cols = ["ID", "Sex", "CA (%)", "Day", "Daily Change", "Total Change"]
@@ -1002,18 +1956,18 @@ def main():
 	if missing_cols:
 		print(f"\n⚠ WARNING: Missing required columns for ANOVA: {missing_cols}")
 	else:
-		print(f"\n✓ All required columns present")
+		print(f"\n[OK] All required columns present")
 	
 	# Check for complete cases
 	if all(col in df.columns for col in required_cols):
 		complete_df = df.dropna(subset=required_cols)
-		print(f"\n✓ Complete cases (non-null): {len(complete_df)} / {len(df)} rows")
+		print(f"\n[OK] Complete cases (non-null): {len(complete_df)} / {len(df)} rows")
 		
 		# Check experimental design
 		subjects_per_ca = complete_df.groupby('ID')['CA (%)'].nunique()
 		
 		if all(subjects_per_ca == 1):
-			print(f"\n✓ BETWEEN-SUBJECTS DESIGN (CA% is between-subjects)")
+			print(f"\n[OK] BETWEEN-SUBJECTS DESIGN (CA% is between-subjects)")
 			print(f"  Available analyses:")
 			print(f"    1. Between-subjects ANOVA: Sex × CA% (at single time point or averaged)")
 			print(f"    2. Mixed ANOVA: Time (within) × Sex (between) × CA% (between)")
@@ -1028,7 +1982,7 @@ def main():
 				print(f"  ⚠ {complete_df['ID'].nunique() - complete_time} animals have missing time points")
 				print(f"    (will be excluded from mixed ANOVA)")
 		else:
-			print(f"\n✓ WITHIN-SUBJECTS DESIGN (CA% is within-subjects)")
+			print(f"\n[OK] WITHIN-SUBJECTS DESIGN (CA% is within-subjects)")
 			print(f"  Available analyses:")
 			print(f"    1. Mixed ANOVA with CA% as within-subjects factor")
 	
@@ -1118,7 +2072,31 @@ def main():
 			with open(report_path, 'w', encoding='utf-8') as f:
 				f.write(report)
 			
-			print(f"\n✓ Report saved to: {report_path}")
+			print(f"\n[OK] Report saved to: {report_path}")
+		
+		# Generate interaction plots
+		print("\n\n" + "="*80)
+		print("GENERATING INTERACTION PLOTS")
+		print("="*80)
+		
+		plot_interaction = input("\nWould you like to generate Sex × CA% interaction plots? (y/n): ").strip().lower()
+		if plot_interaction == 'y':
+			# Determine save directory (same as report if saved)
+			save_dir = None
+			if save_report == 'y':
+				save_dir = Path(__file__).parent
+			
+			# Generate plots
+			interaction_figs = plot_interaction_effects(
+				between_results=results_avg,
+				mixed_results=results_mixed,
+				df=df,
+				save_dir=save_dir,
+				show=True
+			)
+			
+			if interaction_figs:
+				print(f"\n[OK] Generated {len(interaction_figs)} interaction plot(s)")
 	
 	return df
 

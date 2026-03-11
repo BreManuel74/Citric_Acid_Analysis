@@ -11,7 +11,13 @@ from CAH_weight_analysis import (
     perform_mixed_anova_time,
     perform_tukey_hsd,
     generate_analysis_report,
-    plot_interaction_effects
+    plot_interaction_effects,
+    plot_total_change_by_id,
+    plot_daily_change_by_id,
+    plot_total_change_by_sex,
+    plot_daily_change_by_sex,
+    plot_total_change_by_ca,
+    plot_daily_change_by_ca,
 )
 
 def main():
@@ -93,7 +99,9 @@ def main():
         df=df
     )
     
-    print("\n" + report)
+    # Don't print report to console (contains Unicode that may not display in Windows console)
+    # Just save to file
+    print("\n[Report generated - saving to file...]")
     
     # Save report to file
     from datetime import datetime
@@ -104,7 +112,7 @@ def main():
     with open(report_path, 'w', encoding='utf-8') as f:
         f.write(report)
     
-    print(f"\n✓ Report saved to: {report_path}")
+    print(f"\n[OK] Report saved to: {report_path}")
     
     # Generate interaction plots
     print("\n\n" + "="*80)
@@ -116,11 +124,77 @@ def main():
         mixed_results=results_mixed,
         df=df,
         save_dir=Path(__file__).parent,
-        show=True
+        show=False  # Don't show plots, just save them
     )
     
     if interaction_figs:
-        print(f"\n✓ Generated {len(interaction_figs)} interaction plot(s)")
+        print(f"\n[OK] Generated {len(interaction_figs)} interaction plot(s)")
+    
+    # Generate individual animal plots
+    print("\n\n" + "="*80)
+    print("GENERATING INDIVIDUAL ANIMAL PLOTS")
+    print("="*80)
+    
+    print("\nPlotting Total Change by Individual Animal...")
+    plot_total_change_by_id(
+        df,
+        save_svg=True,
+        svg_filename="CAH_total_change_by_id.svg",
+        show=False
+    )
+    
+    print("\nPlotting Daily Change by Individual Animal...")
+    plot_daily_change_by_id(
+        df,
+        save_svg=True,
+        svg_filename="CAH_daily_change_by_id.svg",
+        show=False
+    )
+    
+    # Generate sex-averaged plots
+    print("\n\n" + "="*80)
+    print("GENERATING SEX-AVERAGED PLOTS")
+    print("="*80)
+    
+    print("\nPlotting Total Change Averaged by Sex...")
+    plot_total_change_by_sex(
+        df,
+        save_svg=True,
+        svg_filename="CAH_total_change_by_sex.svg",
+        show=False
+    )
+    
+    print("\nPlotting Daily Change Averaged by Sex...")
+    plot_daily_change_by_sex(
+        df,
+        save_svg=True,
+        svg_filename="CAH_daily_change_by_sex.svg",
+        show=False
+    )
+    
+    print("\n" + "="*80)
+    print("GENERATING CA%-AVERAGED PLOTS")
+    print("="*80)
+    
+    print("\nPlotting Total Change Averaged by CA%...")
+    plot_total_change_by_ca(
+        df,
+        save_svg=True,
+        svg_filename="CAH_total_change_by_ca.svg",
+        show=False
+    )
+    
+    print("\nPlotting Daily Change Averaged by CA%...")
+    plot_daily_change_by_ca(
+        df,
+        save_svg=True,
+        svg_filename="CAH_daily_change_by_ca.svg",
+        show=False
+    )
+    
+    print("\n" + "="*80)
+    print("ALL PLOTS COMPLETE - Check directory for SVG files")
+    print("="*80)
 
 if __name__ == "__main__":
     main()
