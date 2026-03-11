@@ -539,6 +539,10 @@ def bin_weight_changes_by_week(df: pd.DataFrame) -> dict:
 		1     2             -0.700             -1.147      7
 		...
 	"""
+	print("\n" + "="*80)
+	print("BINNING WEIGHT CHANGES BY WEEK")
+	print("="*80)
+	
 	required = {"ID", "Date", "Daily Change", "Total Change"}
 	missing = required - set(df.columns)
 	if missing:
@@ -546,6 +550,8 @@ def bin_weight_changes_by_week(df: pd.DataFrame) -> dict:
 	
 	# Clean the dataframe
 	cdf = clean_master_dataframe(df)
+	print(f"Initial data: {len(cdf)} rows, {len(cdf['ID'].unique())} unique IDs")
+	
 	# Add Day and Week columns
 	cdf = _add_day_number_column(cdf)
 	cdf = _add_week_column(cdf)
@@ -553,13 +559,21 @@ def bin_weight_changes_by_week(df: pd.DataFrame) -> dict:
 	if "Week" not in cdf.columns:
 		raise ValueError("Failed to compute 'Week' column")
 	
+	print(f"Day range in data: {cdf['Day'].min()} to {cdf['Day'].max()}")
+	print(f"Weeks present: {sorted(cdf['Week'].dropna().unique())}")
+	
 	# Drop rows with missing essential data and exclude Day < 0 (first measurement)
+	before_drop = len(cdf)
 	cdf = cdf.dropna(subset=["ID", "Week", "Daily Change", "Total Change"])
 	cdf = cdf[cdf["Day"] >= 0]
+	print(f"After filtering (excluding Day<0 and NaN): {len(cdf)} rows (dropped {before_drop - len(cdf)} rows)")
 	
 	binned_by_id = {}
 	
+	print(f"\nBinning data for {len(cdf['ID'].unique())} animals:")
 	for animal_id, group in cdf.groupby("ID", dropna=True):
+		print(f"  {animal_id}: {len(group)} measurements across {len(group['Week'].unique())} weeks")
+		
 		# Group by Week and aggregate
 		binned = group.groupby("Week").agg({
 			"Daily Change": ["mean", "sem", "count", lambda x: list(x)],
@@ -590,8 +604,14 @@ def bin_weight_changes_by_week(df: pd.DataFrame) -> dict:
 			"Total Change Values"
 		]]
 		
+		print(f"    Week summary for {animal_id}:")
+		for _, row in binned.iterrows():
+			print(f"      Week {int(row['Week'])}: n={row['Count']}, Daily Δ={row['Daily Change Mean']:.3f}±{row['Daily Change SEM']:.3f}, Total Δ={row['Total Change Mean']:.3f}±{row['Total Change SEM']:.3f}")
+		
 		binned_by_id[str(animal_id)] = binned
 	
+	print(f"\nBinning complete: {len(binned_by_id)} animals processed")
+	print("="*80 + "\n")
 	return binned_by_id
 
 
@@ -678,6 +698,10 @@ def plot_average_weight_change_by_week(
 	Returns:
 		The matplotlib Figure object with two subplots (Daily Change and Total Change)
 	"""
+	print("\n" + "="*80)
+	print("PLOTTING AVERAGE WEIGHT CHANGE BY WEEK")
+	print("="*80)
+	
 	# Get binned data for all animals
 	binned_data = bin_weight_changes_by_week(df)
 	
@@ -687,6 +711,7 @@ def plot_average_weight_change_by_week(
 		all_weeks.update(animal_data["Week"].values)
 	
 	weeks = sorted(all_weeks)
+	print(f"\nAggregating data across all animals for weeks: {weeks}")
 	
 	# Collect data for each Week across all animals
 	daily_change_by_week = {week: [] for week in weeks}
@@ -698,6 +723,10 @@ def plot_average_weight_change_by_week(
 			daily_change_by_week[week].append(row["Daily Change Mean"])
 			total_change_by_week[week].append(row["Total Change Mean"])
 	
+	print("\nAnimals per week:")
+	for week in weeks:
+		print(f"  Week {int(week)}: {len(daily_change_by_week[week])} animals")
+	
 	# Calculate mean and SEM across animals for each Week
 	week_labels = []
 	daily_means = []
@@ -705,16 +734,27 @@ def plot_average_weight_change_by_week(
 	total_means = []
 	total_sems = []
 	
+	print("\nCalculating week-averaged statistics:")
 	for week in weeks:
 		week_labels.append(f"Week {int(week)}")
 		
 		daily_vals = np.array(daily_change_by_week[week])
-		daily_means.append(np.mean(daily_vals))
-		daily_sems.append(np.std(daily_vals, ddof=1) / np.sqrt(len(daily_vals)) if len(daily_vals) > 1 else 0)
+		daily_mean = np.mean(daily_vals)
+		daily_sem = np.std(daily_vals, ddof=1) / np.sqrt(len(daily_vals)) if len(daily_vals) > 1 else 0
+		daily_means.append(daily_mean)
+		daily_sems.append(daily_sem)
 		
 		total_vals = np.array(total_change_by_week[week])
-		total_means.append(np.mean(total_vals))
-		total_sems.append(np.std(total_vals, ddof=1) / np.sqrt(len(total_vals)) if len(total_vals) > 1 else 0)
+		total_mean = np.mean(total_vals)
+		total_sem = np.std(total_vals, ddof=1) / np.sqrt(len(total_vals)) if len(total_vals) > 1 else 0
+		total_means.append(total_mean)
+		total_sems.append(total_sem)
+		
+		print(f"  Week {int(week)}:")
+		print(f"    Daily Change: {daily_mean:.3f} ± {daily_sem:.3f} (n={len(daily_vals)})")
+		print(f"    Total Change: {total_mean:.3f} ± {total_sem:.3f} (n={len(total_vals)})")
+	
+	print("\nCreating bar plot with Daily Change and Total Change subplots...")
 	
 	# Create figure with two subplots side by side
 	fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
@@ -723,6 +763,9 @@ def plot_average_weight_change_by_week(
 		fig.suptitle(title, fontsize=16, weight='bold', y=0.98)
 	else:
 		fig.suptitle("Average Weight Change by Week", fontsize=16, weight='bold', y=0.98)
+	
+	print("Plot created successfully")
+	print("="*80 + "\n")
 	
 	x_pos = np.arange(len(week_labels))
 	bar_width = 0.6
@@ -844,6 +887,10 @@ def plot_nest_made_pie_chart(
 	Returns:
 		The matplotlib Figure object
 	"""
+	print("\n" + "="*80)
+	print("ANALYZING NEST MADE BEHAVIORAL DATA")
+	print("="*80)
+	
 	# Clean the dataframe to ensure yes/no conversion to boolean
 	cdf = clean_master_dataframe(df)
 	
@@ -852,6 +899,7 @@ def plot_nest_made_pie_chart(
 	
 	# Count Yes and No values (the column is now boolean after cleaning)
 	nest_counts = cdf["Nest Made?"].value_counts()
+	print(f"Raw counts: {dict(nest_counts)}")
 	
 	# Map boolean to labels
 	labels = []
@@ -869,6 +917,12 @@ def plot_nest_made_pie_chart(
 	# Calculate percentages for display
 	total = sum(values)
 	percentages = [v / total * 100 for v in values]
+	
+	print(f"\nNest Made distribution:")
+	for label, value, pct in zip(labels, values, percentages):
+		print(f"  {label}: {value} observations ({pct:.1f}%)")
+	print(f"Total observations: {total}")
+	print("="*80 + "\n")
 	
 	# Create pie chart
 	fig, ax = plt.subplots(figsize=(8, 8))
@@ -1247,6 +1301,10 @@ def plot_all_pie_charts(
 	Returns:
 		The matplotlib Figure object
 	"""
+	print("\n" + "="*80)
+	print("CREATING COMBINED BEHAVIORAL PIE CHARTS (2x2)")
+	print("="*80)
+	
 	# Clean the dataframe to ensure yes/no conversion to boolean
 	cdf = clean_master_dataframe(df)
 	
@@ -1265,8 +1323,10 @@ def plot_all_pie_charts(
 	# Track total n (should be same for all)
 	total_n = None
 	
+	print(f"\nProcessing behavioral columns:")
 	for col_name, ax in columns:
 		if col_name not in cdf.columns:
+			print(f"  {col_name}: NOT FOUND")
 			ax.text(0.5, 0.5, f"'{col_name}' not found", ha='center', va='center')
 			ax.axis('off')
 			continue
@@ -1283,6 +1343,14 @@ def plot_all_pie_charts(
 			label = "Yes" if val else "No"
 			labels.append(label)
 			values.append(count)
+		
+		if values:
+			total_col = sum(values)
+			yes_count = values[labels.index("Yes")] if "Yes" in labels else 0
+			no_count = values[labels.index("No")] if "No" in labels else 0
+			print(f"  {col_name}: Yes={yes_count} ({100*yes_count/total_col:.1f}%), No={no_count} ({100*no_count/total_col:.1f}%), Total={total_col}")
+		else:
+			print(f"  {col_name}: NO VALID DATA")
 		
 		if not values:
 			ax.text(0.5, 0.5, f"No valid data in '{col_name}'", ha='center', va='center')
@@ -1340,6 +1408,9 @@ def plot_all_pie_charts(
 	
 	# Adjust layout to make room for legend
 	plt.tight_layout(rect=[0, 0.03, 1, 0.96])
+	
+	print(f"\nCombined behavioral pie chart created successfully with n={total_n}")
+	print("="*80 + "\n")
 	
 	if save_path is not None:
 		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
@@ -1705,8 +1776,15 @@ def plot_total_change_by_id(
 	Create a single plot showing Total Change over Date (or Day) for each mouse (ID),
 	with the same style and Week annotations as the daily-change plot.
 	"""
+	print("\n" + "="*80)
+	print("PLOTTING TOTAL CHANGE BY INDIVIDUAL ID")
+	print("="*80)
+	
 	series_by_id = build_total_change_series_by_id(df, index=("day" if use_day_number else "date"))
+	print(f"Built series for {len(series_by_id)} animals")
+	
 	sex_map = _get_id_sex_map(df)
+	print(f"Sex mapping: {len([s for s in sex_map.values() if s == 'M'])} Male, {len([s for s in sex_map.values() if s == 'F'])} Female")
 
 	# If using day numbers, compute Week per day (draw boundaries/labels later after axis is set)
 	if use_day_number:
@@ -1717,11 +1795,18 @@ def plot_total_change_by_id(
 
 	# Filter to requested IDs if provided
 	if ids is not None:
+		print(f"Filtering to requested IDs: {ids}")
 		series_by_id = {k: v for k, v in series_by_id.items() if k in set(ids)}
+		print(f"After filtering: {len(series_by_id)} animals")
 
 	if not series_by_id:
 		raise ValueError("No series available to plot. Check input DataFrame and 'ids' filter.")
 
+	print(f"\nPlotting Total Change for {len(series_by_id)} animals...")
+	for mid, s in series_by_id.items():
+		if not s.empty:
+			print(f"  {mid}: {len(s)} data points, range [{s.min():.2f}, {s.max():.2f}]")
+	
 	fig, ax = plt.subplots(figsize=(11, 6))
 
 	# Plot each ID as a separate line
@@ -1739,6 +1824,9 @@ def plot_total_change_by_id(
 			alpha=0.9,
 			color=color,
 		)
+	
+	print("Plot created successfully")
+	print("="*80 + "\n")
 
 	ax.set_xlabel("Day" if use_day_number else "Date")
 	ax.set_ylabel("Total Change")
@@ -1870,8 +1958,15 @@ def plot_daily_change_by_id(
 	Returns:
 		The matplotlib Figure object
 	"""
+	print("\n" + "="*80)
+	print("PLOTTING DAILY CHANGE BY INDIVIDUAL ID")
+	print("="*80)
+	
 	series_by_id = build_daily_change_series_by_id(df, index=("day" if use_day_number else "date"))
+	print(f"Built series for {len(series_by_id)} animals")
+	
 	sex_map = _get_id_sex_map(df)
+	print(f"Sex mapping: {len([s for s in sex_map.values() if s == 'M'])} Male, {len([s for s in sex_map.values() if s == 'F'])} Female")
 
 	# If using day numbers, compute Week per day (draw background later after axis is set)
 	if use_day_number:
@@ -1882,11 +1977,18 @@ def plot_daily_change_by_id(
 
 	# Filter to requested IDs if provided
 	if ids is not None:
+		print(f"Filtering to requested IDs: {ids}")
 		series_by_id = {k: v for k, v in series_by_id.items() if k in set(ids)}
+		print(f"After filtering: {len(series_by_id)} animals")
 
 	if not series_by_id:
 		raise ValueError("No series available to plot. Check input DataFrame and 'ids' filter.")
 
+	print(f"\nPlotting Daily Change for {len(series_by_id)} animals...")
+	for mid, s in series_by_id.items():
+		if not s.empty:
+			print(f"  {mid}: {len(s)} data points, range [{s.min():.2f}, {s.max():.2f}]")
+	
 	fig, ax = plt.subplots(figsize=(11, 6))
 
 	# Draw background after plotting and before legend, once axes are scaled
@@ -1906,6 +2008,9 @@ def plot_daily_change_by_id(
 			alpha=0.9,
 			color=color,
 		)
+	
+	print("Plot created successfully")
+	print("="*80 + "\n")
 
 	ax.set_xlabel("Day" if use_day_number else "Date")
 	ax.set_ylabel("Daily Change")
@@ -2030,12 +2135,19 @@ def plot_total_change_by_sex(
 	For each sex (M/F), computes mean and SEM across all mice at each day/date.
 	Uses the same styling as plot_total_change_by_id.
 	"""
+	print("\n" + "="*80)
+	print("PLOTTING TOTAL CHANGE BY SEX (AVERAGED)")
+	print("="*80)
+	
 	series_by_id = build_total_change_series_by_id(df, index=("day" if use_day_number else "date"))
 	sex_map = _get_id_sex_map(df)
 	
 	# Separate series by sex
 	male_series = {mid: s for mid, s in series_by_id.items() if sex_map.get(mid) == "M"}
 	female_series = {mid: s for mid, s in series_by_id.items() if sex_map.get(mid) == "F"}
+	
+	print(f"Male animals: {len(male_series)}")
+	print(f"Female animals: {len(female_series)}")
 	
 	# Compute mean and SEM for each sex
 	def _compute_mean_sem(series_dict: dict) -> Tuple[pd.Series, pd.Series]:
@@ -2130,6 +2242,9 @@ def plot_total_change_by_sex(
 	ax.legend(title="Sex", loc="best")
 	fig.tight_layout()
 	
+	print("Plot created successfully")
+	print("="*80 + "\n")
+	
 	if save_path is not None:
 		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
 	
@@ -2168,12 +2283,19 @@ def plot_daily_change_by_sex(
 	For each sex (M/F), computes mean and SEM across all mice at each day/date.
 	Uses the same styling as plot_daily_change_by_id.
 	"""
+	print("\n" + "="*80)
+	print("PLOTTING DAILY CHANGE BY SEX (AVERAGED)")
+	print("="*80)
+	
 	series_by_id = build_daily_change_series_by_id(df, index=("day" if use_day_number else "date"))
 	sex_map = _get_id_sex_map(df)
 	
 	# Separate series by sex
 	male_series = {mid: s for mid, s in series_by_id.items() if sex_map.get(mid) == "M"}
 	female_series = {mid: s for mid, s in series_by_id.items() if sex_map.get(mid) == "F"}
+	
+	print(f"Male animals: {len(male_series)}")
+	print(f"Female animals: {len(female_series)}")
 	
 	# Compute mean and SEM for each sex
 	def _compute_mean_sem(series_dict: dict) -> Tuple[pd.Series, pd.Series]:
@@ -2266,6 +2388,9 @@ def plot_daily_change_by_sex(
 	
 	ax.legend(title="Sex", loc="best")
 	fig.tight_layout()
+	
+	print("Plot created successfully")
+	print("="*80 + "\n")
 	
 	if save_path is not None:
 		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
