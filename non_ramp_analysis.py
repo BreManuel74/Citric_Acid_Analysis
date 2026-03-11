@@ -1019,6 +1019,7 @@ def perform_two_way_anova_weight(df: pd.DataFrame) -> dict:
 			
 			print(f"\nMixed ANOVA Results:")
 			print(aov.to_string())
+			print(f"\nAvailable columns in ANOVA table: {list(aov.columns)}")
 			
 			# Extract results for each effect
 			sex_row = aov[aov['Source'] == 'Sex'].iloc[0]
@@ -1043,12 +1044,71 @@ def perform_two_way_anova_weight(df: pd.DataFrame) -> dict:
 			print(f"  Week (within-subjects): F({week_row['DF1']:.0f},{week_row['DF2']:.0f}) = {week_row['F']:.3f}, p = {week_row['p-unc']:.4f} {'***' if week_row['p-unc'] < 0.001 else '**' if week_row['p-unc'] < 0.01 else '*' if week_row['p-unc'] < 0.05 else 'ns'}")
 			print(f"  Sex × Week: F({interaction_row['DF1']:.0f},{interaction_row['DF2']:.0f}) = {interaction_row['F']:.3f}, p = {interaction_row['p-unc']:.4f} {'***' if interaction_row['p-unc'] < 0.001 else '**' if interaction_row['p-unc'] < 0.01 else '*' if interaction_row['p-unc'] < 0.05 else 'ns'}")
 			
-			# Check for sphericity corrections
-			if 'p-GG-corr' in week_row and not pd.isna(week_row['p-GG-corr']):
-				print(f"\n  Note: Greenhouse-Geisser corrected p-value for Week: {week_row['p-GG-corr']:.4f}")
-				sphericity_note = " (GG-corrected)"
-			if 'p-GG-corr' in interaction_row and not pd.isna(interaction_row['p-GG-corr']):
-				print(f"  Note: Greenhouse-Geisser corrected p-value for Sex × Week: {interaction_row['p-GG-corr']:.4f}")
+			# Extract and display sphericity information
+			sphericity_note = ""
+			week_sphericity_info = {}
+			interaction_sphericity_info = {}
+			
+			print(f"\n  Sphericity Tests (Mauchly's):")
+			
+			# Week sphericity - check both possible column name variants
+			w_col = 'W-spher' if 'W-spher' in week_row else 'W-sph'
+			p_col = 'p-spher' if 'p-spher' in week_row else 'p-sph'
+			
+			if w_col in week_row and not pd.isna(week_row[w_col]):
+				w_sph_week = week_row[w_col]
+				p_sph_week = week_row.get(p_col, np.nan)
+				eps_week = week_row.get('eps', np.nan)
+				p_gg_week = week_row.get('p-GG-corr', np.nan)
+				
+				week_sphericity_info = {
+					'W': w_sph_week,
+					'p': p_sph_week,
+					'epsilon': eps_week,
+					'p_GG_corrected': p_gg_week,
+					'violated': p_sph_week < 0.05 if not pd.isna(p_sph_week) else False
+				}
+				
+				print(f"    Week effect: W = {w_sph_week:.4f}, p = {p_sph_week:.4f}")
+				if not pd.isna(eps_week):
+					print(f"    Greenhouse-Geisser ε = {eps_week:.4f}")
+				if p_sph_week < 0.05:
+					print(f"    WARNING: Sphericity assumption VIOLATED (p < .05)")
+					print(f"    Using Greenhouse-Geisser corrected p = {p_gg_week:.4f}")
+					sphericity_note = " (GG-corrected due to sphericity violation)"
+				else:
+					print(f"    Sphericity assumption met (p >= .05)")
+			else:
+				print(f"    Week effect: No sphericity test (only 2 levels or not applicable)")
+			
+			# Interaction sphericity - check both possible column name variants
+			w_col_int = 'W-spher' if 'W-spher' in interaction_row else 'W-sph'
+			p_col_int = 'p-spher' if 'p-spher' in interaction_row else 'p-sph'
+			
+			if w_col_int in interaction_row and not pd.isna(interaction_row[w_col_int]):
+				w_sph_int = interaction_row[w_col_int]
+				p_sph_int = interaction_row.get(p_col_int, np.nan)
+				eps_int = interaction_row.get('eps', np.nan)
+				p_gg_int = interaction_row.get('p-GG-corr', np.nan)
+				
+				interaction_sphericity_info = {
+					'W': w_sph_int,
+					'p': p_sph_int,
+					'epsilon': eps_int,
+					'p_GG_corrected': p_gg_int,
+					'violated': p_sph_int < 0.05 if not pd.isna(p_sph_int) else False
+				}
+				
+				print(f"    Sex × Week interaction: W = {w_sph_int:.4f}, p = {p_sph_int:.4f}")
+				if not pd.isna(eps_int):
+					print(f"    Greenhouse-Geisser ε = {eps_int:.4f}")
+				if p_sph_int < 0.05:
+					print(f"    WARNING: Sphericity assumption VIOLATED (p < .05)")
+					print(f"    Using Greenhouse-Geisser corrected p = {p_gg_int:.4f}")
+				else:
+					print(f"    Sphericity assumption met (p >= .05)")
+			else:
+				print(f"    Sex × Week interaction: No sphericity test (only 2 levels or not applicable)")
 			
 			results[measure_name] = {
 				'measure': measure_name,
@@ -1071,7 +1131,8 @@ def perform_two_way_anova_weight(df: pd.DataFrame) -> dict:
 					'significant': week_row['p-unc'] < 0.05,
 					'effect_size_eta_squared': eta2_week if not pd.isna(eta2_week) else 0.0,
 					'type': 'within-subjects (repeated measures)',
-					'sphericity_correction': sphericity_note
+					'sphericity_correction': sphericity_note,
+					'sphericity': week_sphericity_info
 				},
 				'interaction': {
 					'F': interaction_row['F'],
@@ -1081,7 +1142,8 @@ def perform_two_way_anova_weight(df: pd.DataFrame) -> dict:
 					'p_corrected': interaction_row.get('p-GG-corr', interaction_row['p-unc']),
 					'significant': interaction_row['p-unc'] < 0.05,
 					'effect_size_eta_squared': eta2_interaction if not pd.isna(eta2_interaction) else 0.0,
-					'type': 'interaction'
+					'type': 'interaction',
+					'sphericity': interaction_sphericity_info
 				},
 				'group_stats': group_stats,
 				'total_n': len(measure_df),
@@ -1566,16 +1628,35 @@ def perform_two_way_chi_square_behavioral(df: pd.DataFrame) -> dict:
 			sex_aggregated = sex_complete_df.groupby(['ID', 'Week'], as_index=False)['Response'].first()
 			sex_wide = sex_aggregated.pivot(index='ID', columns='Week', values='Response')
 			
+			# Check for variation before running Cochran's Q
+			# If all subjects have the same response across all Weeks, Cochran's Q is undefined
+			total_variation = sex_wide.var(axis=1).sum()  # Sum of row variances
+			col_variation = sex_wide.var(axis=0).sum()    # Sum of column variances
+			
+			if total_variation == 0 or col_variation == 0:
+				print(f"    WARNING: No variation in responses - all subjects gave same answer")
+				print(f"    Cannot compute Cochran's Q (requires variation across conditions)")
+				print(f"    n = {len(sex_wide)} subjects")
+				interaction_results[sex] = {'Q': np.nan, 'p': np.nan, 'df': np.nan, 'n': len(sex_wide), 
+				                           'note': 'No variation - all same response'}
+				continue
+			
 			try:
 				q_result_sex = cochrans_q(sex_wide)
 				q_stat_sex = q_result_sex.statistic
 				p_sex_q = q_result_sex.pvalue
 				df_sex_q = len(sex_wide.columns) - 1
 				
-				print(f"    Q({df_sex_q}) = {q_stat_sex:.3f}, p = {p_sex_q:.4f} {'***' if p_sex_q < 0.001 else '**' if p_sex_q < 0.01 else '*' if p_sex_q < 0.05 else 'ns'}")
-				print(f"    n = {len(sex_wide)} subjects")
-				
-				interaction_results[sex] = {'Q': q_stat_sex, 'p': p_sex_q, 'df': df_sex_q, 'n': len(sex_wide)}
+				# Check if result is valid (not NaN)
+				if np.isnan(q_stat_sex) or np.isnan(p_sex_q):
+					print(f"    WARNING: Cochran's Q returned invalid result (likely no variation)")
+					print(f"    n = {len(sex_wide)} subjects")
+					interaction_results[sex] = {'Q': np.nan, 'p': np.nan, 'df': df_sex_q, 'n': len(sex_wide),
+					                           'note': 'Invalid result - insufficient variation'}
+				else:
+					print(f"    Q({df_sex_q}) = {q_stat_sex:.3f}, p = {p_sex_q:.4f} {'***' if p_sex_q < 0.001 else '**' if p_sex_q < 0.01 else '*' if p_sex_q < 0.05 else 'ns'}")
+					print(f"    n = {len(sex_wide)} subjects")
+					interaction_results[sex] = {'Q': q_stat_sex, 'p': p_sex_q, 'df': df_sex_q, 'n': len(sex_wide)}
 			except Exception as e:
 				print(f"    ERROR: {e}")
 				interaction_results[sex] = {'Q': np.nan, 'p': np.nan, 'df': np.nan, 'n': len(sex_complete)}
@@ -1751,8 +1832,21 @@ def display_two_way_anova_results(weight_results: dict, behavioral_results: dict
 		week = results['week']
 		lines.append(f"Main Effect of Week (within-subjects, repeated measures):")
 		lines.append(f"  F({week['df_effect']:.0f},{week['df_error']:.0f}) = {week['F']:.3f}, p = {week['p']:.4f} {'***' if week['p'] < 0.001 else '**' if week['p'] < 0.01 else '*' if week['p'] < 0.05 else 'ns'}")
-		if 'p_corrected' in week and week['p_corrected'] != week['p']:
+		
+		# Display sphericity information
+		if 'sphericity' in week and 'W' in week.get('sphericity', {}):
+			sph = week['sphericity']
+			lines.append(f"  Sphericity (Mauchly's test): W = {sph['W']:.4f}, p = {sph['p']:.4f}")
+			if 'epsilon' in sph and not pd.isna(sph['epsilon']):
+				lines.append(f"  Greenhouse-Geisser ε = {sph['epsilon']:.4f}")
+			if sph.get('violated', False):
+				lines.append(f"  WARNING: Sphericity assumption VIOLATED - using GG correction")
+				lines.append(f"  Greenhouse-Geisser corrected p = {week['p_corrected']:.4f}")
+			else:
+				lines.append(f"  Sphericity assumption met")
+		elif 'p_corrected' in week and week['p_corrected'] != week['p']:
 			lines.append(f"  Greenhouse-Geisser corrected p = {week['p_corrected']:.4f}")
+		
 		if 'effect_size_eta_squared' in week and week['effect_size_eta_squared'] > 0:
 			lines.append(f"  Partial η² = {week['effect_size_eta_squared']:.3f}")
 		lines.append(f"  Interpretation: {'SIGNIFICANT' if week['significant'] else 'Not significant'}")
@@ -1764,8 +1858,21 @@ def display_two_way_anova_results(weight_results: dict, behavioral_results: dict
 		interaction = results['interaction']
 		lines.append(f"Sex × Week Interaction:")
 		lines.append(f"  F({interaction['df_effect']:.0f},{interaction['df_error']:.0f}) = {interaction['F']:.3f}, p = {interaction['p']:.4f} {'***' if interaction['p'] < 0.001 else '**' if interaction['p'] < 0.01 else '*' if interaction['p'] < 0.05 else 'ns'}")
-		if 'p_corrected' in interaction and interaction['p_corrected'] != interaction['p']:
+		
+		# Display sphericity information for interaction
+		if 'sphericity' in interaction and 'W' in interaction.get('sphericity', {}):
+			sph = interaction['sphericity']
+			lines.append(f"  Sphericity (Mauchly's test): W = {sph['W']:.4f}, p = {sph['p']:.4f}")
+			if 'epsilon' in sph and not pd.isna(sph['epsilon']):
+				lines.append(f"  Greenhouse-Geisser ε = {sph['epsilon']:.4f}")
+			if sph.get('violated', False):
+				lines.append(f"  WARNING: Sphericity assumption VIOLATED - using GG correction")
+				lines.append(f"  Greenhouse-Geisser corrected p = {interaction['p_corrected']:.4f}")
+			else:
+				lines.append(f"  Sphericity assumption met")
+		elif 'p_corrected' in interaction and interaction['p_corrected'] != interaction['p']:
 			lines.append(f"  Greenhouse-Geisser corrected p = {interaction['p_corrected']:.4f}")
+		
 		if 'effect_size_eta_squared' in interaction and interaction['effect_size_eta_squared'] > 0:
 			lines.append(f"  Partial η² = {interaction['effect_size_eta_squared']:.3f}")
 		lines.append(f"  Interpretation: {'SIGNIFICANT' if interaction['significant'] else 'Not significant'}")
