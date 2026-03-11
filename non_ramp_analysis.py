@@ -25,6 +25,7 @@ except ImportError:
 # Try to import statsmodels for Cochran's Q test (repeated measures for binary data)
 try:
 	from statsmodels.stats.contingency_tables import cochrans_q
+	import statsmodels.formula.api as smf
 	HAS_STATSMODELS = True
 except ImportError:
 	HAS_STATSMODELS = False
@@ -1317,8 +1318,9 @@ def perform_two_way_chi_square_behavioral(df: pd.DataFrame) -> dict:
 		print(f"\n[1] Sex Effect (between-subjects): Chi-Square Test")
 		print("-" * 50)
 		
-		# Initialize sex_table as empty DataFrame
+		# Initialize variables early so they exist in all code paths
 		sex_table = pd.DataFrame()
+		glmm_result = None
 		
 		# Check if we have data and variation
 		if len(measure_df) == 0:
@@ -1358,6 +1360,15 @@ def perform_two_way_chi_square_behavioral(df: pd.DataFrame) -> dict:
 			print("Contingency table (Sex × Response):")
 			print(sex_table)
 			
+			# Calculate proportions for each sex
+			sex_proportions = sex_table.div(sex_table.sum(axis=1), axis=0)
+			print("\nProportions by Sex:")
+			for sex in sex_table.index:
+				n_yes = sex_table.loc[sex, 1] if 1 in sex_table.columns else 0
+				n_total = sex_table.loc[sex].sum()
+				pct = 100 * n_yes / n_total if n_total > 0 else 0
+				print(f"  {sex}: {n_yes}/{n_total} Yes ({pct:.1f}%)")
+			
 			if sex_table.size == 0:
 				print("ERROR: Empty contingency table")
 				sex_result = {
@@ -1367,15 +1378,117 @@ def perform_two_way_chi_square_behavioral(df: pd.DataFrame) -> dict:
 					'significant': False,
 					'error': 'Empty contingency table'
 				}
+				glmm_result = None
 			else:
 				chi2_sex, p_sex, dof_sex, expected_sex = stats.chi2_contingency(sex_table)
 				print(f"\nChi-square test: χ²({dof_sex}) = {chi2_sex:.3f}, p = {p_sex:.4f} {'***' if p_sex < 0.001 else '**' if p_sex < 0.01 else '*' if p_sex < 0.05 else 'ns'}")
+				print(f"Interpretation: {'SIGNIFICANT' if p_sex < 0.05 else 'Not significant'}")
+				print(f"Note: Between-subjects factor")
 				sex_result = {
 					'chi2': chi2_sex,
 					'p': p_sex,
 					'dof': dof_sex,
 					'significant': p_sex < 0.05
 				}
+				
+				# === MIXED-EFFECTS LOGISTIC REGRESSION ===
+				# More appropriate for unbalanced designs and repeated measures
+				print(f"\n[1b] Mixed-Effects Logistic Regression (accounts for repeated measures)")
+				print("-" * 50)
+				
+				glmm_result = None
+				if HAS_STATSMODELS:
+					try:
+						print("Attempting to load GEE modules...")
+						import statsmodels.api as sm
+						from statsmodels.genmod.generalized_estimating_equations import GEE
+						from statsmodels.genmod.families import Binomial
+						from statsmodels.genmod.cov_struct import Exchangeable
+						print("✓ GEE modules loaded successfully")
+						
+						# Prepare data for GLMM
+						glmm_df = measure_df[['ID', 'Sex', 'Week', 'Response']].copy()
+						print(f"Data shape: {glmm_df.shape}, Sexes: {glmm_df['Sex'].value_counts().to_dict()}")
+						
+						# Convert Sex to numeric (0/1) for easier interpretation
+						# Use female as reference (0)
+						glmm_df['Sex_numeric'] = (glmm_df['Sex'] == 'M').astype(int)
+						
+						print("Fitting GEE model for binary repeated measures...")
+						
+						# Sort by ID to ensure proper clustering
+						glmm_df = glmm_df.sort_values('ID')
+						
+						# Define the model
+						fam = Binomial()
+						ind = pd.Categorical(glmm_df['ID']).codes
+						gee_model = GEE.from_formula("Response ~ Sex_numeric", 
+						                            groups=glmm_df['ID'],
+						                            data=glmm_df, 
+						                            family=fam,
+						                            cov_struct=Exchangeable())
+						gee_result = gee_model.fit()
+						
+						# Extract results
+						sex_coef = gee_result.params['Sex_numeric']
+						sex_se = gee_result.bse['Sex_numeric']
+						sex_z = gee_result.tvalues['Sex_numeric']
+						sex_p_gee = gee_result.pvalues['Sex_numeric']
+						
+						# Calculate odds ratio
+						odds_ratio = np.exp(sex_coef)
+						or_ci_lower = np.exp(sex_coef - 1.96 * sex_se)
+						or_ci_upper = np.exp(sex_coef + 1.96 * sex_se)
+						
+						print(f"\nGEE Results (accounts for repeated measures and unbalanced design):")
+						print(f"  Coefficient (Male vs Female): {sex_coef:.3f} (SE = {sex_se:.3f})")
+						print(f"  Z-score: {sex_z:.3f}")
+						print(f"  P-value: {sex_p_gee:.4f} {'***' if sex_p_gee < 0.001 else '**' if sex_p_gee < 0.01 else '*' if sex_p_gee < 0.05 else 'ns'}")
+						print(f"  Odds Ratio (Male/Female): {odds_ratio:.3f} (95% CI: {or_ci_lower:.3f}-{or_ci_upper:.3f})")
+						print(f"  Interpretation: {'SIGNIFICANT' if sex_p_gee < 0.05 else 'Not significant'} sex effect")
+						
+						if odds_ratio > 1:
+							print(f"    Males have {odds_ratio:.2f}x the odds of 'Yes' compared to females")
+						else:
+							print(f"    Females have {1/odds_ratio:.2f}x the odds of 'Yes' compared to males")
+						
+						print(f"\n  NOTE: GEE properly accounts for:")
+						print(f"    • Repeated measurements within each animal")
+						print(f"    • Unbalanced sex groups (2 males, 4 females)")
+						print(f"    • Binary outcome (Yes/No)")
+						print(f"  This is more reliable than chi-square for your design.")
+						
+						glmm_result = {
+							'model': 'GEE',
+							'coefficient': sex_coef,
+							'se': sex_se,
+							'z': sex_z,
+							'p': sex_p_gee,
+							'odds_ratio': odds_ratio,
+							'or_ci_lower': or_ci_lower,
+							'or_ci_upper': or_ci_upper,
+							'significant': sex_p_gee < 0.05
+						}
+						
+					except Exception as e:
+						print(f"\n✗ GEE MODEL FAILED")
+						print(f"Error type: {type(e).__name__}")
+						print(f"Error message: {e}")
+						import traceback
+						print("\nFull traceback:")
+						traceback.print_exc()
+						glmm_result = {
+							'model': 'GEE',
+							'error': f'{type(e).__name__}: {str(e)}',
+							'note': 'Model fitting failed'
+						}
+				else:
+					print("✗ Statsmodels not available - install with: pip install statsmodels")
+					glmm_result = {
+						'model': 'GEE',
+						'error': 'statsmodels not installed',
+						'note': 'Install statsmodels for GEE analysis'
+					}
 		
 		# === 2. WEEK EFFECT (Within-Subjects): Cochran's Q Test ===
 		print(f"\n[2] Week Effect (within-subjects, repeated measures): Cochran's Q Test")
@@ -1483,6 +1596,11 @@ def perform_two_way_chi_square_behavioral(df: pd.DataFrame) -> dict:
 				'table': sex_table if not sex_table.empty else pd.DataFrame(),
 				'note': 'Between-subjects factor',
 				'error': sex_result.get('error', None)
+			},
+			'sex_gee': glmm_result if glmm_result is not None else {
+				'model': 'GEE',
+				'note': 'Not computed - sex comparison skipped',
+				'error': 'Only one sex or no variation in responses'
 			},
 			'week': {
 				'test': "Cochran's Q",
@@ -1701,6 +1819,26 @@ def display_two_way_anova_results(weight_results: dict, behavioral_results: dict
 		if 'test' in sex and 'INVALID' in sex['test']:
 			lines.append(f"  WARNING: {sex['test']}")
 		lines.append("")
+		
+		# GEE/Mixed-effects results (more appropriate for unbalanced designs)
+		if 'sex_gee' in results:
+			gee = results['sex_gee']
+			lines.append(f"Sex Effect - GEE Model (accounts for repeated measures & unbalanced design):")
+			if 'p' in gee and not np.isnan(gee.get('p', np.nan)):
+				lines.append(f"  Coefficient: {gee['coefficient']:.3f} (SE = {gee['se']:.3f})")
+				lines.append(f"  Z = {gee['z']:.3f}, p = {gee['p']:.4f} {'***' if gee['p'] < 0.001 else '**' if gee['p'] < 0.01 else '*' if gee['p'] < 0.05 else 'ns'}")
+				lines.append(f"  Odds Ratio (Male/Female): {gee['odds_ratio']:.3f} (95% CI: {gee['or_ci_lower']:.3f}-{gee['or_ci_upper']:.3f})")
+				lines.append(f"  Interpretation: {'SIGNIFICANT' if gee['significant'] else 'Not significant'}")
+				lines.append(f"  Note: More reliable than chi-square for unbalanced repeated measures")
+			else:
+				# Show detailed error information
+				if 'error' in gee:
+					lines.append(f"  ERROR: {gee['error']}")
+				else:
+					lines.append(f"  Could not be computed")
+				if 'note' in gee:
+					lines.append(f"  Note: {gee['note']}")
+			lines.append("")
 		
 		# Week effect (within-subjects - Cochran's Q)
 		week = results['week']
