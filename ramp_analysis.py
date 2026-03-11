@@ -12,6 +12,7 @@ from matplotlib.patches import Patch
 import matplotlib.transforms as mtransforms
 from scipy import stats
 from scipy.stats import f_oneway
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
 
 # Try to import pingouin for mixed ANOVA (repeated measures)
 try:
@@ -24,7 +25,7 @@ except ImportError:
 
 # Try to import statsmodels for Cochran's Q test (repeated measures for binary data)
 try:
-	from statsmodels.stats.contingency_tables import cochrans_q
+	from statsmodels.stats.contingency_tables import cochrans_q, mcnemar
 	import statsmodels.formula.api as smf
 	HAS_STATSMODELS = True
 except ImportError:
@@ -292,8 +293,8 @@ def _sex_to_style(sex: Optional[str]) -> tuple[str, str]:
 
 def _add_day_number_column(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add a per-ID 'Day' column where the first date for each ID is day 1,
-    and subsequent rows are 1 + calendar days since the first date.
+    Add a per-ID 'Day' column where the first date for each ID is day 0,
+    and subsequent rows are 0 + calendar days since the first date.
     Requires 'ID' and 'Date' columns with Date as datetime.
     """
     if not {"ID", "Date"}.issubset(df.columns):
@@ -303,7 +304,7 @@ def _add_day_number_column(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values(["ID", "Date"]).reset_index(drop=True)
     # Compute day number per ID
     first_dates = df.groupby("ID")["Date"].transform("min")
-    df["Day"] = (df["Date"] - first_dates).dt.days + 1
+    df["Day"] = (df["Date"] - first_dates).dt.days
     return df
 
 
@@ -378,7 +379,7 @@ def _add_ca_block_boundaries(
 	"""
 	Draw vertical dashed lines at the last day index of each contiguous CA% block,
 	EXCEPT for the very last block (no line at the end of the final percentage segment).
-	Expects the x-axis to use integer day numbers (1, 2, ...).
+	Expects the x-axis to use integer day numbers (0, 1, 2, ...).
 	"""
 	if ca_by_day is None or ca_by_day.empty:
 		return
@@ -436,7 +437,7 @@ def build_daily_change_series_by_id(df: pd.DataFrame, *, index: str = "date") ->
 	- Drops rows where Daily Change is NaN.
 	- If duplicate index values exist per ID (same Date or same Day), keep the last one.
 	- For index='date': index is a DateTimeIndex sorted ascending.
-	- For index='day': index is integer day numbers starting from 1 per ID.
+	- For index='day': index is integer day numbers starting from 0 per ID.
 
 	Returns:
 		dict[str, pd.Series]
@@ -481,6 +482,7 @@ def build_total_change_series_by_id(df: pd.DataFrame, *, index: str = "date") ->
 	For each ID, return a pandas Series of 'Total Change' indexed by either Date or Day.
 
 	Assumptions and behavior mirror build_daily_change_series_by_id.
+	- For index='day': index is integer day numbers starting from 0 per ID.
 	"""
 	required = {"ID", "Date", "Total Change"}
 	missing = required - set(df.columns)
@@ -745,8 +747,8 @@ def plot_average_weight_change_by_ca(
 	ax1.spines['top'].set_visible(False)
 	ax1.spines['right'].set_visible(False)
 	
-	# Set x-axis to start at 0 and end at the last CA% position
-	ax1.set_xlim(-0.5, len(ca_labels) - 0.5)
+	# Set x-axis to span exactly the width of the bars (no padding)
+	ax1.set_xlim(-bar_width/2, len(ca_labels) - 1 + bar_width/2)
 	
 	# Calculate y-axis range including error bars
 	daily_with_err_top = np.array(daily_means) + np.array(daily_sems)
@@ -782,8 +784,8 @@ def plot_average_weight_change_by_ca(
 	ax2.spines['top'].set_visible(False)
 	ax2.spines['right'].set_visible(False)
 	
-	# Set x-axis to start at 0 and end at the last CA% position
-	ax2.set_xlim(-0.5, len(ca_labels) - 0.5)
+	# Set x-axis to span exactly the width of the bars (no padding)
+	ax2.set_xlim(-bar_width/2, len(ca_labels) - 1 + bar_width/2)
 	
 	# Calculate y-axis range including error bars
 	total_with_err_top = np.array(total_means) + np.array(total_sems)
@@ -1792,6 +1794,471 @@ def perform_two_way_anova_weight(df: pd.DataFrame) -> dict:
 	
 	print("\n" + "="*80)
 	return results
+
+
+def perform_tukey_hsd_weight(weight_results: dict, df: pd.DataFrame) -> dict:
+	"""
+	Perform Tukey HSD post-hoc tests for significant main effects in the mixed ANOVA.
+	
+	For CA% main effect: Pairwise comparisons across all CA% levels (collapsed across Sex)
+	For Sex main effect: Not applicable (only 2 levels - F-test is sufficient)
+	For Interaction: Simple effects of CA% within each Sex level
+	
+	Parameters:
+		weight_results: Dictionary from perform_two_way_anova_weight
+		df: Master DataFrame with columns ID, Sex, CA (%), Daily Change, Total Change
+		
+	Returns:
+		Dictionary containing Tukey HSD results for each measure
+	"""
+	tukey_results = {}
+	
+	# Clean and prepare data
+	cdf = clean_master_dataframe(df)
+	cdf = _add_day_number_column(cdf)
+	
+	# Filter to exclude Day < 0 (baseline measurements)
+	cdf = cdf[cdf["Day"] >= 0]
+	
+	# Keep only rows with complete data
+	required_cols = ["ID", "Sex", "CA (%)", "Daily Change", "Total Change"]
+	cdf = cdf.dropna(subset=required_cols)
+	
+	# Convert CA% to integer for cleaner grouping
+	cdf["CA (%)"] = cdf["CA (%)"].astype(int)
+	
+	measures = {
+		'Daily Change': 'Daily Change',
+		'Total Change': 'Total Change'
+	}
+	
+	for measure_name, column in measures.items():
+		if measure_name not in weight_results:
+			continue
+		
+		results = weight_results[measure_name]
+		
+		# Check if CA% main effect is significant
+		ca_significant = results.get('ca_percent', {}).get('significant', False)
+		interaction_significant = results.get('interaction', {}).get('significant', False)
+		
+		if not ca_significant and not interaction_significant:
+			# Skip if no significant effects involving CA%
+			continue
+		
+		tukey_results[measure_name] = {
+			'measure_name': measure_name,
+			'ca_pairwise': None,
+			'simple_effects': None
+		}
+		
+		try:
+			# CA% main effect pairwise comparisons (collapsed across Sex)
+			if ca_significant:
+				print(f"\nPerforming Tukey HSD for CA% main effect ({measure_name})...")
+				
+				# Prepare data: all observations with CA% grouping
+				ca_data = cdf[['CA (%)', column]].copy()
+				ca_data = ca_data.dropna()
+				
+				# Perform Tukey HSD
+				tukey_ca = pairwise_tukeyhsd(
+					endog=ca_data[column],
+					groups=ca_data['CA (%)'],
+					alpha=0.05
+				)
+				
+				# Parse results
+				comparisons = []
+				summary_data = tukey_ca.summary().data[1:]  # Skip header row
+				
+				for row in summary_data:
+					group1, group2, meandiff, p_adj, lower_ci, upper_ci, reject = row
+					
+					comparisons.append({
+						'group1': f"{int(group1)}%",
+						'group2': f"{int(group2)}%",
+						'meandiff': float(meandiff),
+						'p_adj': float(p_adj),
+						'lower_ci': float(lower_ci),
+						'upper_ci': float(upper_ci),
+						'significant': bool(reject)
+					})
+				
+				tukey_results[measure_name]['ca_pairwise'] = {
+					'comparisons': comparisons,
+					'tukey_object': tukey_ca
+				}
+				
+			if interaction_significant:
+				print(f"\nPerforming simple effects analysis for Sex × CA% interaction ({measure_name})...")
+				
+				# Simple effects: CA% pairwise comparisons within each Sex
+				simple_effects = {}
+				
+				for sex in sorted(cdf['Sex'].unique()):
+					sex_data = cdf[cdf['Sex'] == sex][['CA (%)', column]].copy()
+					sex_data = sex_data.dropna()
+					
+					if len(sex_data) < 2:
+						continue
+					
+					# Perform Tukey HSD for this sex
+					tukey_sex = pairwise_tukeyhsd(
+						endog=sex_data[column],
+						groups=sex_data['CA (%)'],
+						alpha=0.05
+					)
+					
+					# Parse results
+					comparisons = []
+					summary_data = tukey_sex.summary().data[1:]  # Skip header row
+					
+					for row in summary_data:
+						group1, group2, meandiff, p_adj, lower_ci, upper_ci, reject = row
+						
+						comparisons.append({
+							'group1': f"{int(group1)}%",
+							'group2': f"{int(group2)}%",
+							'meandiff': float(meandiff),
+							'p_adj': float(p_adj),
+							'lower_ci': float(lower_ci),
+							'upper_ci': float(upper_ci),
+							'significant': bool(reject)
+						})
+					
+					simple_effects[sex] = {
+						'comparisons': comparisons,
+						'tukey_object': tukey_sex
+					}
+				
+				tukey_results[measure_name]['simple_effects'] = simple_effects
+				
+		except Exception as e:
+			tukey_results[measure_name] = {
+				'measure_name': measure_name,
+				'error': f"Error performing Tukey HSD: {str(e)}"
+			}
+	
+	return tukey_results
+
+
+def display_tukey_hsd_results(tukey_results: dict) -> str:
+	"""
+	Display Tukey HSD post-hoc test results in a formatted table.
+	
+	Parameters:
+		tukey_results: Dictionary from perform_tukey_hsd_weight
+		
+	Returns:
+		Formatted string with Tukey HSD results
+	"""
+	if not tukey_results:
+		return "\n" + "="*80 + "\nNo significant CA% or interaction effects found - Tukey HSD not needed.\n" + "="*80 + "\n"
+	
+	lines = []
+	lines.append("\n" + "="*80)
+	lines.append("TUKEY HSD POST-HOC TEST RESULTS")
+	lines.append("="*80)
+	lines.append("")
+	lines.append("Pairwise comparisons for significant main effects and interactions.")
+	lines.append("Alpha = 0.05 (family-wise error rate controlled)")
+	lines.append("")
+	
+	for measure, results in tukey_results.items():
+		if 'error' in results:
+			lines.append(f"{results['measure_name']}: {results['error']}")
+			lines.append("")
+			continue
+		
+		lines.append(f"MEASURE: {results['measure_name'].upper()}")
+		lines.append("-"*80)
+		lines.append("")
+		
+		# CA% main effect pairwise comparisons
+		if results.get('ca_pairwise'):
+			lines.append("CA% Main Effect - Pairwise Comparisons (collapsed across Sex):")
+			lines.append("-"*60)
+			
+			header = f"{'Comparison':<15} {'Mean Diff':<12} {'Adj p-value':<12} {'95% CI Lower':<12} {'95% CI Upper':<12} {'Significant':<12}"
+			lines.append(header)
+			lines.append("-"*80)
+			
+			# Sort comparisons by p-value
+			sorted_comps = sorted(results['ca_pairwise']['comparisons'], key=lambda x: x['p_adj'])
+			
+			for comp in sorted_comps:
+				comparison_name = f"{comp['group1']} vs {comp['group2']}"
+				significance = "Yes" if comp['significant'] else "No"
+				
+				row = (f"{comparison_name:<15} "
+					   f"{comp['meandiff']:<12.3f} "
+					   f"{comp['p_adj']:<12.6f} "
+					   f"{comp['lower_ci']:<12.3f} "
+					   f"{comp['upper_ci']:<12.3f} "
+					   f"{significance:<12}")
+				lines.append(row)
+			
+			lines.append("")
+			
+			# Summary of significant comparisons
+			sig_comps = [c for c in results['ca_pairwise']['comparisons'] if c['significant']]
+			if sig_comps:
+				lines.append(f"Found {len(sig_comps)} significant pairwise difference(s):")
+				for comp in sig_comps:
+					lines.append(f"  {comp['group1']} vs {comp['group2']}: p = {comp['p_adj']:.4f}")
+			else:
+				lines.append("No significant pairwise differences found.")
+			
+			lines.append("")
+		
+		# Simple effects for interaction
+		if results.get('simple_effects'):
+			lines.append("Sex × CA% Interaction - Simple Effects (CA% comparisons within each Sex):")
+			lines.append("-"*60)
+			lines.append("")
+			
+			for sex, sex_results in sorted(results['simple_effects'].items()):
+				lines.append(f"  Sex = {sex}:")
+				
+				header = f"  {'Comparison':<15} {'Mean Diff':<12} {'Adj p-value':<12} {'Significant':<12}"
+				lines.append(header)
+				lines.append("  " + "-"*60)
+				
+				sorted_comps = sorted(sex_results['comparisons'], key=lambda x: x['p_adj'])
+				
+				for comp in sorted_comps:
+					comparison_name = f"{comp['group1']} vs {comp['group2']}"
+					significance = "Yes" if comp['significant'] else "No"
+					
+					row = (f"  {comparison_name:<15} "
+						   f"{comp['meandiff']:<12.3f} "
+						   f"{comp['p_adj']:<12.6f} "
+						   f"{significance:<12}")
+					lines.append(row)
+				
+				# Summary for this sex
+				sig_comps = [c for c in sex_results['comparisons'] if c['significant']]
+				if sig_comps:
+					lines.append(f"  Found {len(sig_comps)} significant difference(s) for {sex}")
+				else:
+					lines.append(f"  No significant differences for {sex}")
+				
+				lines.append("")
+		
+		lines.append("")
+	
+	lines.append("="*80)
+	lines.append("")
+	
+	# Join lines and print
+	formatted_output = "\n".join(lines)
+	print(formatted_output)
+	
+	return formatted_output
+
+
+def perform_mcnemar_posthoc_behavioral(behavioral_results: dict, df: pd.DataFrame) -> dict:
+	"""
+	Perform pairwise McNemar tests with Bonferroni correction for behavioral measures.
+	
+	For measures with significant CA% effects (Cochran's Q), performs all pairwise
+	McNemar tests to identify which specific CA% levels differ from each other.
+	
+	McNemar's test is appropriate for paired categorical data (same subjects measured
+	at different CA% levels).
+	
+	Parameters:
+		behavioral_results: Dictionary from perform_two_way_chi_square_behavioral
+		df: Master DataFrame with columns ID, CA (%), and behavioral measures
+		
+	Returns:
+		Dictionary containing McNemar test results for each measure with significant CA% effect
+	"""
+	if not HAS_STATSMODELS:
+		print("\nWARNING: statsmodels not installed. Cannot perform McNemar tests.")
+		return {}
+	
+	# Clean and prepare data
+	cdf = clean_master_dataframe(df)
+	
+	# Ensure CA (%) is numeric
+	if "CA (%)" not in cdf.columns:
+		print("\nWARNING: 'CA (%)' column not found. Cannot perform McNemar tests.")
+		return {}
+	
+	measure_mapping = {
+		'Nest Made': 'Nest Made?',
+		'Lethargy': 'Lethargy?',
+		'CA Spot Digging': 'CA Spot Digging?',
+		'Anxious Behaviors': 'Anxious Behaviors?'
+	}
+	
+	mcnemar_results = {}
+	
+	for measure_name, column in measure_mapping.items():
+		if measure_name not in behavioral_results:
+			continue
+		
+		results = behavioral_results[measure_name]
+		
+		# Check if CA% effect is significant
+		ca_significant = results.get('ca_percent', {}).get('significant', False)
+		
+		if not ca_significant:
+			# Skip if no significant CA% effect
+			continue
+		
+		if column not in cdf.columns:
+			continue
+		
+		# Prepare data for this measure
+		measure_df = cdf[["ID", "CA (%)", column]].copy()
+		measure_df = measure_df.dropna(subset=["ID", "CA (%)", column])
+		
+		# Convert to binary (1 = Yes, 0 = No)
+		measure_df["Response"] = measure_df[column].apply(
+			lambda x: 1 if (x is True or str(x).strip().upper() in ["YES", "TRUE", "1"]) else 0
+		)
+		
+		# Get list of CA% levels
+		ca_levels = sorted(measure_df["CA (%)"].unique())
+		
+		if len(ca_levels) < 2:
+			continue
+		
+		# Perform all pairwise McNemar tests
+		pairwise_comparisons = []
+		
+		from itertools import combinations
+		for ca1, ca2 in combinations(ca_levels, 2):
+			# Get data for subjects who have BOTH CA% levels
+			df_ca1 = measure_df[measure_df["CA (%)"] == ca1][["ID", "Response"]].rename(columns={"Response": "CA1"})
+			df_ca2 = measure_df[measure_df["CA (%)"] == ca2][["ID", "Response"]].rename(columns={"Response": "CA2"})
+			
+			# Merge to get paired data (only subjects with both measurements)
+			paired_df = pd.merge(df_ca1, df_ca2, on="ID")
+			
+			if len(paired_df) < 5:  # Need sufficient paired observations
+				continue
+			
+			# Create 2x2 contingency table for McNemar test
+			# Rows = CA1, Columns = CA2
+			table = pd.crosstab(paired_df["CA1"], paired_df["CA2"])
+			
+			# McNemar test requires a 2x2 table
+			if table.shape != (2, 2):
+				# Add missing rows/columns with zeros
+				for val in [0, 1]:
+					if val not in table.index:
+						table.loc[val] = 0
+					if val not in table.columns:
+						table[val] = 0
+				table = table.sort_index().sort_index(axis=1)
+			
+			# Perform McNemar test
+			try:
+				result = mcnemar(table, exact=False, correction=True)
+				
+				# Calculate proportions for each CA% level
+				prop_ca1 = paired_df["CA1"].mean()
+				prop_ca2 = paired_df["CA2"].mean()
+				
+				pairwise_comparisons.append({
+					'ca1': ca1,
+					'ca2': ca2,
+					'n_paired': len(paired_df),
+					'prop_ca1': prop_ca1,
+					'prop_ca2': prop_ca2,
+					'statistic': result.statistic,
+					'p_value': result.pvalue,
+					'table': table
+				})
+			except Exception as e:
+				print(f"  Warning: McNemar test failed for {ca1}% vs {ca2}%: {e}")
+				continue
+		
+		if not pairwise_comparisons:
+			continue
+		
+		# Apply Bonferroni correction
+		n_comparisons = len(pairwise_comparisons)
+		alpha = 0.05
+		bonferroni_alpha = alpha / n_comparisons
+		
+		for comp in pairwise_comparisons:
+			comp['p_adjusted'] = min(comp['p_value'] * n_comparisons, 1.0)
+			comp['significant'] = comp['p_adjusted'] < alpha
+		
+		mcnemar_results[measure_name] = {
+			'comparisons': pairwise_comparisons,
+			'n_comparisons': n_comparisons,
+			'bonferroni_alpha': bonferroni_alpha
+		}
+	
+	return mcnemar_results
+
+
+def display_mcnemar_results(mcnemar_results: dict) -> str:
+	"""
+	Display pairwise McNemar test results in a formatted table.
+	
+	Parameters:
+		mcnemar_results: Dictionary from perform_mcnemar_posthoc_behavioral
+		
+	Returns:
+		Formatted string containing McNemar test results
+	"""
+	if not mcnemar_results:
+		return "\nNo pairwise McNemar tests performed (no significant CA% effects found).\n"
+	
+	formatted_output = "\n" + "="*80 + "\n"
+	formatted_output += "PAIRWISE McNEMAR TESTS (POST-HOC FOR SIGNIFICANT CA% EFFECTS)\n"
+	formatted_output += "="*80 + "\n"
+	formatted_output += "\nMcNemar's test for paired categorical data (same subjects, different CA% levels)\n"
+	formatted_output += "Bonferroni correction applied for multiple comparisons\n"
+	
+	for measure_name, results in mcnemar_results.items():
+		formatted_output += f"\n{'='*60}\n"
+		formatted_output += f"{measure_name}\n"
+		formatted_output += f"{'='*60}\n"
+		
+		comparisons = results['comparisons']
+		n_comparisons = results['n_comparisons']
+		bonferroni_alpha = results['bonferroni_alpha']
+		
+		formatted_output += f"Number of pairwise comparisons: {n_comparisons}\n"
+		formatted_output += f"Bonferroni-corrected alpha: {bonferroni_alpha:.4f}\n\n"
+		
+		# Create table header
+		formatted_output += f"{'CA% 1':<8} {'CA% 2':<8} {'N Paired':<10} {'Prop 1':<10} {'Prop 2':<10} {'Chi²':<10} {'p-value':<12} {'p-adj':<12} {'Sig?':<6}\n"
+		formatted_output += "-"*90 + "\n"
+		
+		# Sort comparisons by ca1, then ca2
+		comparisons_sorted = sorted(comparisons, key=lambda x: (x['ca1'], x['ca2']))
+		
+		for comp in comparisons_sorted:
+			sig_marker = "***" if comp['significant'] else ""
+			formatted_output += f"{comp['ca1']:<8.1f} {comp['ca2']:<8.1f} {comp['n_paired']:<10} "
+			formatted_output += f"{comp['prop_ca1']:<10.3f} {comp['prop_ca2']:<10.3f} "
+			formatted_output += f"{comp['statistic']:<10.3f} {comp['p_value']:<12.4f} "
+			formatted_output += f"{comp['p_adjusted']:<12.4f} {sig_marker:<6}\n"
+		
+		# Summary of significant comparisons
+		significant = [c for c in comparisons if c['significant']]
+		if significant:
+			formatted_output += f"\nSignificant pairwise differences (p-adj < 0.05): {len(significant)}\n"
+			for comp in significant:
+				direction = "increased" if comp['prop_ca2'] > comp['prop_ca1'] else "decreased"
+				formatted_output += f"  {comp['ca1']:.1f}% → {comp['ca2']:.1f}%: {direction} "
+				formatted_output += f"({comp['prop_ca1']:.1%} → {comp['prop_ca2']:.1%}, p-adj = {comp['p_adjusted']:.4f})\n"
+		else:
+			formatted_output += "\nNo significant pairwise differences after Bonferroni correction.\n"
+	
+	formatted_output += "\n" + "="*80 + "\n"
+	
+	print(formatted_output)
+	return formatted_output
 
 
 def _perform_standard_anova_fallback(df: pd.DataFrame) -> dict:
@@ -2831,12 +3298,22 @@ def main() -> None:
 		print("\nAnalyzing weight change measures...")
 		weight_results = perform_two_way_anova_weight(cdf)
 		
+		# Perform Tukey HSD post-hoc tests for significant effects
+		print("\nPerforming Tukey HSD post-hoc tests for significant CA% effects...")
+		tukey_results = perform_tukey_hsd_weight(weight_results, cdf)
+		
 		# Perform chi-square tests for behavioral measures
 		print("\nAnalyzing categorical behavioral measures...")
 		behavioral_results = perform_two_way_chi_square_behavioral(cdf)
 		
+		# Perform McNemar post-hoc tests for significant CA% effects in behavioral measures
+		print("\nPerforming McNemar post-hoc tests for significant CA% effects...")
+		mcnemar_results = perform_mcnemar_posthoc_behavioral(behavioral_results, cdf)
+		
 		# Display comprehensive results
 		results_output = display_two_way_anova_results(weight_results, behavioral_results)
+		tukey_output = display_tukey_hsd_results(tukey_results)
+		mcnemar_output = display_mcnemar_results(mcnemar_results)
 		
 		# Automatically save comprehensive statistical report
 		try:
@@ -2856,6 +3333,14 @@ def main() -> None:
 				
 				# Write the formatted display output (contains all ANOVA results)
 				f.write(results_output)
+				
+				# Write Tukey HSD post-hoc test results
+				f.write("\n\n")
+				f.write(tukey_output)
+				
+				# Write McNemar post-hoc test results
+				f.write("\n\n")
+				f.write(mcnemar_output)
 				
 				# Add summary of significant effects
 				f.write("\n\n" + "="*80 + "\n")
@@ -3207,7 +3692,7 @@ def plot_daily_change_by_id(
 		right_pad_steps=1,
 	)
 
-	# Now that axes are finalized, draw CA background and labels (clips at day 1 correctly)
+	# Now that axes are finalized, draw CA background and labels (clips at day 0 correctly)
 	if use_day_number:
 		# Draw dashed boundaries at the end of each CA% block (no shading)
 		_add_ca_block_boundaries(ax, ca_by_day)

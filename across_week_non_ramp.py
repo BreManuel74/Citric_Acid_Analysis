@@ -416,7 +416,8 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
             'total_animals': len(lick_counts),
             'sum_total_licks': result['total_licks'],
             'sum_total_bouts': result['total_bouts'],
-            'animal_ids': result.get('animal_ids', [])  # NEW: preserve animal IDs for repeated measures
+            'animal_ids': result.get('animal_ids', []),  # Preserve animal IDs for repeated measures
+            'animal_sexes': result.get('animal_sexes', [])  # NEW: preserve sex for mixed ANOVA
         }
     
     return averages
@@ -424,47 +425,60 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
 
 def perform_anova_analysis(weekly_averages: Dict) -> Dict:
     """
-    Perform one-way REPEATED MEASURES ANOVA tests for each of the 5 measures across weeks.
+    Perform MIXED ANOVA tests for each of the 5 measures:
+    - Between-subjects factor: Sex (each animal has one sex)
+    - Within-subjects factor: Week (repeated measures across weeks)
     
-    Uses pingouin.rm_anova() to properly account for repeated measurements from the same
-    animals across different weeks. Falls back to standard ANOVA with warning if pingouin
-    is not available.
+    Uses pingouin.mixed_anova() to properly account for both factors and repeated measurements.
+    Falls back to standard ANOVA with warning if pingouin is not available.
     
     Parameters:
         weekly_averages: Dictionary from compute_weekly_averages
         
     Returns:
-        Dictionary containing ANOVA results for each measure
+        Dictionary containing Mixed ANOVA results for each measure
     """
-    # Check if pingouin is available for repeated measures ANOVA
+    # Check if pingouin is available for mixed ANOVA
     if not HAS_PINGOUIN:
         print("\n" + "="*80)
-        print("WARNING: Repeated measures ANOVA requires pingouin library")
-        print("Falling back to standard ANOVA (does NOT account for repeated measures)")
+        print("WARNING: Mixed ANOVA requires pingouin library")
+        print("Falling back to standard ANOVA (does NOT account for repeated measures or sex)")
         print("Install pingouin with: pip install pingouin")
         print("="*80 + "\n")
         return _perform_standard_anova_fallback(weekly_averages)
     
-    # Build long-format dataframe for repeated measures ANOVA
+    # Build long-format dataframe for mixed ANOVA
     # Each row: one animal at one week with one measurement
+    # Need to track Sex for each animal (constant across weeks)
     long_data = []
+    animal_sex_map = {}  # Map animal ID to sex (should be constant across weeks)
     
     sorted_weeks = sort_dates_chronologically(list(weekly_averages.keys()))
     
     for week_idx, date in enumerate(sorted_weeks):
         data = weekly_averages[date]
         animal_ids = data.get('animal_ids', [])
+        animal_sexes = data.get('animal_sexes', [])
         
         # If no animal IDs, create generic ones based on position
         if not animal_ids:
             animal_ids = [f"Animal_{i+1}" for i in range(len(data['avg_licks_per_animal']))]
         
+        # If no sex data, use Unknown
+        if not animal_sexes or len(animal_sexes) != len(animal_ids):
+            animal_sexes = ["Unknown"] * len(animal_ids)
+        
         for i, animal_id in enumerate(animal_ids):
+            # Track sex for each animal (should be consistent across weeks)
+            if animal_id not in animal_sex_map:
+                animal_sex_map[animal_id] = animal_sexes[i]
+            
             # Skip bottle weight outlier for 11/12/25 if weight is 0 (placeholder)
             bottle_weight = data['avg_bottle_weight_per_animal'][i]
             
             long_data.append({
                 'Animal': animal_id,
+                'Sex': animal_sex_map[animal_id],
                 'Week': week_idx + 1,  # 1-indexed week number
                 'Date': date,
                 'licks': data['avg_licks_per_animal'][i],
@@ -475,6 +489,15 @@ def perform_anova_analysis(weekly_averages: Dict) -> Dict:
             })
     
     df_long = pd.DataFrame(long_data)
+    
+    # Check if we have sex data
+    has_sex_data = 'Sex' in df_long.columns and df_long['Sex'].nunique() > 1 and 'Unknown' not in df_long['Sex'].values
+    
+    if not has_sex_data:
+        print("\n" + "="*80)
+        print("WARNING: Sex data not found or incomplete in master CSV")
+        print("Falling back to one-way repeated measures ANOVA (Week only)")
+        print("="*80 + "\n")
     
     # Perform repeated measures ANOVA for each measure
     anova_results = {}
@@ -488,18 +511,30 @@ def perform_anova_analysis(weekly_averages: Dict) -> Dict:
     }
     
     print("\n" + "="*80)
-    print("PERFORMING REPEATED MEASURES ANOVA (ONE-WAY)")
-    print("Within-subjects factor: Week")
+    if has_sex_data:
+        print("PERFORMING MIXED ANOVA")
+        print("Between-subjects factor: Sex")
+        print("Within-subjects factor: Week (repeated measures)")
+    else:
+        print("PERFORMING REPEATED MEASURES ANOVA (ONE-WAY)")
+        print("Within-subjects factor: Week")
     print("="*80)
     
     for measure in measures:
         print(f"\nAnalyzing: {measure_names[measure]}")
         
         # For bottle_weight, drop rows with NaN (outliers)
-        if measure == 'bottle_weight':
-            df_measure = df_long[['Animal', 'Week', measure]].dropna()
+        # Include Sex column if available
+        if has_sex_data:
+            if measure == 'bottle_weight':
+                df_measure = df_long[['Animal', 'Sex', 'Week', measure]].dropna()
+            else:
+                df_measure = df_long[['Animal', 'Sex', 'Week', measure]].copy()
         else:
-            df_measure = df_long[['Animal', 'Week', measure]].copy()
+            if measure == 'bottle_weight':
+                df_measure = df_long[['Animal', 'Week', measure]].dropna()
+            else:
+                df_measure = df_long[['Animal', 'Week', measure]].copy()
         
         # Check if we have enough data
         n_animals = df_measure['Animal'].nunique()
@@ -529,44 +564,113 @@ def perform_anova_analysis(weekly_averages: Dict) -> Dict:
                 'f_statistic': np.nan,
                 'p_value': np.nan,
                 'significant': False,
+                'f_statistic_sex': np.nan,
+                'p_value_sex': np.nan,
+                'significant_sex': False,
+                'f_statistic_interaction': np.nan,
+                'p_value_interaction': np.nan,
+                'significant_interaction': False,
                 'error': 'Insufficient data for ANOVA (need at least 2 weeks)',
-                'is_repeated_measures': True
+                'is_repeated_measures': True,
+                'is_mixed_anova': has_sex_data
             }
             print(f"  ERROR: Insufficient data ({n_weeks} weeks)")
             continue
         
         try:
-            # Perform repeated measures ANOVA
-            # dv = dependent variable (the measure)
-            # within = within-subjects factor (Week)
-            # subject = subject identifier (Animal)
-            rm_result = pg.rm_anova(
-                dv=measure,
-                within='Week',
-                subject='Animal',
-                data=df_measure,
-                detailed=True
-            )
-            
-            # Extract results
-            f_stat = rm_result.loc[rm_result['Source'] == 'Week', 'F'].values[0]
-            p_value = rm_result.loc[rm_result['Source'] == 'Week', 'p-unc'].values[0]
-            
-            # Check for sphericity violation and use corrected p-value if needed
-            if 'p-GG-corr' in rm_result.columns:
-                p_gg = rm_result.loc[rm_result['Source'] == 'Week', 'p-GG-corr'].values[0]
-                sphericity_violated = (p_gg != p_value)
+            if has_sex_data:
+                # MIXED ANOVA with Sex (between) and Week (within)
+                result_table = pg.mixed_anova(
+                    dv=measure,
+                    within='Week',
+                    between='Sex',
+                    subject='Animal',
+                    data=df_measure
+                )
+                
+                # Extract main effects and interaction
+                # Sources: 'Sex', 'Week', 'Interaction'
+                sex_row = result_table[result_table['Source'] == 'Sex']
+                week_row = result_table[result_table['Source'] == 'Week']
+                interaction_row = result_table[result_table['Source'] == 'Interaction']
+                
+                # Sex main effect (between-subjects)
+                f_stat_sex = sex_row['F'].values[0] if len(sex_row) > 0 else np.nan
+                p_value_sex = sex_row['p-unc'].values[0] if len(sex_row) > 0 else np.nan
+                np2_sex = sex_row['np2'].values[0] if len(sex_row) > 0 and 'np2' in sex_row.columns else np.nan
+                
+                # Week main effect (within-subjects, with sphericity)
+                f_stat_week = week_row['F'].values[0] if len(week_row) > 0 else np.nan
+                p_value_week = week_row['p-unc'].values[0] if len(week_row) > 0 else np.nan
+                np2_week = week_row['np2'].values[0] if len(week_row) > 0 and 'np2' in week_row.columns else np.nan
+                
+                # Check for sphericity (GG-corrected p-value for Week)
+                if 'p-GG-corr' in week_row.columns and len(week_row) > 0:
+                    p_gg_week = week_row['p-GG-corr'].values[0]
+                    sphericity_violated_week = (p_gg_week != p_value_week)
+                else:
+                    p_gg_week = p_value_week
+                    sphericity_violated_week = False
+                
+                # Interaction (within-subjects, with sphericity)
+                f_stat_interaction = interaction_row['F'].values[0] if len(interaction_row) > 0 else np.nan
+                p_value_interaction = interaction_row['p-unc'].values[0] if len(interaction_row) > 0 else np.nan
+                np2_interaction = interaction_row['np2'].values[0] if len(interaction_row) > 0 and 'np2' in interaction_row.columns else np.nan
+                
+                # Check for sphericity (GG-corrected p-value for Interaction)
+                if 'p-GG-corr' in interaction_row.columns and len(interaction_row) > 0:
+                    p_gg_interaction = interaction_row['p-GG-corr'].values[0]
+                    sphericity_violated_interaction = (p_gg_interaction != p_value_interaction)
+                else:
+                    p_gg_interaction = p_value_interaction
+                    sphericity_violated_interaction = False
+                
+                # For backwards compatibility, keep 'f_statistic' and 'p_value' as the Week effect
+                f_stat = f_stat_week
+                p_value = p_value_week
+                p_gg = p_gg_week
+                sphericity_violated = sphericity_violated_week
+                effect_size = np2_week
+                
             else:
-                p_gg = p_value
-                sphericity_violated = False
+                # ONE-WAY REPEATED MEASURES ANOVA (Week only)
+                result_table = pg.rm_anova(
+                    dv=measure,
+                    within='Week',
+                    subject='Animal',
+                    data=df_measure,
+                    detailed=True
+                )
+                
+                # Extract results
+                f_stat = result_table.loc[result_table['Source'] == 'Week', 'F'].values[0]
+                p_value = result_table.loc[result_table['Source'] == 'Week', 'p-unc'].values[0]
+                
+                # Check for sphericity violation and use corrected p-value if needed
+                if 'p-GG-corr' in result_table.columns:
+                    p_gg = result_table.loc[result_table['Source'] == 'Week', 'p-GG-corr'].values[0]
+                    sphericity_violated = (p_gg != p_value)
+                else:
+                    p_gg = p_value
+                    sphericity_violated = False
+                
+                # Get effect size
+                if 'np2' in result_table.columns:  # Partial eta-squared
+                    effect_size = result_table.loc[result_table['Source'] == 'Week', 'np2'].values[0]
+                else:
+                    effect_size = np.nan
+                
+                # Set sex/interaction to NaN for one-way design
+                f_stat_sex = np.nan
+                p_value_sex = np.nan
+                np2_sex = np.nan
+                f_stat_interaction = np.nan
+                p_value_interaction = np.nan
+                p_gg_interaction = np.nan
+                np2_interaction = np.nan
+                sphericity_violated_interaction = False
             
-            # Get effect size
-            if 'np2' in rm_result.columns:  # Partial eta-squared
-                effect_size = rm_result.loc[rm_result['Source'] == 'Week', 'np2'].values[0]
-            else:
-                effect_size = np.nan
-            
-            # Compute descriptive statistics per week
+            # Compute descriptive statistics per week (and per sex if available)
             group_stats = []
             for week_num in sorted(df_measure['Week'].unique()):
                 week_data = df_measure[df_measure['Week'] == week_num][measure]
@@ -580,26 +684,75 @@ def perform_anova_analysis(weekly_averages: Dict) -> Dict:
                     'max': week_data.max()
                 })
             
+            # If mixed ANOVA, also compute descriptive stats per Sex
+            sex_stats = []
+            if has_sex_data:
+                for sex_val in sorted(df_measure['Sex'].unique()):
+                    sex_data = df_measure[df_measure['Sex'] == sex_val][measure]
+                    sex_stats.append({
+                        'sex': sex_val,
+                        'n': len(sex_data),
+                        'mean': sex_data.mean(),
+                        'std': sex_data.std(ddof=1)
+                    })
+            
             anova_results[measure] = {
                 'measure_name': measure_names[measure],
+                # Week effect (main for mixed, only for RM)
                 'f_statistic': f_stat,
                 'p_value': p_value,
                 'p_value_gg_corrected': p_gg,
                 'sphericity_violated': sphericity_violated,
                 'effect_size': effect_size,
                 'significant': p_gg < 0.05,  # Use GG-corrected p-value for significance
+                # Sex effect (only for mixed ANOVA)
+                'f_statistic_sex': f_stat_sex,
+                'p_value_sex': p_value_sex,
+                'effect_size_sex': np2_sex,
+                'significant_sex': p_value_sex < 0.05 if not np.isnan(p_value_sex) else False,
+                # Interaction effect (only for mixed ANOVA)
+                'f_statistic_interaction': f_stat_interaction,
+                'p_value_interaction': p_value_interaction,
+                'p_value_gg_corrected_interaction': p_gg_interaction,
+                'sphericity_violated_interaction': sphericity_violated_interaction,
+                'effect_size_interaction': np2_interaction,
+                'significant_interaction': p_gg_interaction < 0.05 if not np.isnan(p_gg_interaction) else False,
+                # Descriptive stats
                 'group_stats': group_stats,
+                'sex_stats': sex_stats,
                 'n_animals': n_animals,
                 'n_weeks': n_weeks,
                 'is_repeated_measures': True,
-                'rm_anova_table': rm_result
+                'is_mixed_anova': has_sex_data,
+                'anova_table': result_table
             }
             
-            sig_marker = "***" if p_gg < 0.05 else ""
-            print(f"  F({n_weeks-1}, {(n_weeks-1)*(n_animals-1)}) = {f_stat:.3f}, p = {p_gg:.4f} {sig_marker}")
-            if sphericity_violated:
-                print(f"  (Greenhouse-Geisser corrected p-value used due to sphericity violation)")
-            print(f"  Partial η² = {effect_size:.3f}")
+            # Print results
+            print(f"  Results:")
+            if has_sex_data:
+                # Sex main effect
+                sig_marker_sex = "***" if p_value_sex < 0.05 else ""
+                print(f"    Sex: F = {f_stat_sex:.3f}, p = {p_value_sex:.4f} {sig_marker_sex}, partial η² = {np2_sex:.3f}")
+                
+                # Week main effect
+                sig_marker_week = "***" if p_gg < 0.05 else ""
+                print(f"    Week: F = {f_stat:.3f}, p = {p_gg:.4f} {sig_marker_week}, partial η² = {effect_size:.3f}")
+                if sphericity_violated:
+                    print(f"      (Greenhouse-Geisser corrected due to sphericity violation)")
+                
+                # Interaction
+                sig_marker_int = "***" if p_gg_interaction < 0.05 else ""
+                print(f"    Sex × Week: F = {f_stat_interaction:.3f}, p = {p_gg_interaction:.4f} {sig_marker_int}, partial η² = {np2_interaction:.3f}")
+                if sphericity_violated_interaction:
+                    print(f"      (Greenhouse-Geisser corrected due to sphericity violation)")
+            else:
+                # One-way RM ANOVA
+                sig_marker = "***" if p_gg < 0.05 else ""
+                print(f"  F({n_weeks-1}, {(n_weeks-1)*(n_animals-1)}) = {f_stat:.3f}, p = {p_gg:.4f} {sig_marker}")
+                if sphericity_violated:
+                    print(f"  (Greenhouse-Geisser corrected p-value used due to sphericity violation)")
+                print(f"  Partial η² = {effect_size:.3f}")
+            
             print(f"  Animals: {n_animals}, Complete observations across {n_weeks} weeks")
             
         except Exception as e:
@@ -609,8 +762,15 @@ def perform_anova_analysis(weekly_averages: Dict) -> Dict:
                 'f_statistic': np.nan,
                 'p_value': np.nan,
                 'significant': False,
-                'error': f'Repeated measures ANOVA failed: {str(e)}',
-                'is_repeated_measures': True
+                'f_statistic_sex': np.nan,
+                'p_value_sex': np.nan,
+                'significant_sex': False,
+                'f_statistic_interaction': np.nan,
+                'p_value_interaction': np.nan,
+                'significant_interaction': False,
+                'error': f'ANOVA failed: {str(e)}',
+                'is_repeated_measures': True,
+                'is_mixed_anova': has_sex_data
             }
     
     return anova_results
@@ -717,12 +877,19 @@ def _perform_standard_anova_fallback(weekly_averages: Dict) -> Dict:
     return anova_results
 
 
-def perform_tukey_hsd(anova_results: Dict) -> Dict:
+def perform_tukey_hsd(anova_results: Dict, weekly_averages: Dict) -> Dict:
     """
-    Perform Tukey's HSD post-hoc test for significant ANOVA results.
+    Perform Tukey's HSD post-hoc test for significant Week main effects.
+    
+    For mixed ANOVA or repeated measures ANOVA with significant Week effects,
+    performs pairwise comparisons across Week levels.
+    
+    Note: For repeated measures data, this is an approximation. Proper RM post-hoc
+    tests would account for the correlated nature of repeated observations.
     
     Parameters:
         anova_results: Dictionary from perform_anova_analysis
+        weekly_averages: Dictionary from compute_weekly_averages (needed to reconstruct data)
         
     Returns:
         Dictionary containing Tukey HSD results for significant measures
@@ -730,52 +897,87 @@ def perform_tukey_hsd(anova_results: Dict) -> Dict:
     tukey_results = {}
     
     for measure, anova_data in anova_results.items():
-        # Only perform Tukey HSD for significant ANOVA results
-        if anova_data.get('significant', False) and 'groups_data' in anova_data:
-            try:
-                # Prepare data for Tukey HSD
-                all_data = []
-                group_labels = []
+        # Check if Week effect is significant (either in one-way RM or mixed ANOVA)
+        if not anova_data.get('significant', False):
+            continue
+        
+        # Skip if there's an error
+        if 'error' in anova_data:
+            continue
+        
+        try:
+            # Reconstruct long-format data from weekly_averages
+            all_data = []
+            group_labels = []
+            
+            # Get group stats from ANOVA results (contains week info)
+            if 'group_stats' not in anova_data or not anova_data['group_stats']:
+                continue
+            
+            # Map measure name to data key in weekly_averages
+            measure_to_key = {
+                'licks': 'avg_licks_per_animal',
+                'bouts': 'avg_bouts_per_animal',
+                'fecal': 'avg_fecal_per_animal',
+                'bottle_weight': 'avg_bottle_weight_per_animal',
+                'total_weight': 'avg_total_weight_per_animal'
+            }
+            
+            data_key = measure_to_key.get(measure)
+            if not data_key:
+                continue
+            
+            # Reconstruct data for each week
+            sorted_weeks = sort_dates_chronologically(list(weekly_averages.keys()))
+            
+            for week_idx, date in enumerate(sorted_weeks):
+                week_data = weekly_averages[date][data_key]
                 
-                for i, week in enumerate(anova_data['week_labels']):
-                    group_data = anova_data['groups_data'][i]
-                    all_data.extend(group_data)
-                    group_labels.extend([week] * len(group_data))
+                # For bottle_weight, exclude zeros (outliers)
+                if measure == 'bottle_weight':
+                    week_data = [x for x in week_data if x > 0]
                 
-                # Perform Tukey HSD
-                tukey_result = pairwise_tukeyhsd(endog=all_data, groups=group_labels, alpha=0.05)
+                # Add to combined data
+                all_data.extend(week_data)
+                group_labels.extend([f"Week {week_idx + 1}"] * len(week_data))
+            
+            if len(all_data) == 0 or len(set(group_labels)) < 2:
+                continue
+            
+            # Perform Tukey HSD
+            tukey_result = pairwise_tukeyhsd(endog=all_data, groups=group_labels, alpha=0.05)
+            
+            # Parse results into a more accessible format
+            comparisons = []
+            
+            # Extract pairwise comparison results directly from tukey_result
+            # The tukey HSD result contains arrays for each comparison
+            summary_data = tukey_result.summary().data[1:]  # Skip header row
+            
+            for row in summary_data:
+                group1, group2, meandiff, p_adj, lower_ci, upper_ci, reject = row
                 
-                # Parse results into a more accessible format
-                comparisons = []
-                
-                # Extract pairwise comparison results directly from tukey_result
-                # The tukey HSD result contains arrays for each comparison
-                summary_data = tukey_result.summary().data[1:]  # Skip header row
-                
-                for row in summary_data:
-                    group1, group2, meandiff, p_adj, lower_ci, upper_ci, reject = row
-                    
-                    comparisons.append({
-                        'group1': str(group1),
-                        'group2': str(group2), 
-                        'meandiff': float(meandiff),
-                        'p_adj': float(p_adj),
-                        'lower_ci': float(lower_ci),
-                        'upper_ci': float(upper_ci),
-                        'significant': bool(reject)
-                    })
-                
-                tukey_results[measure] = {
-                    'measure_name': anova_data['measure_name'],
-                    'comparisons': comparisons,
-                    'tukey_object': tukey_result  # Store the full result for summary table
-                }
-                
-            except Exception as e:
-                tukey_results[measure] = {
-                    'measure_name': anova_data['measure_name'],
-                    'error': f"Error performing Tukey HSD: {str(e)}"
-                }
+                comparisons.append({
+                    'group1': str(group1),
+                    'group2': str(group2), 
+                    'meandiff': float(meandiff),
+                    'p_adj': float(p_adj),
+                    'lower_ci': float(lower_ci),
+                    'upper_ci': float(upper_ci),
+                    'significant': bool(reject)
+                })
+            
+            tukey_results[measure] = {
+                'measure_name': anova_data['measure_name'],
+                'comparisons': comparisons,
+                'tukey_object': tukey_result  # Store the full result for summary table
+            }
+            
+        except Exception as e:
+            tukey_results[measure] = {
+                'measure_name': anova_data['measure_name'],
+                'error': f"Error performing Tukey HSD: {str(e)}"
+            }
     
     return tukey_results
 
@@ -791,14 +993,15 @@ def display_tukey_results(tukey_results: Dict) -> str:
         Formatted string with Tukey HSD results
     """
     if not tukey_results:
-        return "\n" + "=" * 80 + "\nNo significant ANOVA results found - Tukey HSD not performed.\n" + "=" * 80 + "\n"
+        return "\n" + "=" * 80 + "\nNo significant Week effects found - Tukey HSD post-hoc tests not needed.\n" + "=" * 80 + "\n"
     
     lines = []
     lines.append("\n" + "=" * 80)
     lines.append("TUKEY HSD POST-HOC TEST RESULTS")
     lines.append("=" * 80)
     lines.append("")
-    lines.append("Tukey HSD performed only for measures with significant ANOVA results.")
+    lines.append("Tukey HSD performed for measures with significant Week main effects.")
+    lines.append("Pairwise comparisons across Week levels (collapsed across Sex if applicable).")
     lines.append("Alpha = 0.05 (family-wise error rate controlled)")
     lines.append("")
     
@@ -879,6 +1082,7 @@ def display_tukey_results(tukey_results: Dict) -> str:
 def display_anova_results(anova_results: Dict) -> str:
     """
     Display ANOVA results in a formatted table and return formatted string.
+    Supports both Mixed ANOVA (Sex × Week) and one-way repeated measures (Week only).
     
     Parameters:
         anova_results: Dictionary from perform_anova_analysis
@@ -889,10 +1093,17 @@ def display_anova_results(anova_results: Dict) -> str:
     lines = []
     lines.append("\n" + "=" * 80)
     
-    # Check if results are repeated measures or standard
+    # Check if results are repeated measures, mixed, or standard
     is_rm = any(results.get('is_repeated_measures', False) for results in anova_results.values())
+    is_mixed = any(results.get('is_mixed_anova', False) for results in anova_results.values())
     
-    if is_rm:
+    if is_mixed:
+        lines.append("MIXED ANOVA RESULTS ACROSS WEEKS")
+        lines.append("=" * 80)
+        lines.append("Between-subjects factor: Sex")
+        lines.append("Within-subjects factor: Week (repeated measures)")
+        lines.append("Subject tracking: Animal ID")
+    elif is_rm:
         lines.append("ONE-WAY REPEATED MEASURES ANOVA RESULTS ACROSS WEEKS")
         lines.append("=" * 80)
         lines.append("Within-subjects factor: Week")
@@ -918,37 +1129,110 @@ def display_anova_results(anova_results: Dict) -> str:
         lines.append("-" * 50)
         
         # Show design type
-        if results.get('is_repeated_measures', False):
+        if results.get('is_mixed_anova', False):
+            lines.append("Design: Mixed ANOVA (Sex between-subjects × Week within-subjects)")
+            if 'n_animals' in results and 'n_weeks' in results:
+                lines.append(f"Animals: {results['n_animals']}, Weeks: {results['n_weeks']}")
+            lines.append("")
+            
+            # Sex main effect (between-subjects)
+            lines.append("SEX MAIN EFFECT (between-subjects):")
+            lines.append(f"  F-statistic: {results.get('f_statistic_sex', np.nan):.4f}")
+            lines.append(f"  p-value: {results.get('p_value_sex', np.nan):.6f}")
+            if 'effect_size_sex' in results and not np.isnan(results.get('effect_size_sex', np.nan)):
+                eta_sex = results['effect_size_sex']
+                effect_interp_sex = "large" if eta_sex > 0.14 else "medium" if eta_sex > 0.06 else "small"
+                lines.append(f"  Partial η²: {eta_sex:.4f} ({effect_interp_sex} effect size)")
+            if results.get('significant_sex', False):
+                lines.append(f"  Result: SIGNIFICANT (p < 0.05) - Significant differences between sexes")
+            else:
+                lines.append(f"  Result: NOT SIGNIFICANT (p ≥ 0.05) - No significant sex differences")
+            lines.append("")
+            
+            # Week main effect (within-subjects, with sphericity)
+            lines.append("WEEK MAIN EFFECT (within-subjects):")
+            lines.append(f"  F-statistic: {results['f_statistic']:.4f}")
+            if 'p_value_gg_corrected' in results and results.get('sphericity_violated', False):
+                lines.append(f"  p-value (uncorrected): {results['p_value']:.6f}")
+                lines.append(f"  p-value (GG-corrected): {results['p_value_gg_corrected']:.6f}")
+                lines.append("    (Greenhouse-Geisser correction applied for sphericity violation)")
+                p_for_sig_week = results['p_value_gg_corrected']
+            else:
+                lines.append(f"  p-value: {results.get('p_value', results.get('p_value_gg_corrected', np.nan)):.6f}")
+                p_for_sig_week = results.get('p_value', results.get('p_value_gg_corrected', np.nan))
+            if 'effect_size' in results and not np.isnan(results['effect_size']):
+                eta_week = results['effect_size']
+                effect_interp_week = "large" if eta_week > 0.14 else "medium" if eta_week > 0.06 else "small"
+                lines.append(f"  Partial η²: {eta_week:.4f} ({effect_interp_week} effect size)")
+            if results.get('significant', False):
+                lines.append(f"  Result: SIGNIFICANT (p < 0.05) - Significant differences across weeks")
+            else:
+                lines.append(f"  Result: NOT SIGNIFICANT (p ≥ 0.05) - No significant week differences")
+            lines.append("")
+            
+            # Interaction (Sex × Week)
+            lines.append("SEX × WEEK INTERACTION:")
+            lines.append(f"  F-statistic: {results.get('f_statistic_interaction', np.nan):.4f}")
+            if 'p_value_gg_corrected_interaction' in results and results.get('sphericity_violated_interaction', False):
+                lines.append(f"  p-value (uncorrected): {results.get('p_value_interaction', np.nan):.6f}")
+                lines.append(f"  p-value (GG-corrected): {results['p_value_gg_corrected_interaction']:.6f}")
+                lines.append("    (Greenhouse-Geisser correction applied for sphericity violation)")
+                p_for_sig_int = results['p_value_gg_corrected_interaction']
+            else:
+                lines.append(f"  p-value: {results.get('p_value_interaction', np.nan):.6f}")
+                p_for_sig_int = results.get('p_value_interaction', np.nan)
+            if 'effect_size_interaction' in results and not np.isnan(results.get('effect_size_interaction', np.nan)):
+                eta_int = results['effect_size_interaction']
+                effect_interp_int = "large" if eta_int > 0.14 else "medium" if eta_int > 0.06 else "small"
+                lines.append(f"  Partial η²: {eta_int:.4f} ({effect_interp_int} effect size)")
+            if results.get('significant_interaction', False):
+                lines.append(f"  Result: SIGNIFICANT (p < 0.05) - Week effect differs by sex")
+            else:
+                lines.append(f"  Result: NOT SIGNIFICANT (p ≥ 0.05) - Week effect similar across sexes")
+            lines.append("")
+            
+        elif results.get('is_repeated_measures', False):
             lines.append("Design: One-way repeated measures (within-subjects)")
             if 'n_animals' in results and 'n_weeks' in results:
                 lines.append(f"Animals: {results['n_animals']}, Weeks: {results['n_weeks']}")
+            lines.append("")
+            
+            # ANOVA summary (one-way RM)
+            lines.append(f"F-statistic: {results['f_statistic']:.4f}")
+            
+            # Show both uncorrected and corrected p-values if available
+            if 'p_value_gg_corrected' in results and results.get('sphericity_violated', False):
+                lines.append(f"p-value (uncorrected): {results['p_value']:.6f}")
+                lines.append(f"p-value (GG-corrected): {results['p_value_gg_corrected']:.6f}")
+                lines.append("  (Greenhouse-Geisser correction applied for sphericity violation)")
+                p_for_sig = results['p_value_gg_corrected']
+            else:
+                lines.append(f"p-value: {results.get('p_value', results.get('p_value_gg_corrected', np.nan)):.6f}")
+                p_for_sig = results.get('p_value', results.get('p_value_gg_corrected', np.nan))
+            
+            # Effect size for repeated measures
+            if 'effect_size' in results and not np.isnan(results['effect_size']):
+                effect_interpretation = "large" if results['effect_size'] > 0.14 else "medium" if results['effect_size'] > 0.06 else "small"
+                lines.append(f"Partial η²: {results['effect_size']:.4f} ({effect_interpretation} effect size)")
+            
+            if results['significant']:
+                lines.append(f"Result: SIGNIFICANT (p < 0.05) - There are significant differences across weeks")
+            else:
+                lines.append(f"Result: NOT SIGNIFICANT (p ≥ 0.05) - No significant differences across weeks")
+            lines.append("")
         else:
             lines.append("Design: Standard one-way (between-groups)")
-        
-        # ANOVA summary
-        lines.append(f"F-statistic: {results['f_statistic']:.4f}")
-        
-        # Show both uncorrected and corrected p-values if available
-        if 'p_value_gg_corrected' in results and results.get('sphericity_violated', False):
-            lines.append(f"p-value (uncorrected): {results['p_value']:.6f}")
-            lines.append(f"p-value (GG-corrected): {results['p_value_gg_corrected']:.6f}")
-            lines.append("  (Greenhouse-Geisser correction applied for sphericity violation)")
-            p_for_sig = results['p_value_gg_corrected']
-        else:
-            lines.append(f"p-value: {results.get('p_value', results.get('p_value_gg_corrected', np.nan)):.6f}")
-            p_for_sig = results.get('p_value', results.get('p_value_gg_corrected', np.nan))
-        
-        # Effect size for repeated measures
-        if 'effect_size' in results and not np.isnan(results['effect_size']):
-            effect_interpretation = "large" if results['effect_size'] > 0.14 else "medium" if results['effect_size'] > 0.06 else "small"
-            lines.append(f"Partial η²: {results['effect_size']:.4f} ({effect_interpretation} effect size)")
-        
-        if results['significant']:
-            lines.append(f"Result: SIGNIFICANT (p < 0.05) - There are significant differences across weeks")
-        else:
-            lines.append(f"Result: NOT SIGNIFICANT (p ≥ 0.05) - No significant differences across weeks")
-        
-        lines.append("")
+            lines.append("")
+            
+            # ANOVA summary (standard)
+            lines.append(f"F-statistic: {results['f_statistic']:.4f}")
+            lines.append(f"p-value: {results.get('p_value', np.nan):.6f}")
+            
+            if results['significant']:
+                lines.append(f"Result: SIGNIFICANT (p < 0.05)")
+            else:
+                lines.append(f"Result: NOT SIGNIFICANT (p ≥ 0.05)")
+            lines.append("")
         
         # Group descriptive statistics
         lines.append("Week Statistics:")
@@ -985,21 +1269,61 @@ def display_anova_results(anova_results: Dict) -> str:
             lines.append(row)
         
         lines.append("")
+        
+        # Sex-specific descriptive statistics (for mixed ANOVA)
+        if results.get('is_mixed_anova', False) and 'sex_stats' in results and results['sex_stats']:
+            lines.append("Sex Statistics:")
+            header = f"{'Sex':<6} {'N':<6} {'Mean':<10} {'Std':<10}"
+            lines.append(header)
+            lines.append("-" * 35)
+            
+            for sex_stat in results['sex_stats']:
+                row = (f"{sex_stat['sex']:<6} "
+                       f"{sex_stat['n']:<6} "
+                       f"{sex_stat['mean']:<10.2f} "
+                       f"{sex_stat['std']:<10.2f}")
+                lines.append(row)
+            
+            lines.append("")
+        
         lines.append("")
     
     # Summary of significant results
-    significant_measures = [results['measure_name'] for results in anova_results.values() 
+    significant_measures_week = [results['measure_name'] for results in anova_results.values() 
                           if results.get('significant', False)]
+    significant_measures_sex = [results['measure_name'] for results in anova_results.values() 
+                          if results.get('significant_sex', False)]
+    significant_measures_interaction = [results['measure_name'] for results in anova_results.values() 
+                          if results.get('significant_interaction', False)]
+    
+    is_mixed = any(results.get('is_mixed_anova', False) for results in anova_results.values())
     
     lines.append("SUMMARY OF SIGNIFICANT RESULTS:")
     lines.append("-" * 40)
     
-    if significant_measures:
-        lines.append(f"Significant differences found in: {', '.join(significant_measures)}")
-        lines.append("\nThese measures show statistically significant differences across weeks.")
-        lines.append("Consider post-hoc tests (e.g., Tukey's HSD) for pairwise comparisons.")
+    if is_mixed:
+        if significant_measures_sex:
+            lines.append(f"Sex main effect significant in: {', '.join(significant_measures_sex)}")
+        else:
+            lines.append("Sex main effect: No significant differences")
+        
+        if significant_measures_week:
+            lines.append(f"Week main effect significant in: {', '.join(significant_measures_week)}")
+        else:
+            lines.append("Week main effect: No significant differences")
+        
+        if significant_measures_interaction:
+            lines.append(f"Sex × Week interaction significant in: {', '.join(significant_measures_interaction)}")
+            lines.append("  (Week effect differs by sex - consider simple effects analysis)")
+        else:
+            lines.append("Sex × Week interaction: Not significant (week effect similar across sexes)")
     else:
-        lines.append("No significant differences found in any measure across weeks.")
+        if significant_measures_week:
+            lines.append(f"Significant differences found in: {', '.join(significant_measures_week)}")
+            lines.append("\nThese measures show statistically significant differences across weeks.")
+            lines.append("Consider post-hoc tests (e.g., Tukey's HSD) for pairwise comparisons.")
+        else:
+            lines.append("No significant differences found in any measure across weeks.")
     
     lines.append("\n" + "=" * 80)
     lines.append("")
@@ -1809,11 +2133,12 @@ def process_single_week(
     
     print(f"\nMetadata loaded: {len(date_metadata)} animals found in master CSV for {date}")
     
-    # Extract sensor mappings, animal IDs, and CA%
+    # Extract sensor mappings, animal IDs, sex, and CA%
     sensor_to_weight = {}
     sensor_to_weight_loss = {}
     sensor_to_fecal = {}
-    sensor_to_animal_id = {}  # NEW: Track animal IDs for repeated measures
+    sensor_to_animal_id = {}  # Track animal IDs for repeated measures
+    sensor_to_sex = {}  # NEW: Track sex for mixed ANOVA
     ca_percent = None
     
     print(f"\nSensor assignments from master CSV:")
@@ -1829,6 +2154,12 @@ def process_single_week(
         else:
             # Fallback to generic ID based on sensor if animal_ID not in CSV
             sensor_to_animal_id[sensor_name] = f"Animal_{sensor_num}"
+        
+        # Extract sex if available
+        if 'sex' in row and pd.notna(row['sex']):
+            sensor_to_sex[sensor_name] = str(row['sex']).upper().strip()
+        else:
+            sensor_to_sex[sensor_name] = "Unknown"
         
         print(f"  Animal {row.get('animal_ID', idx)}: {sensor_name} (bottle_wt={row['bottle_weight_change']}, total_wt={row['total_weight_change']})")
         
@@ -1907,12 +2238,15 @@ def process_single_week(
         
         weight_losses.append(total_wt)
         fecal_counts.append(fecal)
-        animal_ids.append(sensor_to_animal_id.get(sensor, f"Unknown_{sensor}"))  # NEW: Track animal ID
+        animal_ids.append(sensor_to_animal_id.get(sensor, f"Unknown_{sensor}"))  # Track animal ID
         
         # Additional detail line for metadata
         if lick_counts[-1] == 0:
             print(f"       Metadata: bottle_wt={bottle_wt}, total_wt={total_wt}, fecal={fecal}")
             print(f"       >>> INVESTIGATE: This sensor was selected in master CSV but detected 0 licks! <<<")
+    
+    # Extract sex information for each animal (in same order as other data)
+    animal_sexes = [sensor_to_sex.get(sensor, "Unknown") for sensor in selected_sensors]
     
     # Calculate correlations
     lick_weight_corr = np.corrcoef(lick_counts, weights)[0, 1] if len(lick_counts) > 1 else np.nan
@@ -1942,7 +2276,8 @@ def process_single_week(
         'fecal_counts': np.array(fecal_counts),
         'weights': np.array(weights),
         'weight_losses': np.array(weight_losses),
-        'animal_ids': animal_ids,  # NEW: Include animal IDs for repeated measures tracking
+        'animal_ids': animal_ids,  # Include animal IDs for repeated measures tracking
+        'animal_sexes': animal_sexes,  # NEW: Include sex for mixed ANOVA
         'correlations': {
             'lick_weight': lick_weight_corr,
             'bout_weight': bout_weight_corr,
@@ -2047,7 +2382,7 @@ def main():
     print("\nStep 6: Performing Tukey HSD Post-Hoc Tests")
     print("-" * 40)
     
-    tukey_results = perform_tukey_hsd(anova_results)
+    tukey_results = perform_tukey_hsd(anova_results, weekly_averages)
     tukey_output = display_tukey_results(tukey_results)
     
     # Compute and plot lick rate histograms (5-minute bins over 30 minutes)

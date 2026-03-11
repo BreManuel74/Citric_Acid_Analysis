@@ -12,6 +12,7 @@ from matplotlib.patches import Patch
 import matplotlib.transforms as mtransforms
 from scipy import stats
 from scipy.stats import f_oneway
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
 
 # Try to import pingouin for mixed ANOVA (repeated measures)
 try:
@@ -24,7 +25,7 @@ except ImportError:
 
 # Try to import statsmodels for Cochran's Q test (repeated measures for binary data)
 try:
-	from statsmodels.stats.contingency_tables import cochrans_q
+	from statsmodels.stats.contingency_tables import cochrans_q, mcnemar
 	import statsmodels.formula.api as smf
 	HAS_STATSMODELS = True
 except ImportError:
@@ -817,8 +818,8 @@ def plot_average_weight_change_by_week(
 	ax1.spines['top'].set_visible(False)
 	ax1.spines['right'].set_visible(False)
 	
-	# Set x-axis to start at 0 and end at the last Week position
-	ax1.set_xlim(-0.5, len(week_labels) - 0.5)
+	# Set x-axis to span exactly the width of the bars (no padding)
+	ax1.set_xlim(-bar_width/2, len(week_labels) - 1 + bar_width/2)
 	
 	# Calculate y-axis range including error bars
 	daily_with_err_top = np.array(daily_means) + np.array(daily_sems)
@@ -854,8 +855,8 @@ def plot_average_weight_change_by_week(
 	ax2.spines['top'].set_visible(False)
 	ax2.spines['right'].set_visible(False)
 	
-	# Set x-axis to start at 0 and end at the last Week position
-	ax2.set_xlim(-0.5, len(week_labels) - 0.5)
+	# Set x-axis to span exactly the width of the bars (no padding)
+	ax2.set_xlim(-bar_width/2, len(week_labels) - 1 + bar_width/2)
 	
 	# Calculate y-axis range including error bars
 	total_with_err_top = np.array(total_means) + np.array(total_sems)
@@ -1269,6 +1270,468 @@ def _perform_standard_anova_fallback(df: pd.DataFrame) -> dict:
 		}
 	
 	return results
+
+
+def perform_tukey_hsd_weight(weight_results: dict, df: pd.DataFrame) -> dict:
+	"""
+	Perform Tukey HSD post-hoc tests for significant main effects in the mixed ANOVA.
+	
+	For Week main effect: Pairwise comparisons across all Week levels (collapsed across Sex)
+	For Sex main effect: Not applicable (only 2 levels - F-test is sufficient)
+	For Interaction: Simple effects of Week within each Sex level
+	
+	Parameters:
+		weight_results: Dictionary from perform_two_way_anova_weight
+		df: Master DataFrame with columns ID, Sex, Week, Daily Change, Total Change
+		
+	Returns:
+		Dictionary containing Tukey HSD results for each measure
+	"""
+	tukey_results = {}
+	
+	# Clean and prepare data
+	cdf = clean_master_dataframe(df)
+	cdf = _add_day_number_column(cdf)
+	cdf = _add_week_column(cdf)
+	
+	# Filter to exclude Day < 0 (baseline measurements)
+	cdf = cdf[cdf["Day"] >= 0]
+	
+	# Keep only rows with complete data
+	required_cols = ["ID", "Sex", "Week", "Daily Change", "Total Change"]
+	cdf = cdf.dropna(subset=required_cols)
+	
+	measures = {
+		'Daily Change': 'Daily Change',
+		'Total Change': 'Total Change'
+	}
+	
+	for measure_name, column in measures.items():
+		if measure_name not in weight_results:
+			continue
+		
+		results = weight_results[measure_name]
+		
+		# Check if Week main effect is significant
+		week_significant = results.get('week', {}).get('significant', False)
+		interaction_significant = results.get('interaction', {}).get('significant', False)
+		
+		if not week_significant and not interaction_significant:
+			# Skip if no significant effects involving Week
+			continue
+		
+		tukey_results[measure_name] = {
+			'measure_name': measure_name,
+			'week_pairwise': None,
+			'simple_effects': None
+		}
+		
+		try:
+			# Week main effect pairwise comparisons (collapsed across Sex)
+			if week_significant:
+				print(f"\nPerforming Tukey HSD for Week main effect ({measure_name})...")
+				
+				# Prepare data: all observations with Week grouping
+				week_data = cdf[['Week', column]].copy()
+				week_data = week_data.dropna()
+				
+				# Perform Tukey HSD
+				tukey_week = pairwise_tukeyhsd(
+					endog=week_data[column],
+					groups=week_data['Week'],
+					alpha=0.05
+				)
+				
+				# Parse results
+				comparisons = []
+				summary_data = tukey_week.summary().data[1:]  # Skip header row
+				
+				for row in summary_data:
+					group1, group2, meandiff, p_adj, lower_ci, upper_ci, reject = row
+					
+					comparisons.append({
+						'group1': f"Week {int(group1)}",
+						'group2': f"Week {int(group2)}",
+						'meandiff': float(meandiff),
+						'p_adj': float(p_adj),
+						'lower_ci': float(lower_ci),
+						'upper_ci': float(upper_ci),
+						'significant': bool(reject)
+					})
+				
+				tukey_results[measure_name]['week_pairwise'] = {
+					'comparisons': comparisons,
+					'tukey_object': tukey_week
+				}
+				
+			if interaction_significant:
+				print(f"\nPerforming simple effects analysis for Sex × Week interaction ({measure_name})...")
+				
+				# Simple effects: Week pairwise comparisons within each Sex
+				simple_effects = {}
+				
+				for sex in sorted(cdf['Sex'].unique()):
+					sex_data = cdf[cdf['Sex'] == sex][['Week', column]].copy()
+					sex_data = sex_data.dropna()
+					
+					if len(sex_data) < 2:
+						continue
+					
+					# Perform Tukey HSD for this sex
+					tukey_sex = pairwise_tukeyhsd(
+						endog=sex_data[column],
+						groups=sex_data['Week'],
+						alpha=0.05
+					)
+					
+					# Parse results
+					comparisons = []
+					summary_data = tukey_sex.summary().data[1:]  # Skip header row
+					
+					for row in summary_data:
+						group1, group2, meandiff, p_adj, lower_ci, upper_ci, reject = row
+						
+						comparisons.append({
+							'group1': f"Week {int(group1)}",
+							'group2': f"Week {int(group2)}",
+							'meandiff': float(meandiff),
+							'p_adj': float(p_adj),
+							'lower_ci': float(lower_ci),
+							'upper_ci': float(upper_ci),
+							'significant': bool(reject)
+						})
+					
+					simple_effects[sex] = {
+						'comparisons': comparisons,
+						'tukey_object': tukey_sex
+					}
+				
+				tukey_results[measure_name]['simple_effects'] = simple_effects
+				
+		except Exception as e:
+			tukey_results[measure_name] = {
+				'measure_name': measure_name,
+				'error': f"Error performing Tukey HSD: {str(e)}"
+			}
+	
+	return tukey_results
+
+
+def display_tukey_hsd_results(tukey_results: dict) -> str:
+	"""
+	Display Tukey HSD post-hoc test results in a formatted table.
+	
+	Parameters:
+		tukey_results: Dictionary from perform_tukey_hsd_weight
+		
+	Returns:
+		Formatted string with Tukey HSD results
+	"""
+	if not tukey_results:
+		return "\n" + "="*80 + "\nNo significant Week or interaction effects found - Tukey HSD not needed.\n" + "="*80 + "\n"
+	
+	lines = []
+	lines.append("\n" + "="*80)
+	lines.append("TUKEY HSD POST-HOC TEST RESULTS")
+	lines.append("="*80)
+	lines.append("")
+	lines.append("Pairwise comparisons for significant main effects and interactions.")
+	lines.append("Alpha = 0.05 (family-wise error rate controlled)")
+	lines.append("")
+	
+	for measure, results in tukey_results.items():
+		if 'error' in results:
+			lines.append(f"{results['measure_name']}: {results['error']}")
+			lines.append("")
+			continue
+		
+		lines.append(f"MEASURE: {results['measure_name'].upper()}")
+		lines.append("-"*80)
+		lines.append("")
+		
+		# Week main effect pairwise comparisons
+		if results.get('week_pairwise'):
+			lines.append("Week Main Effect - Pairwise Comparisons (collapsed across Sex):")
+			lines.append("-"*60)
+			
+			header = f"{'Comparison':<20} {'Mean Diff':<12} {'Adj p-value':<12} {'95% CI Lower':<12} {'95% CI Upper':<12} {'Significant':<12}"
+			lines.append(header)
+			lines.append("-"*80)
+			
+			# Sort comparisons by p-value
+			sorted_comps = sorted(results['week_pairwise']['comparisons'], key=lambda x: x['p_adj'])
+			
+			for comp in sorted_comps:
+				comparison_name = f"{comp['group1']} vs {comp['group2']}"
+				significance = "Yes" if comp['significant'] else "No"
+				
+				row = (f"{comparison_name:<20} "
+					   f"{comp['meandiff']:<12.3f} "
+					   f"{comp['p_adj']:<12.6f} "
+					   f"{comp['lower_ci']:<12.3f} "
+					   f"{comp['upper_ci']:<12.3f} "
+					   f"{significance:<12}")
+				lines.append(row)
+			
+			lines.append("")
+			
+			# Summary of significant comparisons
+			sig_comps = [c for c in results['week_pairwise']['comparisons'] if c['significant']]
+			if sig_comps:
+				lines.append(f"Found {len(sig_comps)} significant pairwise difference(s):")
+				for comp in sig_comps:
+					lines.append(f"  {comp['group1']} vs {comp['group2']}: p = {comp['p_adj']:.4f}")
+			else:
+				lines.append("No significant pairwise differences found.")
+			
+			lines.append("")
+		
+		# Simple effects for interaction
+		if results.get('simple_effects'):
+			lines.append("Sex × Week Interaction - Simple Effects (Week comparisons within each Sex):")
+			lines.append("-"*60)
+			lines.append("")
+			
+			for sex, sex_results in sorted(results['simple_effects'].items()):
+				lines.append(f"  Sex = {sex}:")
+				
+				header = f"  {'Comparison':<20} {'Mean Diff':<12} {'Adj p-value':<12} {'Significant':<12}"
+				lines.append(header)
+				lines.append("  " + "-"*60)
+				
+				sorted_comps = sorted(sex_results['comparisons'], key=lambda x: x['p_adj'])
+				
+				for comp in sorted_comps:
+					comparison_name = f"{comp['group1']} vs {comp['group2']}"
+					significance = "Yes" if comp['significant'] else "No"
+					
+					row = (f"  {comparison_name:<20} "
+						   f"{comp['meandiff']:<12.3f} "
+						   f"{comp['p_adj']:<12.6f} "
+						   f"{significance:<12}")
+					lines.append(row)
+				
+				# Summary for this sex
+				sig_comps = [c for c in sex_results['comparisons'] if c['significant']]
+				if sig_comps:
+					lines.append(f"  Found {len(sig_comps)} significant difference(s) for {sex}")
+				else:
+					lines.append(f"  No significant differences for {sex}")
+				
+				lines.append("")
+		
+		lines.append("")
+	
+	lines.append("="*80)
+	lines.append("")
+	
+	# Join lines and print
+	formatted_output = "\n".join(lines)
+	print(formatted_output)
+	
+	return formatted_output
+
+
+def perform_mcnemar_posthoc_behavioral(behavioral_results: dict, df: pd.DataFrame) -> dict:
+	"""
+	Perform pairwise McNemar tests with Bonferroni correction for behavioral measures.
+	
+	For measures with significant Week effects (Cochran's Q), performs all pairwise
+	McNemar tests to identify which specific weeks differ from each other.
+	
+	McNemar's test is appropriate for paired categorical data (same subjects measured
+	at two different time points).
+	
+	Parameters:
+		behavioral_results: Dictionary from perform_two_way_chi_square_behavioral
+		df: Master DataFrame with columns ID, Week, and behavioral measures
+		
+	Returns:
+		Dictionary containing McNemar test results for each measure with significant Week effect
+	"""
+	if not HAS_STATSMODELS:
+		print("\nWARNING: statsmodels not installed. Cannot perform McNemar tests.")
+		return {}
+	
+	# Clean and prepare data
+	cdf = clean_master_dataframe(df)
+	cdf = _add_day_number_column(cdf)
+	cdf = _add_week_column(cdf)
+	cdf = cdf[cdf["Day"] >= 0]
+	cdf["Week"] = cdf["Week"].astype(int)
+	
+	measure_mapping = {
+		'Nest Made': 'Nest Made?',
+		'Lethargy': 'Lethargy?',
+		'CA Spot Digging': 'CA Spot Digging?',
+		'Anxious Behaviors': 'Anxious Behaviors?'
+	}
+	
+	mcnemar_results = {}
+	
+	for measure_name, column in measure_mapping.items():
+		if measure_name not in behavioral_results:
+			continue
+		
+		results = behavioral_results[measure_name]
+		
+		# Check if Week effect is significant
+		week_significant = results.get('week', {}).get('significant', False)
+		
+		if not week_significant:
+			# Skip if no significant Week effect
+			continue
+		
+		if column not in cdf.columns:
+			continue
+		
+		# Prepare data for this measure
+		measure_df = cdf[["ID", "Week", column]].copy()
+		measure_df = measure_df.dropna(subset=["ID", "Week", column])
+		
+		# Convert to binary (1 = Yes, 0 = No)
+		measure_df["Response"] = measure_df[column].apply(
+			lambda x: 1 if (x is True or str(x).strip().upper() in ["YES", "TRUE", "1"]) else 0
+		)
+		
+		# Get list of weeks
+		weeks = sorted(measure_df["Week"].unique())
+		
+		if len(weeks) < 2:
+			continue
+		
+		# Perform all pairwise McNemar tests
+		pairwise_comparisons = []
+		
+		from itertools import combinations
+		for week1, week2 in combinations(weeks, 2):
+			# Get data for subjects who have BOTH weeks
+			df_week1 = measure_df[measure_df["Week"] == week1][["ID", "Response"]].rename(columns={"Response": "Week1"})
+			df_week2 = measure_df[measure_df["Week"] == week2][["ID", "Response"]].rename(columns={"Response": "Week2"})
+			
+			# Merge to get paired data (only subjects with both measurements)
+			paired_df = pd.merge(df_week1, df_week2, on="ID")
+			
+			if len(paired_df) < 5:  # Need sufficient paired observations
+				continue
+			
+			# Create 2x2 contingency table for McNemar test
+			# Rows = Week1, Columns = Week2
+			table = pd.crosstab(paired_df["Week1"], paired_df["Week2"])
+			
+			# McNemar test requires a 2x2 table
+			if table.shape != (2, 2):
+				# Add missing rows/columns with zeros
+				for val in [0, 1]:
+					if val not in table.index:
+						table.loc[val] = 0
+					if val not in table.columns:
+						table[val] = 0
+				table = table.sort_index().sort_index(axis=1)
+			
+			# Perform McNemar test
+			try:
+				result = mcnemar(table, exact=False, correction=True)
+				
+				# Calculate proportions for each week
+				prop_week1 = paired_df["Week1"].mean()
+				prop_week2 = paired_df["Week2"].mean()
+				
+				pairwise_comparisons.append({
+					'week1': week1,
+					'week2': week2,
+					'n_paired': len(paired_df),
+					'prop_week1': prop_week1,
+					'prop_week2': prop_week2,
+					'statistic': result.statistic,
+					'p_value': result.pvalue,
+					'table': table
+				})
+			except Exception as e:
+				print(f"  Warning: McNemar test failed for Week {week1} vs Week {week2}: {e}")
+				continue
+		
+		if not pairwise_comparisons:
+			continue
+		
+		# Apply Bonferroni correction
+		n_comparisons = len(pairwise_comparisons)
+		alpha = 0.05
+		bonferroni_alpha = alpha / n_comparisons
+		
+		for comp in pairwise_comparisons:
+			comp['p_adjusted'] = min(comp['p_value'] * n_comparisons, 1.0)
+			comp['significant'] = comp['p_adjusted'] < alpha
+		
+		mcnemar_results[measure_name] = {
+			'comparisons': pairwise_comparisons,
+			'n_comparisons': n_comparisons,
+			'bonferroni_alpha': bonferroni_alpha
+		}
+	
+	return mcnemar_results
+
+
+def display_mcnemar_results(mcnemar_results: dict) -> str:
+	"""
+	Display pairwise McNemar test results in a formatted table.
+	
+	Parameters:
+		mcnemar_results: Dictionary from perform_mcnemar_posthoc_behavioral
+		
+	Returns:
+		Formatted string containing McNemar test results
+	"""
+	if not mcnemar_results:
+		return "\nNo pairwise McNemar tests performed (no significant Week effects found).\n"
+	
+	formatted_output = "\n" + "="*80 + "\n"
+	formatted_output += "PAIRWISE McNEMAR TESTS (POST-HOC FOR SIGNIFICANT WEEK EFFECTS)\n"
+	formatted_output += "="*80 + "\n"
+	formatted_output += "\nMcNemar's test for paired categorical data (same subjects, different weeks)\n"
+	formatted_output += "Bonferroni correction applied for multiple comparisons\n"
+	
+	for measure_name, results in mcnemar_results.items():
+		formatted_output += f"\n{'='*60}\n"
+		formatted_output += f"{measure_name}\n"
+		formatted_output += f"{'='*60}\n"
+		
+		comparisons = results['comparisons']
+		n_comparisons = results['n_comparisons']
+		bonferroni_alpha = results['bonferroni_alpha']
+		
+		formatted_output += f"Number of pairwise comparisons: {n_comparisons}\n"
+		formatted_output += f"Bonferroni-corrected alpha: {bonferroni_alpha:.4f}\n\n"
+		
+		# Create table header
+		formatted_output += f"{'Week 1':<8} {'Week 2':<8} {'N Paired':<10} {'Prop W1':<10} {'Prop W2':<10} {'Chi²':<10} {'p-value':<12} {'p-adj':<12} {'Sig?':<6}\n"
+		formatted_output += "-"*90 + "\n"
+		
+		# Sort comparisons by week1, then week2
+		comparisons_sorted = sorted(comparisons, key=lambda x: (x['week1'], x['week2']))
+		
+		for comp in comparisons_sorted:
+			sig_marker = "***" if comp['significant'] else ""
+			formatted_output += f"{comp['week1']:<8} {comp['week2']:<8} {comp['n_paired']:<10} "
+			formatted_output += f"{comp['prop_week1']:<10.3f} {comp['prop_week2']:<10.3f} "
+			formatted_output += f"{comp['statistic']:<10.3f} {comp['p_value']:<12.4f} "
+			formatted_output += f"{comp['p_adjusted']:<12.4f} {sig_marker:<6}\n"
+		
+		# Summary of significant comparisons
+		significant = [c for c in comparisons if c['significant']]
+		if significant:
+			formatted_output += f"\nSignificant pairwise differences (p-adj < 0.05): {len(significant)}\n"
+			for comp in significant:
+				direction = "increased" if comp['prop_week2'] > comp['prop_week1'] else "decreased"
+				formatted_output += f"  Week {comp['week1']} → Week {comp['week2']}: {direction} "
+				formatted_output += f"({comp['prop_week1']:.1%} → {comp['prop_week2']:.1%}, p-adj = {comp['p_adjusted']:.4f})\n"
+		else:
+			formatted_output += "\nNo significant pairwise differences after Bonferroni correction.\n"
+	
+	formatted_output += "\n" + "="*80 + "\n"
+	
+	print(formatted_output)
+	return formatted_output
 
 
 def perform_two_way_chi_square_behavioral(df: pd.DataFrame) -> dict:
@@ -2949,12 +3412,22 @@ def main() -> None:
 		print("\nAnalyzing weight change measures...")
 		weight_results = perform_two_way_anova_weight(cdf)
 		
+		# Perform Tukey HSD post-hoc tests for significant effects
+		print("\nPerforming Tukey HSD post-hoc tests for significant Week effects...")
+		tukey_results = perform_tukey_hsd_weight(weight_results, cdf)
+		
 		# Perform chi-square tests for behavioral measures
 		print("\nAnalyzing categorical behavioral measures...")
 		behavioral_results = perform_two_way_chi_square_behavioral(cdf)
 		
+		# Perform McNemar post-hoc tests for significant Week effects in behavioral measures
+		print("\nPerforming McNemar post-hoc tests for significant Week effects...")
+		mcnemar_results = perform_mcnemar_posthoc_behavioral(behavioral_results, cdf)
+		
 		# Display comprehensive results
 		results_output = display_two_way_anova_results(weight_results, behavioral_results)
+		tukey_output = display_tukey_hsd_results(tukey_results)
+		mcnemar_output = display_mcnemar_results(mcnemar_results)
 		
 		# Automatically save comprehensive statistical report
 		try:
@@ -2974,6 +3447,14 @@ def main() -> None:
 				
 				# Write the formatted display output (contains all ANOVA results)
 				f.write(results_output)
+				
+				# Write Tukey HSD post-hoc test results
+				f.write("\n\n")
+				f.write(tukey_output)
+				
+				# Write McNemar post-hoc test results
+				f.write("\n\n")
+				f.write(mcnemar_output)
 				
 				# Add summary of significant effects
 				f.write("\n\n" + "="*80 + "\n")
