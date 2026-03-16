@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 import math
 import re
 
@@ -979,10 +979,42 @@ def perform_two_way_anova_weight(df: pd.DataFrame) -> dict:
 		
 		# Descriptive statistics by Sex and Week
 		print(f"\nDescriptive statistics:")
-		group_stats = measure_df.groupby(["Sex", "Week"])["Value"].agg(['mean', 'std', 'count']).reset_index()
+		
+		# Enhanced descriptive statistics
+		def compute_desc_stats(group):
+			n = len(group)
+			mean = group.mean()
+			std = group.std(ddof=1)
+			sem = std / np.sqrt(n) if n > 0 else np.nan
+			ci_lower = mean - 1.96 * sem
+			ci_upper = mean + 1.96 * sem
+			return pd.Series({
+				'mean': mean,
+				'median': group.median(),
+				'std': std,
+				'sem': sem,
+				'ci_lower': ci_lower,
+				'ci_upper': ci_upper,
+				'q25': group.quantile(0.25),
+				'q75': group.quantile(0.75),
+				'min': group.min(),
+				'max': group.max(),
+				'count': n
+			})
+		
+		# Collect statistics for each group
+		stats_data = []
+		for (sex, week), group_data in measure_df.groupby(["Sex", "Week"])["Value"]:
+			stats = compute_desc_stats(group_data)
+			stats['Sex'] = sex
+			stats['Week'] = week
+			stats_data.append(stats)
+		group_stats = pd.DataFrame(stats_data)
+		
 		for _, row in group_stats.iterrows():
 			print(f"  Sex={row['Sex']}, Week={row['Week']}: "
-				  f"M={row['mean']:.3f}, SD={row['std']:.3f}, n={row['count']}")
+				  f"M={row['mean']:.3f}, Mdn={row['median']:.3f}, SD={row['std']:.3f}, "
+				  f"SEM={row['sem']:.3f}, n={row['count']:.0f}")
 		
 		# Check for subjects with data in all weeks
 		subjects_per_week = measure_df.groupby('ID')['Week'].nunique()
@@ -1526,6 +1558,362 @@ def display_tukey_hsd_results(tukey_results: dict) -> str:
 	lines.append("")
 	
 	# Join lines and print
+	formatted_output = "\n".join(lines)
+	print(formatted_output)
+	
+	return formatted_output
+
+
+def perform_mixed_anova_posthoc_weight(data: pd.DataFrame, dv: str, within: str, between_factors: list, subject: str, 
+                                        alpha: float = 0.05, correction: str = 'fdr_bh') -> Dict:
+	"""
+	Perform proper post-hoc tests for mixed ANOVA with repeated measures (weight data).
+	
+	This function performs comprehensive post-hoc analyses for mixed ANOVA with Time as within-subjects
+	factor and Sex/Week as between-subjects factors:
+	1. Within-subjects pairwise comparisons (across time points)
+	2. Between-subjects pairwise comparisons (Week and Sex)
+	3. Simple effects analysis (Time effect at each Week or Sex level)
+	
+	Parameters:
+		data: DataFrame with long-format data
+		dv: Dependent variable column name (e.g., 'Weight')
+		within: Within-subjects factor column (e.g., 'Day')
+		between_factors: List of between-subjects factors (e.g., ['Sex', 'Week'])
+		subject: Subject identifier column (e.g., 'ID')
+		alpha: Significance level (default 0.05)
+		correction: Multiple comparison correction method ('fdr_bh', 'bonferroni', 'holm')
+	
+	Returns:
+		Dictionary with post-hoc test results
+	"""
+	import pingouin as pg
+	from scipy import stats
+	from statsmodels.stats.multitest import multipletests
+	
+	results = {
+		'within_pairwise': None,
+		'between_pairwise_week': None,
+		'between_pairwise_sex': None,
+		'simple_effects_by_week': None,
+		'simple_effects_by_sex': None,
+		'correction_method': correction,
+		'alpha': alpha
+	}
+	
+	# 1. Within-subjects pairwise comparisons (Time points, collapsed across groups)
+	try:
+		within_pw = pg.pairwise_tests(
+			data=data,
+			dv=dv,
+			within=within,
+			subject=subject,
+			parametric=True,
+			padjust=correction,
+			effsize='hedges'
+		)
+		results['within_pairwise'] = within_pw
+	except Exception as e:
+		results['within_pairwise'] = f"Error in within-subjects pairwise: {str(e)}"
+	
+	# 2. Between-subjects pairwise comparisons (Week and Sex, collapsed across Time)
+	# First, average across time for each subject
+	between_data = data.groupby([subject] + between_factors)[dv].mean().reset_index()
+	
+	# Week comparisons
+	if 'Week' in between_factors:
+		try:
+			week_pw = pg.pairwise_tests(
+				data=between_data,
+				dv=dv,
+				between='Week',
+				parametric=True,
+				padjust=correction,
+				effsize='cohen'
+			)
+			results['between_pairwise_week'] = week_pw
+		except Exception as e:
+			results['between_pairwise_week'] = f"Error in Week pairwise: {str(e)}"
+	
+	# Sex comparisons
+	if 'Sex' in between_factors:
+		try:
+			sex_levels = between_data['Sex'].unique()
+			if len(sex_levels) == 2:
+				# For 2 groups, do independent t-test
+				group1 = between_data[between_data['Sex'] == sex_levels[0]][dv]
+				group2 = between_data[between_data['Sex'] == sex_levels[1]][dv]
+				t_stat, p_val = stats.ttest_ind(group1, group2)
+				
+				# Calculate effect size (Cohen's d)
+				pooled_std = np.sqrt(((len(group1) - 1) * group1.std()**2 + 
+									   (len(group2) - 1) * group2.std()**2) / 
+									  (len(group1) + len(group2) - 2))
+				cohens_d = (group1.mean() - group2.mean()) / pooled_std if pooled_std > 0 else 0
+				
+				sex_pw = pd.DataFrame({
+					'Contrast': [f"{sex_levels[0]} vs {sex_levels[1]}"],
+					'A': [sex_levels[0]],
+					'B': [sex_levels[1]],
+					'T': [t_stat],
+					'p-unc': [p_val],
+					'p-corr': [p_val],
+					"cohen's d": [cohens_d],
+					'n1': [len(group1)],
+					'n2': [len(group2)]
+				})
+				results['between_pairwise_sex'] = sex_pw
+		except Exception as e:
+			results['between_pairwise_sex'] = f"Error in Sex pairwise: {str(e)}"
+	
+	# 3. Simple effects: Time effect at each Week level
+	if 'Week' in between_factors:
+		try:
+			week_levels = data['Week'].unique()
+			simple_effects_week = []
+			
+			for week in week_levels:
+				week_data = data[data['Week'] == week]
+				
+				# Perform repeated measures ANOVA for this week
+				time_levels = week_data[within].unique()
+				if len(time_levels) >= 2:
+					rm_aov = pg.rm_anova(
+						data=week_data,
+						dv=dv,
+						within=within,
+						subject=subject,
+						detailed=True
+					)
+					
+					simple_effects_week.append({
+						'Week': week,
+						'F': rm_aov.loc[0, 'F'],
+						'df1': rm_aov.loc[0, 'ddof1'],
+						'df2': rm_aov.loc[0, 'ddof2'],
+						'p-unc': rm_aov.loc[0, 'p-unc'],
+						'n_subjects': week_data[subject].nunique(),
+						'n_time_points': len(time_levels)
+					})
+			
+			if simple_effects_week:
+				simple_effects_week_df = pd.DataFrame(simple_effects_week)
+				
+				# Apply multiple comparison correction
+				if len(simple_effects_week_df) > 1:
+					_, p_corrected, _, _ = multipletests(
+						simple_effects_week_df['p-unc'],
+						alpha=alpha,
+						method=correction
+					)
+					simple_effects_week_df['p-corr'] = p_corrected
+				else:
+					simple_effects_week_df['p-corr'] = simple_effects_week_df['p-unc']
+				
+				simple_effects_week_df['significant'] = simple_effects_week_df['p-corr'] < alpha
+				results['simple_effects_by_week'] = simple_effects_week_df
+				
+		except Exception as e:
+			results['simple_effects_by_week'] = f"Error in Week simple effects: {str(e)}"
+	
+	# 4. Simple effects: Time effect at each Sex level
+	if 'Sex' in between_factors:
+		try:
+			sex_levels = data['Sex'].unique()
+			simple_effects_sex = []
+			
+			for sex in sex_levels:
+				sex_data = data[data['Sex'] == sex]
+				
+				# Perform repeated measures ANOVA for this sex
+				time_levels = sex_data[within].unique()
+				if len(time_levels) >= 2:
+					rm_aov = pg.rm_anova(
+						data=sex_data,
+						dv=dv,
+						within=within,
+						subject=subject,
+						detailed=True
+					)
+					
+					simple_effects_sex.append({
+						'Sex': sex,
+						'F': rm_aov.loc[0, 'F'],
+						'df1': rm_aov.loc[0, 'ddof1'],
+						'df2': rm_aov.loc[0, 'ddof2'],
+						'p-unc': rm_aov.loc[0, 'p-unc'],
+						'n_subjects': sex_data[subject].nunique(),
+						'n_time_points': len(time_levels)
+					})
+			
+			if simple_effects_sex:
+				simple_effects_sex_df = pd.DataFrame(simple_effects_sex)
+				
+				# Apply multiple comparison correction
+				if len(simple_effects_sex_df) > 1:
+					_, p_corrected, _, _ = multipletests(
+						simple_effects_sex_df['p-unc'],
+						alpha=alpha,
+						method=correction
+					)
+					simple_effects_sex_df['p-corr'] = p_corrected
+				else:
+					simple_effects_sex_df['p-corr'] = simple_effects_sex_df['p-unc']
+				
+				simple_effects_sex_df['significant'] = simple_effects_sex_df['p-corr'] < alpha
+				results['simple_effects_by_sex'] = simple_effects_sex_df
+				
+		except Exception as e:
+			results['simple_effects_by_sex'] = f"Error in Sex simple effects: {str(e)}"
+	
+	return results
+
+
+def display_posthoc_weight_results(posthoc_results: Dict, measure_name: str) -> str:
+	"""
+	Display post-hoc test results for weight mixed ANOVA in formatted output.
+	
+	Parameters:
+		posthoc_results: Dictionary from perform_mixed_anova_posthoc_weight
+		measure_name: Name of the measure being analyzed
+		
+	Returns:
+		Formatted string with post-hoc results
+	"""
+	lines = []
+	lines.append("\n" + "=" * 80)
+	lines.append(f"POST-HOC TESTS FOR: {measure_name.upper()}")
+	lines.append("=" * 80)
+	lines.append(f"Correction method: {posthoc_results['correction_method']}")
+	lines.append(f"Alpha level: {posthoc_results['alpha']}")
+	lines.append("")
+	
+	# 1. Within-subjects pairwise (Time comparisons)
+	lines.append("1. WITHIN-SUBJECTS PAIRWISE COMPARISONS (Days/Time points)")
+	lines.append("-" * 80)
+	within_pw = posthoc_results['within_pairwise']
+	if isinstance(within_pw, str):
+		lines.append(f"   {within_pw}")
+	elif within_pw is not None and not within_pw.empty:
+		lines.append("   Pairwise comparisons across time points (repeated measures):")
+		lines.append("")
+		for idx, row in within_pw.iterrows():
+			contrast = f"   {row['A']} vs {row['B']}"
+			lines.append(f"{contrast}")
+			lines.append(f"      T-statistic: {row['T']:.4f}")
+			lines.append(f"      p-uncorrected: {row['p-unc']:.6f}")
+			lines.append(f"      p-corrected: {row.get('p-corr', row['p-unc']):.6f}")
+			lines.append(f"      Effect size (Hedges' g): {row.get('hedges', 0):.4f}")
+			if row.get('p-corr', row['p-unc']) < posthoc_results['alpha']:
+				lines.append(f"      *** SIGNIFICANT ***")
+			lines.append("")
+	else:
+		lines.append("   No within-subjects comparisons available")
+	
+	lines.append("")
+	
+	# 2. Between-subjects pairwise (Week)
+	lines.append("2. BETWEEN-SUBJECTS PAIRWISE COMPARISONS (Week)")
+	lines.append("-" * 80)
+	week_pw = posthoc_results['between_pairwise_week']
+	if isinstance(week_pw, str):
+		lines.append(f"   {week_pw}")
+	elif week_pw is not None and not week_pw.empty:
+		lines.append("   Comparison between Week levels (collapsed across Time):")
+		lines.append("")
+		for idx, row in week_pw.iterrows():
+			contrast = f"   {row['A']} vs {row['B']}"
+			lines.append(f"{contrast}")
+			lines.append(f"      T-statistic: {row['T']:.4f}")
+			lines.append(f"      p-uncorrected: {row['p-unc']:.6f}")
+			lines.append(f"      p-corrected: {row.get('p-corr', row['p-unc']):.6f}")
+			cohens_d = row.get("cohen's d", row.get('cohen', 0))
+			lines.append(f"      Effect size (Cohen's d): {cohens_d:.4f}")
+			if row.get('p-corr', row['p-unc']) < posthoc_results['alpha']:
+				lines.append(f"      *** SIGNIFICANT ***")
+			lines.append("")
+	else:
+		lines.append("   No Week comparisons available")
+	
+	lines.append("")
+	
+	# 3. Between-subjects pairwise (Sex)
+	lines.append("3. BETWEEN-SUBJECTS PAIRWISE COMPARISONS (Sex)")
+	lines.append("-" * 80)
+	sex_pw = posthoc_results['between_pairwise_sex']
+	if isinstance(sex_pw, str):
+		lines.append(f"   {sex_pw}")
+	elif sex_pw is not None and not sex_pw.empty:
+		lines.append("   Comparison between sexes (collapsed across Time):")
+		lines.append("")
+		for idx, row in sex_pw.iterrows():
+			contrast = f"   {row['A']} vs {row['B']}"
+			lines.append(f"{contrast}")
+			lines.append(f"      T-statistic: {row['T']:.4f}")
+			lines.append(f"      p-uncorrected: {row['p-unc']:.6f}")
+			lines.append(f"      p-corrected: {row.get('p-corr', row['p-unc']):.6f}")
+			cohens_d = row.get("cohen's d", row.get('cohen', 0))
+			lines.append(f"      Effect size (Cohen's d): {cohens_d:.4f}")
+			lines.append(f"      n1: {row.get('n1', 'N/A')}, n2: {row.get('n2', 'N/A')}")
+			if row.get('p-corr', row['p-unc']) < posthoc_results['alpha']:
+				lines.append(f"      *** SIGNIFICANT ***")
+			lines.append("")
+	else:
+		lines.append("   No Sex comparisons available")
+	
+	lines.append("")
+	
+	# 4. Simple effects by Week
+	lines.append("4. SIMPLE EFFECTS ANALYSIS (Time effect at each Week level)")
+	lines.append("-" * 80)
+	simple_week = posthoc_results['simple_effects_by_week']
+	if isinstance(simple_week, str):
+		lines.append(f"   {simple_week}")
+	elif simple_week is not None and not simple_week.empty:
+		lines.append("   Time effect separately for each Week level:")
+		lines.append("")
+		for idx, row in simple_week.iterrows():
+			lines.append(f"   WEEK: {row['Week']}")
+			lines.append(f"      F({row['df1']:.0f}, {row['df2']:.0f}) = {row['F']:.4f}")
+			lines.append(f"      p-uncorrected: {row['p-unc']:.6f}")
+			lines.append(f"      p-corrected: {row['p-corr']:.6f}")
+			lines.append(f"      n subjects: {row['n_subjects']}")
+			if row['significant']:
+				lines.append(f"      *** SIGNIFICANT Time effect for {row['Week']} ***")
+			else:
+				lines.append(f"      Not significant")
+			lines.append("")
+	else:
+		lines.append("   No Week simple effects analysis available")
+	
+	lines.append("")
+	
+	# 5. Simple effects by Sex
+	lines.append("5. SIMPLE EFFECTS ANALYSIS (Time effect at each Sex level)")
+	lines.append("-" * 80)
+	simple_sex = posthoc_results['simple_effects_by_sex']
+	if isinstance(simple_sex, str):
+		lines.append(f"   {simple_sex}")
+	elif simple_sex is not None and not simple_sex.empty:
+		lines.append("   Time effect separately for each sex:")
+		lines.append("")
+		for idx, row in simple_sex.iterrows():
+			lines.append(f"   SEX: {row['Sex']}")
+			lines.append(f"      F({row['df1']:.0f}, {row['df2']:.0f}) = {row['F']:.4f}")
+			lines.append(f"      p-uncorrected: {row['p-unc']:.6f}")
+			lines.append(f"      p-corrected: {row['p-corr']:.6f}")
+			lines.append(f"      n subjects: {row['n_subjects']}")
+			if row['significant']:
+				lines.append(f"      *** SIGNIFICANT Time effect for {row['Sex']} ***")
+			else:
+				lines.append(f"      Not significant")
+			lines.append("")
+	else:
+		lines.append("   No Sex simple effects analysis available")
+	
+	lines.append("=" * 80)
+	lines.append("")
+	
 	formatted_output = "\n".join(lines)
 	print(formatted_output)
 	
@@ -2342,6 +2730,42 @@ def display_two_way_anova_results(weight_results: dict, behavioral_results: dict
 		if 'type' in interaction and 'VIOLATED' in interaction['type']:
 			lines.append(f"  WARNING: {interaction['type']}")
 		lines.append("")
+		
+		# Descriptive Statistics
+		if 'group_stats' in results and not results['group_stats'].empty:
+			lines.append("Descriptive Statistics by Sex and Week:")
+			lines.append("-"*60)
+			
+			# First table: Basic stats
+			lines.append(f"{'Sex':<8} {'Week':<6} {'N':<4} {'Mean':<10} {'Median':<10} {'Std':<10} {'SEM':<10}")
+			lines.append("-" * 60)
+			
+			group_stats_df = results['group_stats']
+			for _, row in group_stats_df.iterrows():
+				lines.append(f"{row['Sex']:<8} "
+							f"{int(row['Week']):<6} "
+							f"{int(row['count']):<4} "
+							f"{row['mean']:<10.2f} "
+							f"{row.get('median', np.nan):<10.2f} "
+							f"{row['std']:<10.2f} "
+							f"{row.get('sem', np.nan):<10.2f}")
+			
+			lines.append("")
+			lines.append("95% Confidence Intervals and Range:")
+			lines.append(f"{'Sex':<8} {'Week':<6} {'CI Lower':<12} {'CI Upper':<12} {'Q25':<10} {'Q75':<10} {'Min':<10} {'Max':<10}")
+			lines.append("-" * 80)
+			
+			for _, row in group_stats_df.iterrows():
+				lines.append(f"{row['Sex']:<8} "
+							f"{int(row['Week']):<6} "
+							f"{row.get('ci_lower', np.nan):<12.2f} "
+							f"{row.get('ci_upper', np.nan):<12.2f} "
+							f"{row.get('q25', np.nan):<10.2f} "
+							f"{row.get('q75', np.nan):<10.2f} "
+							f"{row.get('min', np.nan):<10.2f} "
+							f"{row.get('max', np.nan):<10.2f}")
+			lines.append("")
+		
 		lines.append("")
 	
 	# Behavioral measures (Cochran's Q and Chi-square)
