@@ -150,32 +150,13 @@ def compute_KDE_normalizations(df: pd.DataFrame, sensor_cols: List[str], sensor_
     return df_with_normalizations
 
 
-def compute_dynamic_thresholds(df: pd.DataFrame, sensor_cols: List[str], z_threshold: float = 4.0, verbose: bool = False) -> pd.Series:
-    """Compute dynamic thresholds for event detection."""
-    thresholds = {}
+def compute_fixed_thresholds(sensor_cols: List[str], fixed_threshold: float = 0.01) -> pd.Series:
+    """Compute fixed thresholds for event detection.
     
-    for sensor_col in sensor_cols:
-        deviation_col = f"{sensor_col}_deviation"
-        if deviation_col in df.columns:
-            dev_values = df[deviation_col].dropna()
-            if len(dev_values) > 0:
-                mean_dev = dev_values.mean()
-                std_dev = dev_values.std()
-                threshold = mean_dev + (z_threshold * std_dev)
-                thresholds[sensor_col] = threshold
-                
-                # Verbose output for troubleshooting
-                if verbose and threshold > 20:  # Flag unusually high thresholds
-                    print(f"\n  *** HIGH THRESHOLD WARNING for {sensor_col} ***")
-                    print(f"      Threshold: {threshold:.2f}")
-                    print(f"      Mean deviation: {mean_dev:.2f}")
-                    print(f"      Std deviation: {std_dev:.2f}")
-                    print(f"      Formula: {mean_dev:.2f} + ({z_threshold} * {std_dev:.2f}) = {threshold:.2f}")
-            else:
-                thresholds[sensor_col] = np.nan
-        else:
-            thresholds[sensor_col] = np.nan
-    
+    Uses the EXACT lick detection algorithm from lick_detection.py.
+    Fixed threshold of 0.01 for all sensors (not dynamic z-score based).
+    """
+    thresholds = {sensor_col: fixed_threshold for sensor_col in sensor_cols}
     return pd.Series(thresholds)
 
 

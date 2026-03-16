@@ -140,29 +140,6 @@ def compute_KDE_normalizations(df: pd.DataFrame, sensor_cols: List[str], sensor_
     
     return df_with_normalizations
 
-
-# Function kept for backward compatibility but not used
-def compute_dynamic_thresholds(df: pd.DataFrame, sensor_cols: List[str], z_threshold: float = 4.0) -> pd.Series:
-    """Compute dynamic thresholds for event detection (DEPRECATED - use fixed threshold)."""
-    thresholds = {}
-    
-    for sensor_col in sensor_cols:
-        deviation_col = f"{sensor_col}_deviation"
-        if deviation_col in df.columns:
-            dev_values = df[deviation_col].dropna()
-            if len(dev_values) > 0:
-                mean_dev = dev_values.mean()
-                std_dev = dev_values.std()
-                threshold = mean_dev + (z_threshold * std_dev)
-                thresholds[sensor_col] = threshold
-            else:
-                thresholds[sensor_col] = np.nan
-        else:
-            thresholds[sensor_col] = np.nan
-    
-    return pd.Series(thresholds)
-
-
 def detect_events_above_threshold(df: pd.DataFrame, sensor_cols: List[str], thresholds: pd.Series) -> pd.DataFrame:
     """Detect time points where deviation exceeds the threshold for each sensor.
     
