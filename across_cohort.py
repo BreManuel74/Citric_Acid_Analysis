@@ -583,14 +583,44 @@ def perform_cross_cohort_mixed_anova(
     
     # Descriptive statistics by group
     print(f"\nDescriptive Statistics by Group:")
-    group_stats = analysis_df.groupby(['CA (%)', 'Sex'])[measure].agg(['count', 'mean', 'std']).reset_index()
+    
+    # Enhanced descriptive statistics
+    def compute_desc_stats(group):
+        n = len(group)
+        mean = group.mean()
+        std = group.std(ddof=1)
+        sem = std / np.sqrt(n) if n > 0 else np.nan
+        ci_lower = mean - 1.96 * sem
+        ci_upper = mean + 1.96 * sem
+        return pd.Series({
+            'count': n,
+            'mean': mean,
+            'median': group.median(),
+            'std': std,
+            'sem': sem,
+            'ci_lower': ci_lower,
+            'ci_upper': ci_upper,
+            'q25': group.quantile(0.25),
+            'q75': group.quantile(0.75),
+            'min': group.min(),
+            'max': group.max()
+        })
+    
+    # Collect statistics for each group
+    stats_data = []
+    for (ca_val, sex_val), group_data in analysis_df.groupby(['CA (%)', 'Sex'])[measure]:
+        stats = compute_desc_stats(group_data)
+        stats['CA (%)'] = ca_val
+        stats['Sex'] = sex_val
+        stats_data.append(stats)
+    group_stats = pd.DataFrame(stats_data)
+    
     for _, row in group_stats.iterrows():
-        ca_val = row['CA (%)']
-        sex_val = row['Sex']
-        count = row['count']
-        mean_val = row['mean']
-        std_val = row['std']
-        print(f"  CA%={ca_val}, Sex={sex_val}: n_obs={count}, M={mean_val:.3f}, SD={std_val:.3f}")
+        print(f"  CA%={row['CA (%)']}, Sex={row['Sex']}: "
+              f"n_obs={row['count']:.0f}, M={row['mean']:.3f}, Mdn={row['median']:.3f}, "
+              f"SD={row['std']:.3f}, SEM={row['sem']:.3f}")
+        print(f"    95% CI: [{row['ci_lower']:.3f}, {row['ci_upper']:.3f}], "
+              f"IQR: [{row['q25']:.3f}, {row['q75']:.3f}]")
     
     # Check data completeness
     subjects_per_day = analysis_df.groupby('ID')['Day'].nunique()
@@ -665,6 +695,82 @@ def perform_cross_cohort_mixed_anova(
         # Format results
         p_col = 'p-unc' if 'p-unc' in between_aov.columns else 'p_unc'
         
+        # Post-hoc pairwise comparisons
+        print("\n" + "="*80)
+        print("POST-HOC PAIRWISE COMPARISONS")
+        print("="*80)
+        
+        posthoc_results = {}
+        
+        # Check for significant main effects and interactions
+        for source in ['CA (%)', 'Sex', 'CA (%) * Sex']:
+            if source in between_aov['Source'].values:
+                row = between_aov[between_aov['Source'] == source].iloc[0]
+                p_val = row[p_col]
+                
+                if p_val < 0.05:
+                    print(f"\n{source} is significant (p = {p_val:.4f}). Running pairwise comparisons...")
+                    
+                    try:
+                        if source == 'CA (%)':
+                            # Pairwise comparisons for CA%
+                            pw_ca = pg.pairwise_tests(
+                                data=subject_means,
+                                dv=measure,
+                                between='CA (%)',
+                                padjust='bonf'
+                            )
+                            print("\nPairwise comparisons for CA%:")
+                            print(pw_ca.to_string())
+                            posthoc_results['CA (%)'] = pw_ca
+                            
+                        elif source == 'Sex':
+                            # Pairwise comparisons for Sex (if more than 2 levels)
+                            pw_sex = pg.pairwise_tests(
+                                data=subject_means,
+                                dv=measure,
+                                between='Sex',
+                                padjust='bonf'
+                            )
+                            print("\nPairwise comparisons for Sex:")
+                            print(pw_sex.to_string())
+                            posthoc_results['Sex'] = pw_sex
+                            
+                        elif source == 'CA (%) * Sex':
+                            # Simple main effects for interaction
+                            print("\nSimple main effects of CA% at each Sex level:")
+                            for sex_level in subject_means['Sex'].unique():
+                                sex_data = subject_means[subject_means['Sex'] == sex_level]
+                                if sex_data['CA (%)'].nunique() > 1:
+                                    pw_ca_at_sex = pg.pairwise_tests(
+                                        data=sex_data,
+                                        dv=measure,
+                                        between='CA (%)',
+                                        padjust='bonf'
+                                    )
+                                    print(f"\n  CA% effect at Sex={sex_level}:")
+                                    print(pw_ca_at_sex.to_string())
+                                    posthoc_results[f'CA (%) at Sex={sex_level}'] = pw_ca_at_sex
+                            
+                            print("\nSimple main effects of Sex at each CA% level:")
+                            for ca_level in subject_means['CA (%)'].unique():
+                                ca_data = subject_means[subject_means['CA (%)'] == ca_level]
+                                if ca_data['Sex'].nunique() > 1:
+                                    pw_sex_at_ca = pg.pairwise_tests(
+                                        data=ca_data,
+                                        dv=measure,
+                                        between='Sex',
+                                        padjust='bonf'
+                                    )
+                                    print(f"\n  Sex effect at CA%={ca_level}:")
+                                    print(pw_sex_at_ca.to_string())
+                                    posthoc_results[f'Sex at CA%={ca_level}'] = pw_sex_at_ca
+                    
+                    except Exception as e:
+                        print(f"  [WARNING] Post-hoc test failed: {e}")
+                else:
+                    print(f"\n{source} is not significant (p = {p_val:.4f}). Skipping pairwise comparisons.")
+        
         print("\n" + "="*80)
         print("FORMATTED RESULTS")
         print("="*80)
@@ -720,6 +826,8 @@ def perform_cross_cohort_mixed_anova(
             'n_days': len(time_points),
             'mixed_anova_table': aov,
             'between_anova_table': between_aov,
+            'posthoc_tests': posthoc_results,
+            'descriptive_stats': group_stats,
             'data': analysis_df
         }
         
@@ -828,14 +936,44 @@ def perform_between_subjects_anova(
     
     # Descriptive statistics
     print(f"\nDescriptive Statistics by Group:")
-    group_stats = analysis_df.groupby(['CA (%)', 'Sex'])[measure].agg(['count', 'mean', 'std']).reset_index()
+    
+    # Enhanced descriptive statistics
+    def compute_desc_stats(group):
+        n = len(group)
+        mean = group.mean()
+        std = group.std(ddof=1)
+        sem = std / np.sqrt(n) if n > 0 else np.nan
+        ci_lower = mean - 1.96 * sem
+        ci_upper = mean + 1.96 * sem
+        return pd.Series({
+            'count': n,
+            'mean': mean,
+            'median': group.median(),
+            'std': std,
+            'sem': sem,
+            'ci_lower': ci_lower,
+            'ci_upper': ci_upper,
+            'q25': group.quantile(0.25),
+            'q75': group.quantile(0.75),
+            'min': group.min(),
+            'max': group.max()
+        })
+    
+    # Collect statistics for each group
+    stats_data = []
+    for (ca_val, sex_val), group_data in analysis_df.groupby(['CA (%)', 'Sex'])[measure]:
+        stats = compute_desc_stats(group_data)
+        stats['CA (%)'] = ca_val
+        stats['Sex'] = sex_val
+        stats_data.append(stats)
+    group_stats = pd.DataFrame(stats_data)
+    
     for _, row in group_stats.iterrows():
-        ca_val = row['CA (%)']
-        sex_val = row['Sex']
-        count = row['count']
-        mean_val = row['mean']
-        std_val = row['std']
-        print(f"  CA%={ca_val}, Sex={sex_val}: n={count}, M={mean_val:.3f}, SD={std_val:.3f}")
+        print(f"  CA%={row['CA (%)']}, Sex={row['Sex']}: "
+              f"n={row['count']:.0f}, M={row['mean']:.3f}, Mdn={row['median']:.3f}, "
+              f"SD={row['std']:.3f}, SEM={row['sem']:.3f}")
+        print(f"    95% CI: [{row['ci_lower']:.3f}, {row['ci_upper']:.3f}], "
+              f"IQR: [{row['q25']:.3f}, {row['q75']:.3f}]")
     
     print(f"\nStep 5: Running 2-way between-subjects ANOVA (Type {ss_type} SS)...")
     print("  Design: CA% (between) × Sex (between)")
@@ -863,6 +1001,83 @@ def perform_between_subjects_anova(
         
         # Format results
         p_col = 'p-unc' if 'p-unc' in aov.columns else 'p_unc'
+        
+        # Post-hoc pairwise comparisons
+        print("\n" + "="*80)
+        print("POST-HOC PAIRWISE COMPARISONS")
+        print("="*80)
+        
+        posthoc_results = {}
+        
+        # Check for significant main effects and interactions
+        for source in ['CA (%)', 'Sex', 'CA (%) * Sex']:
+            if source in aov['Source'].values:
+                row = aov[aov['Source'] == source].iloc[0]
+                p_val = row[p_col]
+                
+                if p_val < 0.05:
+                    print(f"\n{source} is significant (p = {p_val:.4f}). Running pairwise comparisons...")
+                    
+                    try:
+                        if source == 'CA (%)':
+                            # Pairwise comparisons for CA%
+                            pw_ca = pg.pairwise_tests(
+                                data=analysis_df_clean,
+                                dv=measure,
+                                between='CA_percent',
+                                padjust='bonf'
+                            )
+                            # Rename back for clarity
+                            print("\nPairwise comparisons for CA%:")
+                            print(pw_ca.to_string())
+                            posthoc_results['CA (%)'] = pw_ca
+                            
+                        elif source == 'Sex':
+                            # Pairwise comparisons for Sex
+                            pw_sex = pg.pairwise_tests(
+                                data=analysis_df_clean,
+                                dv=measure,
+                                between='Sex',
+                                padjust='bonf'
+                            )
+                            print("\nPairwise comparisons for Sex:")
+                            print(pw_sex.to_string())
+                            posthoc_results['Sex'] = pw_sex
+                            
+                        elif source == 'CA (%) * Sex':
+                            # Simple main effects for interaction
+                            print("\nSimple main effects of CA% at each Sex level:")
+                            for sex_level in analysis_df_clean['Sex'].unique():
+                                sex_data = analysis_df_clean[analysis_df_clean['Sex'] == sex_level]
+                                if sex_data['CA_percent'].nunique() > 1:
+                                    pw_ca_at_sex = pg.pairwise_tests(
+                                        data=sex_data,
+                                        dv=measure,
+                                        between='CA_percent',
+                                        padjust='bonf'
+                                    )
+                                    print(f"\n  CA% effect at Sex={sex_level}:")
+                                    print(pw_ca_at_sex.to_string())
+                                    posthoc_results[f'CA (%) at Sex={sex_level}'] = pw_ca_at_sex
+                            
+                            print("\nSimple main effects of Sex at each CA% level:")
+                            for ca_level in analysis_df['CA (%)'].unique():
+                                ca_data = analysis_df_clean[analysis_df_clean['CA_percent'] == ca_level]
+                                if ca_data['Sex'].nunique() > 1:
+                                    pw_sex_at_ca = pg.pairwise_tests(
+                                        data=ca_data,
+                                        dv=measure,
+                                        between='Sex',
+                                        padjust='bonf'
+                                    )
+                                    print(f"\n  Sex effect at CA%={ca_level}:")
+                                    print(pw_sex_at_ca.to_string())
+                                    posthoc_results[f'Sex at CA%={ca_level}'] = pw_sex_at_ca
+                    
+                    except Exception as e:
+                        print(f"  [WARNING] Post-hoc test failed: {e}")
+                else:
+                    print(f"\n{source} is not significant (p = {p_val:.4f}). Skipping pairwise comparisons.")
         
         print("\n" + "="*80)
         print("FORMATTED RESULTS")
@@ -897,6 +1112,8 @@ def perform_between_subjects_anova(
             'ss_type': ss_type,
             'n_subjects': analysis_df['ID'].nunique(),
             'anova_table': aov,
+            'posthoc_tests': posthoc_results,
+            'descriptive_stats': group_stats,
             'data': analysis_df
         }
         
@@ -1061,6 +1278,464 @@ def perform_daily_between_subjects_anova(
         'results_table': results_df,
         'all_days': all_days
     }
+
+
+# =============================================================================
+# STRATIFIED MIXED ANOVA (HOLDING SEX OR CA% CONSTANT)
+# =============================================================================
+
+def perform_mixed_anova_sex_stratified(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    sex: str,
+    measure: str = "Total Change",
+    time_points: Optional[List[int]] = None
+) -> Dict:
+    """
+    Perform 2-Way Mixed ANOVA: Time (within) × CA% (between), holding Sex constant.
+    
+    This analyzes longitudinal weight changes for ONE sex at a time, testing:
+    - Time (Day): Within-subjects factor (repeated measures over days)
+    - CA%: Between-subjects factor (different cohorts)
+    
+    By stratifying by sex, this reveals whether the Time × CA% interaction differs
+    between males and females.
+    
+    Parameters:
+        cohort_dfs: Dictionary mapping cohort labels to DataFrames
+        sex: Sex to analyze ("M" or "F")
+        measure: Weight measure to analyze ('Total Change', 'Daily Change', 'Weight')
+        time_points: Optional list of specific days to include (None = all days)
+        
+    Returns:
+        Dictionary with ANOVA results for the specified sex
+    """
+    print("\n" + "="*80)
+    print(f"SEX-STRATIFIED MIXED ANOVA: TIME (WITHIN) × CA% (BETWEEN)")
+    print(f"Analyzing: {'MALES' if sex == 'M' else 'FEMALES'} only")
+    print("="*80)
+    
+    if not HAS_PINGOUIN:
+        print("\n[ERROR] pingouin is required for mixed ANOVA")
+        return {}
+    
+    # Validate sex parameter
+    if sex not in ["M", "F"]:
+        raise ValueError(f"sex must be 'M' or 'F', got '{sex}'")
+    
+    # Combine cohorts
+    print("\nStep 1: Combining and filtering data...")
+    combined_df = combine_cohorts_for_analysis(cohort_dfs)
+    combined_df = clean_cohort(combined_df)
+    
+    if 'Day' not in combined_df.columns:
+        combined_df = add_day_column_across_cohorts(combined_df)
+    
+    # Filter to specified sex
+    required_cols = ['ID', 'Day', 'Sex', 'CA (%)', measure]
+    missing_cols = [col for col in required_cols if col not in combined_df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+    
+    analysis_df = combined_df[combined_df['Sex'] == sex][required_cols].copy()
+    analysis_df = analysis_df.dropna()
+    
+    if len(analysis_df) == 0:
+        print(f"\n[ERROR] No data available for Sex={sex}")
+        return {}
+    
+    # Filter to specific time points if requested
+    if time_points is not None:
+        analysis_df = analysis_df[analysis_df['Day'].isin(time_points)]
+        print(f"  Filtered to days: {sorted(time_points)}")
+    else:
+        time_points = sorted(analysis_df['Day'].unique())
+    
+    print(f"\nAnalyzing: {measure} ({'Males' if sex == 'M' else 'Females'})")
+    print(f"  Total observations: {len(analysis_df)}")
+    print(f"  Unique animals: {analysis_df['ID'].nunique()}")
+    print(f"  CA% levels: {sorted(analysis_df['CA (%)'].unique())}")
+    print(f"  Days: {len(time_points)} days")
+    
+    # Check completeness
+    subjects_per_day = analysis_df.groupby('ID')['Day'].nunique()
+    total_days = analysis_df['Day'].nunique()
+    complete_subjects = (subjects_per_day == total_days).sum()
+    incomplete_subjects = (subjects_per_day < total_days).sum()
+    
+    if incomplete_subjects > 0:
+        print(f"\n[WARNING] {incomplete_subjects} animals have incomplete time series")
+        print(f"  Complete: {complete_subjects}, Incomplete: {incomplete_subjects}")
+    
+    # Check CA% group sizes
+    animals_per_ca = analysis_df.groupby('CA (%)')['ID'].nunique()
+    print(f"\nAnimals per CA% group:")
+    for ca, n in animals_per_ca.items():
+        print(f"  {ca}%: {n} animals")
+    
+    if any(animals_per_ca < 2):
+        print(f"\n[WARNING] Some CA% groups have fewer than 2 animals")
+    
+    # Descriptive statistics
+    print(f"\nDescriptive Statistics by CA% Group:")
+    
+    def compute_desc_stats(group):
+        n = len(group)
+        mean = group.mean()
+        std = group.std(ddof=1)
+        sem = std / np.sqrt(n) if n > 0 else np.nan
+        ci_lower = mean - 1.96 * sem
+        ci_upper = mean + 1.96 * sem
+        return pd.Series({
+            'count': n,
+            'mean': mean,
+            'median': group.median(),
+            'std': std,
+            'sem': sem,
+            'ci_lower': ci_lower,
+            'ci_upper': ci_upper,
+            'q25': group.quantile(0.25),
+            'q75': group.quantile(0.75),
+            'min': group.min(),
+            'max': group.max()
+        })
+    
+    # Collect statistics for each CA% group
+    stats_data = []
+    for ca_val, group_data in analysis_df.groupby('CA (%)')[measure]:
+        stats = compute_desc_stats(group_data)
+        stats['CA (%)'] = ca_val
+        stats_data.append(stats)
+    group_stats = pd.DataFrame(stats_data)
+    
+    for _, row in group_stats.iterrows():
+        print(f"  CA%={row['CA (%)']}: "
+              f"n_obs={int(row['count'])}, M={row['mean']:.3f}, Mdn={row['median']:.3f}, "
+              f"SD={row['std']:.3f}, SEM={row['sem']:.3f}")
+        print(f"    95% CI: [{row['ci_lower']:.3f}, {row['ci_upper']:.3f}], "
+              f"IQR: [{row['q25']:.3f}, {row['q75']:.3f}]")
+    
+    # Perform mixed ANOVA
+    print(f"\nStep 2: Running mixed ANOVA (Time within, CA% between)...")
+    
+    try:
+        # Rename CA (%) column
+        analysis_df_clean = analysis_df.rename(columns={'CA (%)': 'CA_percent'})
+        
+        # Run mixed ANOVA: Day (within) × CA% (between)
+        aov = pg.mixed_anova(
+            data=analysis_df_clean,
+            dv=measure,
+            within='Day',
+            subject='ID',
+            between='CA_percent',
+            correction=True
+        )
+        
+        # Rename back for clarity
+        aov['Source'] = aov['Source'].replace({
+            'CA_percent': 'CA (%)',
+            'CA_percent * Day': 'CA (%) * Day',
+            'Day * CA_percent': 'CA (%) * Day'
+        })
+        
+        print("\nMixed ANOVA Results:")
+        print(aov.to_string())
+        
+        # Format results
+        p_col = 'p-unc' if 'p-unc' in aov.columns else 'p_unc'
+        
+        print("\n" + "="*80)
+        print("FORMATTED RESULTS")
+        print("="*80)
+        
+        # Time (Day) effect
+        if 'Day' in aov['Source'].values:
+            day_row = aov[aov['Source'] == 'Day'].iloc[0]
+            day_p = day_row[p_col]
+            day_F = day_row['F']
+            day_sig = "***" if day_p < 0.001 else "**" if day_p < 0.01 else "*" if day_p < 0.05 else "ns"
+            
+            print(f"\n1. Time (Day) Effect: {'SIGNIFICANT' if day_p < 0.05 else 'NOT SIGNIFICANT'}")
+            print(f"   F = {day_F:.3f}, p = {day_p:.4f} {day_sig}")
+            if day_p < 0.05:
+                print(f"   → Weight changes significantly over time for {sex}s")
+            else:
+                print(f"   → No significant change over time for {sex}s")
+        
+        # CA% main effect
+        if 'CA (%)' in aov['Source'].values:
+            ca_row = aov[aov['Source'] == 'CA (%)'].iloc[0]
+            ca_p = ca_row[p_col]
+            ca_F = ca_row['F']
+            ca_sig = "***" if ca_p < 0.001 else "**" if ca_p < 0.01 else "*" if ca_p < 0.05 else "ns"
+            
+            print(f"\n2. CA% Main Effect: {'SIGNIFICANT' if ca_p < 0.05 else 'NOT SIGNIFICANT'}")
+            print(f"   F = {ca_F:.3f}, p = {ca_p:.4f} {ca_sig}")
+            if ca_p < 0.05:
+                print(f"   → CA% concentrations differ for {sex}s")
+            else:
+                print(f"   → No CA% difference for {sex}s")
+        
+        # Interaction effect
+        if 'CA (%) * Day' in aov['Source'].values:
+            int_row = aov[aov['Source'] == 'CA (%) * Day'].iloc[0]
+            int_p = int_row[p_col]
+            int_F = int_row['F']
+            int_sig = "***" if int_p < 0.001 else "**" if int_p < 0.01 else "*" if int_p < 0.05 else "ns"
+            
+            print(f"\n3. Time × CA% Interaction: {'SIGNIFICANT' if int_p < 0.05 else 'NOT SIGNIFICANT'}")
+            print(f"   F = {int_F:.3f}, p = {int_p:.4f} {int_sig}")
+            if int_p < 0.05:
+                print(f"   → The time course differs between CA% levels for {sex}s")
+            else:
+                print(f"   → Similar time course across CA% levels for {sex}s")
+        
+        results = {
+            'measure': measure,
+            'sex': sex,
+            'type': 'mixed_anova_sex_stratified',
+            'n_observations': len(analysis_df),
+            'n_subjects': analysis_df['ID'].nunique(),
+            'n_days': len(time_points),
+            'time_points': time_points,
+            'anova_table': aov,
+            'descriptive_stats': group_stats,
+            'data': analysis_df
+        }
+        
+        return results
+        
+    except Exception as e:
+        print(f"\n[ERROR] Mixed ANOVA failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {}
+
+
+def perform_mixed_anova_ca_stratified(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    ca_percent: float,
+    measure: str = "Total Change",
+    time_points: Optional[List[int]] = None
+) -> Dict:
+    """
+    Perform 2-Way Mixed ANOVA: Time (within) × Sex (between), holding CA% constant.
+    
+    This analyzes longitudinal weight changes for ONE CA% level at a time, testing:
+    - Time (Day): Within-subjects factor (repeated measures over days)
+    - Sex: Between-subjects factor (M vs F)
+    
+    By stratifying by CA%, this reveals whether the Time × Sex interaction differs
+    between CA% conditions.
+    
+    Parameters:
+        cohort_dfs: Dictionary mapping cohort labels to DataFrames
+        ca_percent: CA% level to analyze (e.g., 0 or 2)
+        measure: Weight measure to analyze ('Total Change', 'Daily Change', 'Weight')
+        time_points: Optional list of specific days to include (None = all days)
+        
+    Returns:
+        Dictionary with ANOVA results for the specified CA% level
+    """
+    print("\n" + "="*80)
+    print(f"CA%-STRATIFIED MIXED ANOVA: TIME (WITHIN) × SEX (BETWEEN)")
+    print(f"Analyzing: {ca_percent}% CA only")
+    print("="*80)
+    
+    if not HAS_PINGOUIN:
+        print("\n[ERROR] pingouin is required for mixed ANOVA")
+        return {}
+    
+    # Combine cohorts
+    print("\nStep 1: Combining and filtering data...")
+    combined_df = combine_cohorts_for_analysis(cohort_dfs)
+    combined_df = clean_cohort(combined_df)
+    
+    if 'Day' not in combined_df.columns:
+        combined_df = add_day_column_across_cohorts(combined_df)
+    
+    # Filter to specified CA%
+    required_cols = ['ID', 'Day', 'Sex', 'CA (%)', measure]
+    missing_cols = [col for col in required_cols if col not in combined_df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+    
+    analysis_df = combined_df[combined_df['CA (%)'] == ca_percent][required_cols].copy()
+    analysis_df = analysis_df.dropna()
+    
+    if len(analysis_df) == 0:
+        print(f"\n[ERROR] No data available for CA%={ca_percent}")
+        return {}
+    
+    # Filter to specific time points if requested
+    if time_points is not None:
+        analysis_df = analysis_df[analysis_df['Day'].isin(time_points)]
+        print(f"  Filtered to days: {sorted(time_points)}")
+    else:
+        time_points = sorted(analysis_df['Day'].unique())
+    
+    print(f"\nAnalyzing: {measure} ({ca_percent}% CA)")
+    print(f"  Total observations: {len(analysis_df)}")
+    print(f"  Unique animals: {analysis_df['ID'].nunique()}")
+    print(f"  Sex groups: {sorted(analysis_df['Sex'].unique())}")
+    print(f"  Days: {len(time_points)} days")
+    
+    # Check completeness
+    subjects_per_day = analysis_df.groupby('ID')['Day'].nunique()
+    total_days = analysis_df['Day'].nunique()
+    complete_subjects = (subjects_per_day == total_days).sum()
+    incomplete_subjects = (subjects_per_day < total_days).sum()
+    
+    if incomplete_subjects > 0:
+        print(f"\n[WARNING] {incomplete_subjects} animals have incomplete time series")
+        print(f"  Complete: {complete_subjects}, Incomplete: {incomplete_subjects}")
+    
+    # Check Sex group sizes
+    animals_per_sex = analysis_df.groupby('Sex')['ID'].nunique()
+    print(f"\nAnimals per Sex group:")
+    for sex, n in animals_per_sex.items():
+        print(f"  {sex}: {n} animals")
+    
+    if any(animals_per_sex < 2):
+        print(f"\n[WARNING] Some Sex groups have fewer than 2 animals")
+    
+    # Descriptive statistics
+    print(f"\nDescriptive Statistics by Sex Group:")
+    
+    def compute_desc_stats(group):
+        n = len(group)
+        mean = group.mean()
+        std = group.std(ddof=1)
+        sem = std / np.sqrt(n) if n > 0 else np.nan
+        ci_lower = mean - 1.96 * sem
+        ci_upper = mean + 1.96 * sem
+        return pd.Series({
+            'count': n,
+            'mean': mean,
+            'median': group.median(),
+            'std': std,
+            'sem': sem,
+            'ci_lower': ci_lower,
+            'ci_upper': ci_upper,
+            'q25': group.quantile(0.25),
+            'q75': group.quantile(0.75),
+            'min': group.min(),
+            'max': group.max()
+        })
+    
+    # Collect statistics for each Sex group
+    stats_data = []
+    for sex_val, group_data in analysis_df.groupby('Sex')[measure]:
+        stats = compute_desc_stats(group_data)
+        stats['Sex'] = sex_val
+        stats_data.append(stats)
+    group_stats = pd.DataFrame(stats_data)
+    
+    for _, row in group_stats.iterrows():
+        print(f"  Sex={row['Sex']}: "
+              f"n_obs={int(row['count'])}, M={row['mean']:.3f}, Mdn={row['median']:.3f}, "
+              f"SD={row['std']:.3f}, SEM={row['sem']:.3f}")
+        print(f"    95% CI: [{row['ci_lower']:.3f}, {row['ci_upper']:.3f}], "
+              f"IQR: [{row['q25']:.3f}, {row['q75']:.3f}]")
+    
+    # Perform mixed ANOVA
+    print(f"\nStep 2: Running mixed ANOVA (Time within, Sex between)...")
+    
+    try:
+        # Run mixed ANOVA: Day (within) × Sex (between)
+        aov = pg.mixed_anova(
+            data=analysis_df,
+            dv=measure,
+            within='Day',
+            subject='ID',
+            between='Sex',
+            correction=True
+        )
+        
+        print("\nMixed ANOVA Results:")
+        print(aov.to_string())
+        
+        # Format results
+        p_col = 'p-unc' if 'p-unc' in aov.columns else 'p_unc'
+        
+        print("\n" + "="*80)
+        print("FORMATTED RESULTS")
+        print("="*80)
+        
+        # Time (Day) effect
+        if 'Day' in aov['Source'].values:
+            day_row = aov[aov['Source'] == 'Day'].iloc[0]
+            day_p = day_row[p_col]
+            day_F = day_row['F']
+            day_sig = "***" if day_p < 0.001 else "**" if day_p < 0.01 else "*" if day_p < 0.05 else "ns"
+            
+            print(f"\n1. Time (Day) Effect: {'SIGNIFICANT' if day_p < 0.05 else 'NOT SIGNIFICANT'}")
+            print(f"   F = {day_F:.3f}, p = {day_p:.4f} {day_sig}")
+            if day_p < 0.05:
+                print(f"   → Weight changes significantly over time at {ca_percent}% CA")
+            else:
+                print(f"   → No significant change over time at {ca_percent}% CA")
+        
+        # Sex main effect
+        if 'Sex' in aov['Source'].values:
+            sex_row = aov[aov['Source'] == 'Sex'].iloc[0]
+            sex_p = sex_row[p_col]
+            sex_F = sex_row['F']
+            sex_sig = "***" if sex_p < 0.001 else "**" if sex_p < 0.01 else "*" if sex_p < 0.05 else "ns"
+            
+            print(f"\n2. Sex Main Effect: {'SIGNIFICANT' if sex_p < 0.05 else 'NOT SIGNIFICANT'}")
+            print(f"   F = {sex_F:.3f}, p = {sex_p:.4f} {sex_sig}")
+            if sex_p < 0.05:
+                print(f"   → Males and females differ at {ca_percent}% CA")
+            else:
+                print(f"   → No sex difference at {ca_percent}% CA")
+        
+        # Interaction effect
+        if 'Sex * Day' in aov['Source'].values:
+            int_row = aov[aov['Source'] == 'Sex * Day'].iloc[0]
+            int_p = int_row[p_col]
+            int_F = int_row['F']
+            int_sig = "***" if int_p < 0.001 else "**" if int_p < 0.01 else "*" if int_p < 0.05 else "ns"
+            
+            print(f"\n3. Time × Sex Interaction: {'SIGNIFICANT' if int_p < 0.05 else 'NOT SIGNIFICANT'}")
+            print(f"   F = {int_F:.3f}, p = {int_p:.4f} {int_sig}")
+            if int_p < 0.05:
+                print(f"   → The time course differs between sexes at {ca_percent}% CA")
+            else:
+                print(f"   → Similar time course for both sexes at {ca_percent}% CA")
+        elif 'Day * Sex' in aov['Source'].values:
+            int_row = aov[aov['Source'] == 'Day * Sex'].iloc[0]
+            int_p = int_row[p_col]
+            int_F = int_row['F']
+            int_sig = "***" if int_p < 0.001 else "**" if int_p < 0.01 else "*" if int_p < 0.05 else "ns"
+            
+            print(f"\n3. Time × Sex Interaction: {'SIGNIFICANT' if int_p < 0.05 else 'NOT SIGNIFICANT'}")
+            print(f"   F = {int_F:.3f}, p = {int_p:.4f} {int_sig}")
+            if int_p < 0.05:
+                print(f"   → The time course differs between sexes at {ca_percent}% CA")
+            else:
+                print(f"   → Similar time course for both sexes at {ca_percent}% CA")
+        
+        results = {
+            'measure': measure,
+            'ca_percent': ca_percent,
+            'type': 'mixed_anova_ca_stratified',
+            'n_observations': len(analysis_df),
+            'n_subjects': analysis_df['ID'].nunique(),
+            'n_days': len(time_points),
+            'time_points': time_points,
+            'anova_table': aov,
+            'descriptive_stats': group_stats,
+            'data': analysis_df
+        }
+        
+        return results
+        
+    except Exception as e:
+        print(f"\n[ERROR] Mixed ANOVA failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {}
 
 
 # =============================================================================
@@ -1673,6 +2348,10 @@ def generate_cross_cohort_report(
     between_results: Optional[Dict] = None,
     mixed_results: Optional[Dict] = None,
     daily_results: Optional[Dict] = None,
+    results_males: Optional[Dict] = None,
+    results_females: Optional[Dict] = None,
+    results_ca0: Optional[Dict] = None,
+    results_ca2: Optional[Dict] = None,
     cohort_dfs: Optional[Dict[str, pd.DataFrame]] = None
 ) -> str:
     """
@@ -1682,6 +2361,10 @@ def generate_cross_cohort_report(
         between_results: Results from perform_between_subjects_anova()
         mixed_results: Results from perform_cross_cohort_mixed_anova()
         daily_results: Results from perform_daily_between_subjects_anova()
+        results_males: Results from perform_mixed_anova_sex_stratified() for males
+        results_females: Results from perform_mixed_anova_sex_stratified() for females
+        results_ca0: Results from perform_mixed_anova_ca_stratified() for 0% CA
+        results_ca2: Results from perform_mixed_anova_ca_stratified() for 2% CA
         cohort_dfs: Original cohort DataFrames for context
         
     Returns:
@@ -1747,6 +2430,24 @@ def generate_cross_cohort_report(
         report_lines.append(f"Number of subjects: {between_results.get('n_subjects', 'Unknown')}")
         report_lines.append("")
         
+        # Descriptive Statistics
+        desc_stats = between_results.get('descriptive_stats')
+        if desc_stats is not None and len(desc_stats) > 0:
+            report_lines.append("Descriptive Statistics:")
+            report_lines.append("-" * 80)
+            report_lines.append("Basic Statistics:")
+            for _, row in desc_stats.iterrows():
+                report_lines.append(f"  CA%={row['CA (%)']}, Sex={row['Sex']}: "
+                                  f"n={int(row['count'])}, M={row['mean']:.3f}, Mdn={row['median']:.3f}, "
+                                  f"SD={row['std']:.3f}, SEM={row['sem']:.3f}")
+            report_lines.append("\nConfidence Intervals & Range:")
+            for _, row in desc_stats.iterrows():
+                report_lines.append(f"  CA%={row['CA (%)']}, Sex={row['Sex']}: "
+                                  f"95% CI [{row['ci_lower']:.3f}, {row['ci_upper']:.3f}], "
+                                  f"IQR [{row['q25']:.3f}, {row['q75']:.3f}], "
+                                  f"Range [{row['min']:.3f}, {row['max']:.3f}]")
+            report_lines.append("")
+        
         aov = between_results.get('anova_table')
         if aov is not None:
             report_lines.append("ANOVA Table:")
@@ -1809,6 +2510,20 @@ def generate_cross_cohort_report(
                     report_lines.append(f"   → (or equivalently: the sex difference depends on CA% level)")
                 else:
                     report_lines.append(f"   → The effect of CA% is similar for both sexes")
+        
+        # Post-hoc tests
+        posthoc = between_results.get('posthoc_tests')
+        if posthoc and len(posthoc) > 0:
+            report_lines.append("")
+            report_lines.append("Post-Hoc Pairwise Comparisons:")
+            report_lines.append("-" * 80)
+            
+            for test_name, test_df in posthoc.items():
+                report_lines.append(f"\n{test_name}:")
+                if test_df is not None and len(test_df) > 0:
+                    report_lines.append(test_df.to_string())
+                else:
+                    report_lines.append("  No pairwise comparisons available")
         
         report_lines.append("")
     
@@ -1931,6 +2646,464 @@ def generate_cross_cohort_report(
                     report_lines.append(f"   → Different trajectories for different CA%/Sex combinations")
                 else:
                     report_lines.append(f"   → Similar time course for all groups")
+        
+        # Descriptive Statistics
+        desc_stats = mixed_results.get('descriptive_stats')
+        if desc_stats is not None and len(desc_stats) > 0:
+            report_lines.append("")
+            report_lines.append("Descriptive Statistics:")
+            report_lines.append("-" * 80)
+            report_lines.append("Basic Statistics:")
+            for _, row in desc_stats.iterrows():
+                report_lines.append(f"  CA%={row['CA (%)']}, Sex={row['Sex']}: "
+                                  f"n_obs={int(row['count'])}, M={row['mean']:.3f}, Mdn={row['median']:.3f}, "
+                                  f"SD={row['std']:.3f}, SEM={row['sem']:.3f}")
+            report_lines.append("\nConfidence Intervals & Range:")
+            for _, row in desc_stats.iterrows():
+                report_lines.append(f"  CA%={row['CA (%)']}, Sex={row['Sex']}: "
+                                  f"95% CI [{row['ci_lower']:.3f}, {row['ci_upper']:.3f}], "
+                                  f"IQR [{row['q25']:.3f}, {row['q75']:.3f}], "
+                                  f"Range [{row['min']:.3f}, {row['max']:.3f}]")
+        
+        # Post-hoc tests
+        posthoc = mixed_results.get('posthoc_tests')
+        if posthoc and len(posthoc) > 0:
+            report_lines.append("")
+            report_lines.append("Post-Hoc Pairwise Comparisons:")
+            report_lines.append("-" * 80)
+            
+            for test_name, test_df in posthoc.items():
+                report_lines.append(f"\n{test_name}:")
+                if test_df is not None and len(test_df) > 0:
+                    report_lines.append(test_df.to_string())
+                else:
+                    report_lines.append("  No pairwise comparisons available")
+        
+        report_lines.append("")
+    
+    # Sex-stratified mixed ANOVA results
+    if results_males:
+        report_lines.append("=" * 80)
+        report_lines.append("SEX-STRATIFIED MIXED ANOVA: TIME × CA% (MALES ONLY)")
+        report_lines.append("=" * 80)
+        report_lines.append("")
+        
+        report_lines.append(f"Measure: {results_males.get('measure', 'Unknown')}")
+        report_lines.append(f"Number of subjects: {results_males.get('n_subjects', 'Unknown')}")
+        report_lines.append(f"Number of time points: {results_males.get('n_days', 'Unknown')}")
+        report_lines.append(f"Total observations: {results_males.get('n_observations', 'Unknown')}")
+        report_lines.append("")
+        
+        aov = results_males.get('anova_table')
+        if aov is not None:
+            report_lines.append("Mixed ANOVA Table (Males):")
+            report_lines.append("-" * 80)
+            report_lines.append(aov.to_string())
+            report_lines.append("")
+            
+            p_col = 'p-unc' if 'p-unc' in aov.columns else 'p_unc'
+            
+            report_lines.append("Interpretation:")
+            report_lines.append("-" * 80)
+            
+            if 'Day' in aov['Source'].values:
+                day_row = aov[aov['Source'] == 'Day'].iloc[0]
+                day_p = day_row[p_col]
+                day_F = day_row['F']
+                
+                sig_str = "SIGNIFICANT" if day_p < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\n1. Time Effect (Males): {sig_str}")
+                report_lines.append(f"   F = {day_F:.3f}, p = {day_p:.4f}")
+                if day_p < 0.05:
+                    report_lines.append(f"   → Males show significant weight changes over time")
+                else:
+                    report_lines.append(f"   → No significant time effect in males")
+            
+            if 'CA (%)' in aov['Source'].values:
+                ca_row = aov[aov['Source'] == 'CA (%)'].iloc[0]
+                ca_p = ca_row[p_col]
+                ca_F = ca_row['F']
+                
+                sig_str = "SIGNIFICANT" if ca_p < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\n2. CA% Effect (Males): {sig_str}")
+                report_lines.append(f"   F = {ca_F:.3f}, p = {ca_p:.4f}")
+                if ca_p < 0.05:
+                    report_lines.append(f"   → CA% levels differ in males")
+                else:
+                    report_lines.append(f"   → No CA% difference in males")
+            
+            if 'CA (%) * Day' in aov['Source'].values:
+                int_row = aov[aov['Source'] == 'CA (%) * Day'].iloc[0]
+                int_p = int_row[p_col]
+                int_F = int_row['F']
+                
+                sig_str = "SIGNIFICANT" if int_p < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\n3. Time × CA% Interaction (Males): {sig_str}")
+                report_lines.append(f"   F = {int_F:.3f}, p = {int_p:.4f}")
+                if int_p < 0.05:
+                    report_lines.append(f"   → The time course differs between CA% levels in males")
+                else:
+                    report_lines.append(f"   → Similar time course across CA% levels in males")
+        
+        # Descriptive statistics
+        desc_stats = results_males.get('descriptive_stats')
+        if desc_stats is not None and len(desc_stats) > 0:
+            report_lines.append("")
+            report_lines.append("Descriptive Statistics (Males):")
+            report_lines.append("-" * 80)
+            for _, row in desc_stats.iterrows():
+                report_lines.append(f"  CA%={row['CA (%)']}: "
+                                  f"n_obs={int(row['count'])}, M={row['mean']:.3f}, Mdn={row['median']:.3f}, "
+                                  f"SD={row['std']:.3f}, SEM={row['sem']:.3f}")
+        
+        report_lines.append("")
+    
+    if results_females:
+        report_lines.append("=" * 80)
+        report_lines.append("SEX-STRATIFIED MIXED ANOVA: TIME × CA% (FEMALES ONLY)")
+        report_lines.append("=" * 80)
+        report_lines.append("")
+        
+        report_lines.append(f"Measure: {results_females.get('measure', 'Unknown')}")
+        report_lines.append(f"Number of subjects: {results_females.get('n_subjects', 'Unknown')}")
+        report_lines.append(f"Number of time points: {results_females.get('n_days', 'Unknown')}")
+        report_lines.append(f"Total observations: {results_females.get('n_observations', 'Unknown')}")
+        report_lines.append("")
+        
+        aov = results_females.get('anova_table')
+        if aov is not None:
+            report_lines.append("Mixed ANOVA Table (Females):")
+            report_lines.append("-" * 80)
+            report_lines.append(aov.to_string())
+            report_lines.append("")
+            
+            p_col = 'p-unc' if 'p-unc' in aov.columns else 'p_unc'
+            
+            report_lines.append("Interpretation:")
+            report_lines.append("-" * 80)
+            
+            if 'Day' in aov['Source'].values:
+                day_row = aov[aov['Source'] == 'Day'].iloc[0]
+                day_p = day_row[p_col]
+                day_F = day_row['F']
+                
+                sig_str = "SIGNIFICANT" if day_p < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\n1. Time Effect (Females): {sig_str}")
+                report_lines.append(f"   F = {day_F:.3f}, p = {day_p:.4f}")
+                if day_p < 0.05:
+                    report_lines.append(f"   → Females show significant weight changes over time")
+                else:
+                    report_lines.append(f"   → No significant time effect in females")
+            
+            if 'CA (%)' in aov['Source'].values:
+                ca_row = aov[aov['Source'] == 'CA (%)'].iloc[0]
+                ca_p = ca_row[p_col]
+                ca_F = ca_row['F']
+                
+                sig_str = "SIGNIFICANT" if ca_p < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\n2. CA% Effect (Females): {sig_str}")
+                report_lines.append(f"   F = {ca_F:.3f}, p = {ca_p:.4f}")
+                if ca_p < 0.05:
+                    report_lines.append(f"   → CA% levels differ in females")
+                else:
+                    report_lines.append(f"   → No CA% difference in females")
+            
+            if 'CA (%) * Day' in aov['Source'].values:
+                int_row = aov[aov['Source'] == 'CA (%) * Day'].iloc[0]
+                int_p = int_row[p_col]
+                int_F = int_row['F']
+                
+                sig_str = "SIGNIFICANT" if int_p < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\n3. Time × CA% Interaction (Females): {sig_str}")
+                report_lines.append(f"   F = {int_F:.3f}, p = {int_p:.4f}")
+                if int_p < 0.05:
+                    report_lines.append(f"   → The time course differs between CA% levels in females")
+                else:
+                    report_lines.append(f"   → Similar time course across CA% levels in females")
+        
+        # Descriptive statistics
+        desc_stats = results_females.get('descriptive_stats')
+        if desc_stats is not None and len(desc_stats) > 0:
+            report_lines.append("")
+            report_lines.append("Descriptive Statistics (Females):")
+            report_lines.append("-" * 80)
+            for _, row in desc_stats.iterrows():
+                report_lines.append(f"  CA%={row['CA (%)']}: "
+                                  f"n_obs={int(row['count'])}, M={row['mean']:.3f}, Mdn={row['median']:.3f}, "
+                                  f"SD={row['std']:.3f}, SEM={row['sem']:.3f}")
+        
+        report_lines.append("")
+    
+    # Comparison of sex-stratified results
+    if results_males and results_females:
+        report_lines.append("=" * 80)
+        report_lines.append("SEX-STRATIFIED COMPARISON")
+        report_lines.append("=" * 80)
+        report_lines.append("")
+        
+        report_lines.append("Comparing Time × CA% interactions between males and females:")
+        report_lines.append("-" * 80)
+        
+        # Get interaction p-values
+        males_aov = results_males.get('anova_table')
+        females_aov = results_females.get('anova_table')
+        
+        if males_aov is not None and females_aov is not None:
+            p_col = 'p-unc' if 'p-unc' in males_aov.columns else 'p_unc'
+            
+            # Males interaction
+            males_int_p = None
+            if 'CA (%) * Day' in males_aov['Source'].values:
+                males_int_p = males_aov[males_aov['Source'] == 'CA (%) * Day'].iloc[0][p_col]
+                males_int_sig = "SIGNIFICANT" if males_int_p < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\nMales Time × CA% interaction: {males_int_sig} (p = {males_int_p:.4f})")
+            
+            # Females interaction
+            females_int_p = None
+            if 'CA (%) * Day' in females_aov['Source'].values:
+                females_int_p = females_aov[females_aov['Source'] == 'CA (%) * Day'].iloc[0][p_col]
+                females_int_sig = "SIGNIFICANT" if females_int_p < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"Females Time × CA% interaction: {females_int_sig} (p = {females_int_p:.4f})")
+            
+            # Interpretation
+            if males_int_p is not None and females_int_p is not None:
+                report_lines.append("")
+                if males_int_p < 0.05 and females_int_p < 0.05:
+                    report_lines.append("→ Both sexes show significant Time × CA% interaction")
+                    report_lines.append("→ CA% effects on weight trajectory differ by sex")
+                elif males_int_p < 0.05 and females_int_p >= 0.05:
+                    report_lines.append("→ Time × CA% interaction is SIGNIFICANT in males but NOT in females")
+                    report_lines.append("→ CA% effects on weight trajectory are sex-specific")
+                elif males_int_p >= 0.05 and females_int_p < 0.05:
+                    report_lines.append("→ Time × CA% interaction is SIGNIFICANT in females but NOT in males")
+                    report_lines.append("→ CA% effects on weight trajectory are sex-specific")
+                else:
+                    report_lines.append("→ Neither sex shows significant Time × CA% interaction")
+        
+        report_lines.append("")
+    
+    # CA%-stratified mixed ANOVA results
+    if results_ca0:
+        report_lines.append("=" * 80)
+        report_lines.append("CA%-STRATIFIED MIXED ANOVA: TIME × SEX (0% CA ONLY)")
+        report_lines.append("=" * 80)
+        report_lines.append("")
+        
+        report_lines.append(f"Measure: {results_ca0.get('measure', 'Unknown')}")
+        report_lines.append(f"Number of subjects: {results_ca0.get('n_subjects', 'Unknown')}")
+        report_lines.append(f"Number of time points: {results_ca0.get('n_days', 'Unknown')}")
+        report_lines.append(f"Total observations: {results_ca0.get('n_observations', 'Unknown')}")
+        report_lines.append("")
+        
+        aov = results_ca0.get('anova_table')
+        if aov is not None:
+            report_lines.append("Mixed ANOVA Table (0% CA):")
+            report_lines.append("-" * 80)
+            report_lines.append(aov.to_string())
+            report_lines.append("")
+            
+            p_col = 'p-unc' if 'p-unc' in aov.columns else 'p_unc'
+            
+            report_lines.append("Interpretation:")
+            report_lines.append("-" * 80)
+            
+            if 'Day' in aov['Source'].values:
+                day_row = aov[aov['Source'] == 'Day'].iloc[0]
+                day_p = day_row[p_col]
+                day_F = day_row['F']
+                
+                sig_str = "SIGNIFICANT" if day_p < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\n1. Time Effect (0% CA): {sig_str}")
+                report_lines.append(f"   F = {day_F:.3f}, p = {day_p:.4f}")
+                if day_p < 0.05:
+                    report_lines.append(f"   → Weight changes significantly over time at 0% CA")
+                else:
+                    report_lines.append(f"   → No significant time effect at 0% CA")
+            
+            if 'Sex' in aov['Source'].values:
+                sex_row = aov[aov['Source'] == 'Sex'].iloc[0]
+                sex_p = sex_row[p_col]
+                sex_F = sex_row['F']
+                
+                sig_str = "SIGNIFICANT" if sex_p < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\n2. Sex Effect (0% CA): {sig_str}")
+                report_lines.append(f"   F = {sex_F:.3f}, p = {sex_p:.4f}")
+                if sex_p < 0.05:
+                    report_lines.append(f"   → Males and females differ at 0% CA")
+                else:
+                    report_lines.append(f"   → No sex difference at 0% CA")
+            
+            # Check for both possible interaction names
+            int_p = None
+            int_F = None
+            if 'Sex * Day' in aov['Source'].values:
+                int_row = aov[aov['Source'] == 'Sex * Day'].iloc[0]
+                int_p = int_row[p_col]
+                int_F = int_row['F']
+            elif 'Day * Sex' in aov['Source'].values:
+                int_row = aov[aov['Source'] == 'Day * Sex'].iloc[0]
+                int_p = int_row[p_col]
+                int_F = int_row['F']
+            
+            if int_p is not None:
+                sig_str = "SIGNIFICANT" if int_p < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\n3. Time × Sex Interaction (0% CA): {sig_str}")
+                report_lines.append(f"   F = {int_F:.3f}, p = {int_p:.4f}")
+                if int_p < 0.05:
+                    report_lines.append(f"   → The time course differs between sexes at 0% CA")
+                else:
+                    report_lines.append(f"   → Similar time course for both sexes at 0% CA")
+        
+        # Descriptive statistics
+        desc_stats = results_ca0.get('descriptive_stats')
+        if desc_stats is not None and len(desc_stats) > 0:
+            report_lines.append("")
+            report_lines.append("Descriptive Statistics (0% CA):")
+            report_lines.append("-" * 80)
+            for _, row in desc_stats.iterrows():
+                report_lines.append(f"  Sex={row['Sex']}: "
+                                  f"n_obs={int(row['count'])}, M={row['mean']:.3f}, Mdn={row['median']:.3f}, "
+                                  f"SD={row['std']:.3f}, SEM={row['sem']:.3f}")
+        
+        report_lines.append("")
+    
+    if results_ca2:
+        report_lines.append("=" * 80)
+        report_lines.append("CA%-STRATIFIED MIXED ANOVA: TIME × SEX (2% CA ONLY)")
+        report_lines.append("=" * 80)
+        report_lines.append("")
+        
+        report_lines.append(f"Measure: {results_ca2.get('measure', 'Unknown')}")
+        report_lines.append(f"Number of subjects: {results_ca2.get('n_subjects', 'Unknown')}")
+        report_lines.append(f"Number of time points: {results_ca2.get('n_days', 'Unknown')}")
+        report_lines.append(f"Total observations: {results_ca2.get('n_observations', 'Unknown')}")
+        report_lines.append("")
+        
+        aov = results_ca2.get('anova_table')
+        if aov is not None:
+            report_lines.append("Mixed ANOVA Table (2% CA):")
+            report_lines.append("-" * 80)
+            report_lines.append(aov.to_string())
+            report_lines.append("")
+            
+            p_col = 'p-unc' if 'p-unc' in aov.columns else 'p_unc'
+            
+            report_lines.append("Interpretation:")
+            report_lines.append("-" * 80)
+            
+            if 'Day' in aov['Source'].values:
+                day_row = aov[aov['Source'] == 'Day'].iloc[0]
+                day_p = day_row[p_col]
+                day_F = day_row['F']
+                
+                sig_str = "SIGNIFICANT" if day_p < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\n1. Time Effect (2% CA): {sig_str}")
+                report_lines.append(f"   F = {day_F:.3f}, p = {day_p:.4f}")
+                if day_p < 0.05:
+                    report_lines.append(f"   → Weight changes significantly over time at 2% CA")
+                else:
+                    report_lines.append(f"   → No significant time effect at 2% CA")
+            
+            if 'Sex' in aov['Source'].values:
+                sex_row = aov[aov['Source'] == 'Sex'].iloc[0]
+                sex_p = sex_row[p_col]
+                sex_F = sex_row['F']
+                
+                sig_str = "SIGNIFICANT" if sex_p < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\n2. Sex Effect (2% CA): {sig_str}")
+                report_lines.append(f"   F = {sex_F:.3f}, p = {sex_p:.4f}")
+                if sex_p < 0.05:
+                    report_lines.append(f"   → Males and females differ at 2% CA")
+                else:
+                    report_lines.append(f"   → No sex difference at 2% CA")
+            
+            # Check for both possible interaction names
+            int_p = None
+            int_F = None
+            if 'Sex * Day' in aov['Source'].values:
+                int_row = aov[aov['Source'] == 'Sex * Day'].iloc[0]
+                int_p = int_row[p_col]
+                int_F = int_row['F']
+            elif 'Day * Sex' in aov['Source'].values:
+                int_row = aov[aov['Source'] == 'Day * Sex'].iloc[0]
+                int_p = int_row[p_col]
+                int_F = int_row['F']
+            
+            if int_p is not None:
+                sig_str = "SIGNIFICANT" if int_p < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\n3. Time × Sex Interaction (2% CA): {sig_str}")
+                report_lines.append(f"   F = {int_F:.3f}, p = {int_p:.4f}")
+                if int_p < 0.05:
+                    report_lines.append(f"   → The time course differs between sexes at 2% CA")
+                else:
+                    report_lines.append(f"   → Similar time course for both sexes at 2% CA")
+        
+        # Descriptive statistics
+        desc_stats = results_ca2.get('descriptive_stats')
+        if desc_stats is not None and len(desc_stats) > 0:
+            report_lines.append("")
+            report_lines.append("Descriptive Statistics (2% CA):")
+            report_lines.append("-" * 80)
+            for _, row in desc_stats.iterrows():
+                report_lines.append(f"  Sex={row['Sex']}: "
+                                  f"n_obs={int(row['count'])}, M={row['mean']:.3f}, Mdn={row['median']:.3f}, "
+                                  f"SD={row['std']:.3f}, SEM={row['sem']:.3f}")
+        
+        report_lines.append("")
+    
+    # Comparison of CA%-stratified results
+    if results_ca0 and results_ca2:
+        report_lines.append("=" * 80)
+        report_lines.append("CA%-STRATIFIED COMPARISON")
+        report_lines.append("=" * 80)
+        report_lines.append("")
+        
+        report_lines.append("Comparing Time × Sex interactions between CA% levels:")
+        report_lines.append("-" * 80)
+        
+        # Get interaction p-values
+        ca0_aov = results_ca0.get('anova_table')
+        ca2_aov = results_ca2.get('anova_table')
+        
+        if ca0_aov is not None and ca2_aov is not None:
+            p_col = 'p-unc' if 'p-unc' in ca0_aov.columns else 'p_unc'
+            
+            # 0% CA interaction
+            ca0_int_p = None
+            if 'Sex * Day' in ca0_aov['Source'].values:
+                ca0_int_p = ca0_aov[ca0_aov['Source'] == 'Sex * Day'].iloc[0][p_col]
+            elif 'Day * Sex' in ca0_aov['Source'].values:
+                ca0_int_p = ca0_aov[ca0_aov['Source'] == 'Day * Sex'].iloc[0][p_col]
+            
+            if ca0_int_p is not None:
+                ca0_int_sig = "SIGNIFICANT" if ca0_int_p < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\n0% CA Time × Sex interaction: {ca0_int_sig} (p = {ca0_int_p:.4f})")
+            
+            # 2% CA interaction
+            ca2_int_p = None
+            if 'Sex * Day' in ca2_aov['Source'].values:
+                ca2_int_p = ca2_aov[ca2_aov['Source'] == 'Sex * Day'].iloc[0][p_col]
+            elif 'Day * Sex' in ca2_aov['Source'].values:
+                ca2_int_p = ca2_aov[ca2_aov['Source'] == 'Day * Sex'].iloc[0][p_col]
+            
+            if ca2_int_p is not None:
+                ca2_int_sig = "SIGNIFICANT" if ca2_int_p < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"2% CA Time × Sex interaction: {ca2_int_sig} (p = {ca2_int_p:.4f})")
+            
+            # Interpretation
+            if ca0_int_p is not None and ca2_int_p is not None:
+                report_lines.append("")
+                if ca0_int_p < 0.05 and ca2_int_p < 0.05:
+                    report_lines.append("→ Both CA% levels show significant Time × Sex interaction")
+                    report_lines.append("→ Sex differences in weight trajectory are consistent across CA% levels")
+                elif ca0_int_p < 0.05 and ca2_int_p >= 0.05:
+                    report_lines.append("→ Time × Sex interaction is SIGNIFICANT at 0% CA but NOT at 2% CA")
+                    report_lines.append("→ CA% modulates sex differences in weight trajectory")
+                elif ca0_int_p >= 0.05 and ca2_int_p < 0.05:
+                    report_lines.append("→ Time × Sex interaction is SIGNIFICANT at 2% CA but NOT at 0% CA")
+                    report_lines.append("→ CA% modulates sex differences in weight trajectory")
+                else:
+                    report_lines.append("→ Neither CA% level shows significant Time × Sex interaction")
         
         report_lines.append("")
     
@@ -2155,6 +3328,10 @@ if __name__ == "__main__":
         between_final_results = None
         between_avg_results = None
         daily_results = None
+        results_males = None
+        results_females = None
+        results_ca0 = None
+        results_ca2 = None
         plot_figures = {}
         
         if user_input == '1' or user_input == '5' or user_input == '7':
@@ -2195,6 +3372,49 @@ if __name__ == "__main__":
                 measure="Total Change",
                 ss_type=3
             )
+        
+        # Run stratified mixed ANOVAs for comprehensive analysis
+        if user_input == '5' or user_input == '7':
+            # Sex-stratified analyses
+            print("\n" + "="*80)
+            print("RUNNING SEX-STRATIFIED ANALYSES")
+            print("="*80)
+            
+            results_males = perform_mixed_anova_sex_stratified(
+                cohorts,
+                sex="M",
+                measure="Total Change"
+            )
+            
+            results_females = perform_mixed_anova_sex_stratified(
+                cohorts,
+                sex="F",
+                measure="Total Change"
+            )
+            
+            # CA%-stratified analyses
+            print("\n" + "="*80)
+            print("RUNNING CA%-STRATIFIED ANALYSES")
+            print("="*80)
+            
+            # Determine available CA% levels
+            combined_temp = combine_cohorts_for_analysis(cohorts)
+            ca_levels = sorted(combined_temp['CA (%)'].dropna().unique())
+            print(f"  Available CA% levels: {ca_levels}")
+            
+            if 0.0 in ca_levels or 0 in ca_levels:
+                results_ca0 = perform_mixed_anova_ca_stratified(
+                    cohorts,
+                    ca_percent=0,
+                    measure="Total Change"
+                )
+            
+            if 2.0 in ca_levels or 2 in ca_levels:
+                results_ca2 = perform_mixed_anova_ca_stratified(
+                    cohorts,
+                    ca_percent=2,
+                    measure="Total Change"
+                )
         
         # Generate plots
         if user_input == '6' or user_input == '7':
@@ -2279,6 +3499,10 @@ if __name__ == "__main__":
                     between_results=between_avg_results,
                     mixed_results=mixed_results,
                     daily_results=daily_results,
+                    results_males=results_males,
+                    results_females=results_females,
+                    results_ca0=results_ca0,
+                    results_ca2=results_ca2,
                     cohort_dfs=cohorts
                 )
                 
@@ -2296,7 +3520,7 @@ if __name__ == "__main__":
                 print("\n[WARNING] No analysis results to include in report")
         
         # Summary of what was run
-        if mixed_results or between_final_results or between_avg_results or daily_results or plot_figures:
+        if mixed_results or between_final_results or between_avg_results or daily_results or results_males or results_females or results_ca0 or results_ca2 or plot_figures:
             print("\n" + "="*80)
             print("ANALYSIS COMPLETE!")
             print("="*80)
@@ -2319,6 +3543,26 @@ if __name__ == "__main__":
                 print(f"\n[✓] Daily Between-Subjects ANOVA (Each day held constant)")
                 print(f"    Days analyzed: {daily_results.get('n_days')}")
             
+            if results_males:
+                print(f"\n[✓] Sex-Stratified Mixed ANOVA (Males)")
+                print(f"    Subjects: {results_males.get('n_subjects')}")
+                print(f"    Days: {results_males.get('n_days')}")
+            
+            if results_females:
+                print(f"\n[✓] Sex-Stratified Mixed ANOVA (Females)")
+                print(f"    Subjects: {results_females.get('n_subjects')}")
+                print(f"    Days: {results_females.get('n_days')}")
+            
+            if results_ca0:
+                print(f"\n[✓] CA%-Stratified Mixed ANOVA (0% CA)")
+                print(f"    Subjects: {results_ca0.get('n_subjects')}")
+                print(f"    Days: {results_ca0.get('n_days')}")
+            
+            if results_ca2:
+                print(f"\n[✓] CA%-Stratified Mixed ANOVA (2% CA)")
+                print(f"    Subjects: {results_ca2.get('n_subjects')}")
+                print(f"    Days: {results_ca2.get('n_days')}")
+            
             if plot_figures:
                 print(f"\n[✓] Weight Plots Generated")
                 print(f"    Number of plots: {len(plot_figures)}")
@@ -2337,12 +3581,21 @@ if __name__ == "__main__":
         print("     results_avg = perform_between_subjects_anova(cohorts, measure='Total Change', average_over_days=True)")
         print("\n  4. Daily Between-Subjects ANOVA (all days held constant):")
         print("     results_daily = perform_daily_between_subjects_anova(cohorts, measure='Total Change')")
-        print("\n  5. Generate comprehensive report:")
+        print("\n  5. Sex-Stratified Mixed ANOVA (Time × CA%, holding Sex constant):")
+        print("     results_males = perform_mixed_anova_sex_stratified(cohorts, sex='M', measure='Total Change')")
+        print("     results_females = perform_mixed_anova_sex_stratified(cohorts, sex='F', measure='Total Change')")
+        print("\n  6. CA%-Stratified Mixed ANOVA (Time × Sex, holding CA% constant):")
+        print("     results_ca0 = perform_mixed_anova_ca_stratified(cohorts, ca_percent=0, measure='Total Change')")
+        print("     results_ca2 = perform_mixed_anova_ca_stratified(cohorts, ca_percent=2, measure='Total Change')")
+        print("\n  7. Generate comprehensive report:")
         print("     report = generate_cross_cohort_report(")
         print("         between_results=results_avg, mixed_results=results_mixed,")
-        print("         daily_results=results_daily, cohort_dfs=cohorts)")
+        print("         daily_results=results_daily,")
+        print("         results_males=results_males, results_females=results_females,")
+        print("         results_ca0=results_ca0, results_ca2=results_ca2,")
+        print("         cohort_dfs=cohorts)")
         print("     print(report)")
-        print("\n  6. Generate weight plots:")
+        print("\n  8. Generate weight plots:")
         print("     # First combine cohorts")
         print("     combined = combine_cohorts_for_analysis(cohorts)")
         print("     combined = clean_cohort(combined)")
