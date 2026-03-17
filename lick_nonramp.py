@@ -369,6 +369,17 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
         std_fecal = np.std(fecal_counts)
         std_total_weight = np.std(total_weights)
         
+        n = len(lick_counts)
+        sem_licks = std_licks / np.sqrt(n) if n > 0 else 0
+        sem_bouts = std_bouts / np.sqrt(n) if n > 0 else 0
+        sem_fecal = std_fecal / np.sqrt(n) if n > 0 else 0
+        sem_total_weight = std_total_weight / np.sqrt(n) if n > 0 else 0
+        if date == '11/12/25':
+            n_bottle = len(bottle_weights_filtered)
+            sem_bottle_weight = std_bottle_weight / np.sqrt(n_bottle) if n_bottle > 0 else 0
+        else:
+            sem_bottle_weight = std_bottle_weight / np.sqrt(n) if n > 0 else 0
+        
         print(f"\nStandard deviations:")
         print(f"  Licks: {std_licks:.2f}")
         print(f"  Bouts: {std_bouts:.2f}")
@@ -394,6 +405,11 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
             'std_fecal': std_fecal,
             'std_bottle_weight': std_bottle_weight,
             'std_total_weight': std_total_weight,
+            'sem_licks': sem_licks,
+            'sem_bouts': sem_bouts,
+            'sem_fecal': sem_fecal,
+            'sem_bottle_weight': sem_bottle_weight,
+            'sem_total_weight': sem_total_weight,
             'total_animals': len(lick_counts),
             'sum_total_licks': result['total_licks'],
             'sum_total_bouts': result['total_bouts'],
@@ -1726,15 +1742,15 @@ def plot_weekly_averages(weekly_averages: Dict, save_path: Optional[Path] = None
         dates.append(date)
         ca_percents.append(data['ca_percent'])
         avg_licks.append(data['avg_total_licks'])
-        std_licks.append(data['std_licks'])
+        std_licks.append(data['sem_licks'])
         avg_bouts.append(data['avg_total_bouts'])
-        std_bouts.append(data['std_bouts'])
+        std_bouts.append(data['sem_bouts'])
         avg_fecal.append(data['avg_fecal_count'])
-        std_fecal.append(data['std_fecal'])
+        std_fecal.append(data['sem_fecal'])
         avg_bottle_weight.append(data['avg_bottle_weight_loss'])
-        std_bottle_weight.append(data['std_bottle_weight'])
+        std_bottle_weight.append(data['sem_bottle_weight'])
         avg_total_weight.append(data['avg_total_weight_loss'])
-        std_total_weight.append(data['std_total_weight'])
+        std_total_weight.append(data['sem_total_weight'])
     
     # Convert to numpy arrays
     avg_licks = np.array(avg_licks)
@@ -1758,7 +1774,7 @@ def plot_weekly_averages(weekly_averages: Dict, save_path: Optional[Path] = None
                 color='steelblue', markerfacecolor='lightblue', markeredgecolor='steelblue')
     ax1.set_xlabel('Week')
     ax1.set_ylabel('Average Licks per Animal')
-    ax1.set_title('Average Licks Across Weeks (±SD)', fontsize=13, weight='bold')
+    ax1.set_title('Average Licks Across Weeks (±SEM)', fontsize=13, weight='bold')
     ax1.set_xticks(x_pos)
     ax1.set_xticklabels([f"{i+1}" for i in range(len(dates))])
     ax1.set_ylim(bottom=0)
@@ -1771,7 +1787,7 @@ def plot_weekly_averages(weekly_averages: Dict, save_path: Optional[Path] = None
                 color='darkgreen', markerfacecolor='lightgreen', markeredgecolor='darkgreen')
     ax2.set_xlabel('Week')
     ax2.set_ylabel('Average Bouts per Animal')
-    ax2.set_title('Average Lick Bouts Across Weeks (±SD)', fontsize=13, weight='bold')
+    ax2.set_title('Average Lick Bouts Across Weeks (±SEM)', fontsize=13, weight='bold')
     ax2.set_xticks(x_pos)
     ax2.set_xticklabels([f"{i+1}" for i in range(len(dates))])
     ax2.set_ylim(bottom=0)
@@ -1791,7 +1807,7 @@ def plot_weekly_averages(weekly_averages: Dict, save_path: Optional[Path] = None
                 color='saddlebrown', markerfacecolor='tan', markeredgecolor='saddlebrown')
     ax3.set_xlabel('Week')
     ax3.set_ylabel('Average Fecal Count per Animal')
-    ax3.set_title('Average Fecal Count Across Weeks (±SD)', fontsize=13, weight='bold')
+    ax3.set_title('Average Fecal Count Across Weeks (±SEM)', fontsize=13, weight='bold')
     ax3.set_xticks(x_pos)
     ax3.set_xticklabels([f"{i+1}" for i in range(len(dates))])
     ax3.set_ylim(bottom=0)
@@ -1804,7 +1820,7 @@ def plot_weekly_averages(weekly_averages: Dict, save_path: Optional[Path] = None
                 color='purple', markerfacecolor='plum', markeredgecolor='purple')
     ax4.set_xlabel('Week')
     ax4.set_ylabel('Average Bottle Weight Loss per Animal (g)')
-    ax4.set_title('Average Bottle Weight Loss Across Weeks (±SD)', fontsize=13, weight='bold')
+    ax4.set_title('Average Bottle Weight Loss Across Weeks (±SEM)', fontsize=13, weight='bold')
     ax4.set_xticks(x_pos)
     ax4.set_xticklabels([f"{i+1}" for i in range(len(dates))])
     ax4.set_ylim(bottom=0)
@@ -1817,7 +1833,7 @@ def plot_weekly_averages(weekly_averages: Dict, save_path: Optional[Path] = None
                 color='darkorange', markerfacecolor='orange', markeredgecolor='darkorange')
     ax5.set_xlabel('Week')
     ax5.set_ylabel('Average Total Weight Loss per Animal (g)')
-    ax5.set_title('Average Total Weight Loss Across Weeks (±SD)', fontsize=13, weight='bold')
+    ax5.set_title('Average Total Weight Loss Across Weeks (±SEM)', fontsize=13, weight='bold')
     ax5.set_xticks(x_pos)
     ax5.set_xticklabels([f"{i+1}" for i in range(len(dates))])
     ax5.spines['top'].set_visible(False)
