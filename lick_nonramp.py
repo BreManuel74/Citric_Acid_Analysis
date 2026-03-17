@@ -2479,6 +2479,11 @@ def process_single_week(
     thresholds = pd.Series({sensor: fixed_threshold for sensor in sensor_cols})
     events_df = detect_events_above_threshold(df, sensor_cols, thresholds)
     
+    # Filter to only first 30 minutes of session (1800 seconds)
+    original_length = len(events_df)
+    events_df = events_df[events_df['Time_sec'] < 1800].copy()
+    print(f"  Filtered to first 30 minutes: {len(events_df)}/{original_length} time points retained")
+    
     print(f"\nEvent detection results (fixed threshold = {fixed_threshold}):")
     for sensor in sensor_cols:
         event_col = f"{sensor}_event"
