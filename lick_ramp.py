@@ -281,12 +281,16 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
             - avg_fecal_count: Average fecal count across 12 animals
             - avg_bottle_weight_loss: Average bottle weight loss across 12 animals
             - avg_total_weight_loss: Average total weight loss across 12 animals
+            - avg_first_5min_lick_pct: Average percentage of licks in first 5 minutes
+            - avg_first_5min_bout_pct: Average percentage of bouts in first 5 minutes
             - ca_percent: Citric acid percentage for this week
             - std_licks: Standard deviation of licks across animals
             - std_bouts: Standard deviation of bouts across animals
             - std_fecal: Standard deviation of fecal counts across animals
             - std_bottle_weight: Standard deviation of bottle weight loss across animals
             - std_total_weight: Standard deviation of total weight loss across animals
+            - std_first_5min_lick_pct: Standard deviation of first 5 min lick percentages
+            - std_first_5min_bout_pct: Standard deviation of first 5 min bout percentages
     """
     averages = {}
     
@@ -296,6 +300,8 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
         fecal_counts = result['fecal_counts']
         bottle_weights = result['weights']  # bottle weight change
         total_weights = result['weight_losses']  # total weight change
+        first_5min_lick_pcts = result.get('first_5min_lick_pcts', np.zeros(len(lick_counts)))  # NEW
+        first_5min_bout_pcts = result.get('first_5min_bout_pcts', np.zeros(len(bout_counts)))  # NEW
         
         # Calculate averages and statistics for all metrics
         avg_licks = np.mean(lick_counts)
@@ -314,16 +320,36 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
         
         avg_total_weight = np.mean(total_weights)
         
+        # Calculate first-5-min percentage averages
+        avg_first_5min_lick_pct = np.mean(first_5min_lick_pcts)
+        avg_first_5min_bout_pct = np.mean(first_5min_bout_pcts)
+        
+        # Print detailed calculation breakdown for first-5-min percentages
+        print(f"\n--- First 5-Minute Average Calculation Details ---")
+        print(f"Individual animal lick percentages: {first_5min_lick_pcts}")
+        print(f"Sum of all percentages: {np.sum(first_5min_lick_pcts):.2f}")
+        print(f"Number of animals: {len(first_5min_lick_pcts)}")
+        print(f"Average = {np.sum(first_5min_lick_pcts):.2f} / {len(first_5min_lick_pcts)} = {avg_first_5min_lick_pct:.2f}%")
+        print(f"\nIndividual animal bout percentages: {first_5min_bout_pcts}")
+        print(f"Sum of all bout percentages: {np.sum(first_5min_bout_pcts):.2f}")
+        print(f"Number of animals: {len(first_5min_bout_pcts)}")
+        print(f"Average bout % = {np.sum(first_5min_bout_pcts):.2f} / {len(first_5min_bout_pcts)} = {avg_first_5min_bout_pct:.2f}%")
+        print(f"--------------------------------------------------\n")
+        
         std_licks = np.std(lick_counts)
         std_bouts = np.std(bout_counts)
         std_fecal = np.std(fecal_counts)
         std_total_weight = np.std(total_weights)
+        std_first_5min_lick_pct = np.std(first_5min_lick_pcts)
+        std_first_5min_bout_pct = np.std(first_5min_bout_pcts)
         
         n = len(lick_counts)
         sem_licks = std_licks / np.sqrt(n) if n > 0 else 0
         sem_bouts = std_bouts / np.sqrt(n) if n > 0 else 0
         sem_fecal = std_fecal / np.sqrt(n) if n > 0 else 0
         sem_total_weight = std_total_weight / np.sqrt(n) if n > 0 else 0
+        sem_first_5min_lick_pct = std_first_5min_lick_pct / np.sqrt(n) if n > 0 else 0
+        sem_first_5min_bout_pct = std_first_5min_bout_pct / np.sqrt(n) if n > 0 else 0
         
         n_bottle = len(bottle_weights_filtered) if date == '11/12/25' else n
         sem_bottle_weight = std_bottle_weight / np.sqrt(n_bottle) if n_bottle > 0 else 0
@@ -336,21 +362,29 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
             'avg_fecal_count': avg_fecal,
             'avg_bottle_weight_loss': avg_bottle_weight,
             'avg_total_weight_loss': avg_total_weight,
+            'avg_first_5min_lick_pct': avg_first_5min_lick_pct,  # NEW
+            'avg_first_5min_bout_pct': avg_first_5min_bout_pct,  # NEW
             'avg_licks_per_animal': lick_counts,
             'avg_bouts_per_animal': bout_counts,
             'avg_fecal_per_animal': fecal_counts,
             'avg_bottle_weight_per_animal': bottle_weights,
             'avg_total_weight_per_animal': total_weights,
+            'first_5min_lick_pcts_per_animal': first_5min_lick_pcts,  # NEW
+            'first_5min_bout_pcts_per_animal': first_5min_bout_pcts,  # NEW
             'std_licks': std_licks,
             'std_bouts': std_bouts,
             'std_fecal': std_fecal,
             'std_bottle_weight': std_bottle_weight,
             'std_total_weight': std_total_weight,
+            'std_first_5min_lick_pct': std_first_5min_lick_pct,  # NEW
+            'std_first_5min_bout_pct': std_first_5min_bout_pct,  # NEW
             'sem_licks': sem_licks,
             'sem_bouts': sem_bouts,
             'sem_fecal': sem_fecal,
             'sem_bottle_weight': sem_bottle_weight,
             'sem_total_weight': sem_total_weight,
+            'sem_first_5min_lick_pct': sem_first_5min_lick_pct,  # NEW
+            'sem_first_5min_bout_pct': sem_first_5min_bout_pct,  # NEW
             'total_animals': len(lick_counts),
             'sum_total_licks': result['total_licks'],
             'sum_total_bouts': result['total_bouts'],
@@ -1426,6 +1460,21 @@ def display_weekly_averages(weekly_averages: Dict) -> str:
         lines.append(row)
     
     lines.append("")
+    lines.append("FIRST 5-MINUTE PERCENTAGES:")
+    header_5min = f"{'Date':<12} {'Lick %':<12} {'Std Lick%':<12} {'Bout %':<12} {'Std Bout%':<12}"
+    lines.append(header_5min)
+    lines.append("-" * 80)
+    
+    for date in sorted_dates:
+        avg_data = weekly_averages[date]
+        row = (f"{date:<12} "
+               f"{avg_data['avg_first_5min_lick_pct']:<12.1f} "
+               f"{avg_data['std_first_5min_lick_pct']:<12.1f} "
+               f"{avg_data['avg_first_5min_bout_pct']:<12.1f} "
+               f"{avg_data['std_first_5min_bout_pct']:<12.1f}")
+        lines.append(row)
+    
+    lines.append("")
     lines.append("WEIGHT AND FECAL AVERAGES:")
     header2 = f"{'Date':<12} {'Avg Fecal':<12} {'Std Fecal':<12} {'Avg Bottle':<12} {'Std Bottle':<12} {'Avg Total':<12} {'Std Total':<12}"
     lines.append(header2)
@@ -1451,6 +1500,8 @@ def display_weekly_averages(weekly_averages: Dict) -> str:
         all_avg_fecal = [avg['avg_fecal_count'] for avg in weekly_averages.values()]
         all_avg_bottle = [avg['avg_bottle_weight_loss'] for avg in weekly_averages.values()]
         all_avg_total = [avg['avg_total_weight_loss'] for avg in weekly_averages.values()]
+        all_avg_first_5min_lick = [avg['avg_first_5min_lick_pct'] for avg in weekly_averages.values()]
+        all_avg_first_5min_bout = [avg['avg_first_5min_bout_pct'] for avg in weekly_averages.values()]
         
         lines.append("")
         lines.append("CROSS-WEEK STATISTICS:")
@@ -1460,6 +1511,12 @@ def display_weekly_averages(weekly_averages: Dict) -> str:
         lines.append(f"Bouts - Mean: {np.mean(all_avg_bouts):.1f}, "
                     f"Std: {np.std(all_avg_bouts):.1f}, "
                     f"Range: {np.min(all_avg_bouts):.1f} - {np.max(all_avg_bouts):.1f}")
+        lines.append(f"First 5-min Lick % - Mean: {np.mean(all_avg_first_5min_lick):.1f}%, "
+                    f"Std: {np.std(all_avg_first_5min_lick):.1f}%, "
+                    f"Range: {np.min(all_avg_first_5min_lick):.1f}% - {np.max(all_avg_first_5min_lick):.1f}%")
+        lines.append(f"First 5-min Bout % - Mean: {np.mean(all_avg_first_5min_bout):.1f}%, "
+                    f"Std: {np.std(all_avg_first_5min_bout):.1f}%, "
+                    f"Range: {np.min(all_avg_first_5min_bout):.1f}% - {np.max(all_avg_first_5min_bout):.1f}%")
         lines.append(f"Fecal - Mean: {np.mean(all_avg_fecal):.1f}, "
                     f"Std: {np.std(all_avg_fecal):.1f}, "
                     f"Range: {np.min(all_avg_fecal):.1f} - {np.max(all_avg_fecal):.1f}")
@@ -2433,6 +2490,8 @@ def process_single_week(
     weight_losses = []
     fecal_counts = []
     animal_ids = []  # Track animal IDs in same order as measurements
+    first_5min_lick_pcts = []  # NEW: Percentage of licks in first 5 minutes
+    first_5min_bout_pcts = []  # NEW: Percentage of bouts in first 5 minutes
     
     for sensor in selected_sensors:
         # Lick counts
@@ -2441,8 +2500,15 @@ def process_single_week(
             sensor_licks = events_df[event_col].sum()
             total_licks += sensor_licks
             lick_counts.append(sensor_licks)
+            
+            # Calculate first 5 minute lick percentage
+            first_5min_licks = ((events_df[event_col]) & (events_df['Time_sec'] < 300)).sum()
+            first_5min_lick_pct = (first_5min_licks / sensor_licks * 100) if sensor_licks > 0 else 0
+            first_5min_lick_pcts.append(first_5min_lick_pct)
+            print(f"  {sensor}: Total licks = {sensor_licks}, First 5min licks = {first_5min_licks}, First 5min % = {first_5min_lick_pct:.1f}%")
         else:
             lick_counts.append(0)
+            first_5min_lick_pcts.append(0)
         
         # Bout counts
         if sensor in bout_dict:
@@ -2451,8 +2517,16 @@ def process_single_week(
             total_bouts += sensor_bouts
             total_bout_licks += sensor_bout_licks
             bout_counts.append(sensor_bouts)
+            
+            # Calculate first 5 minute bout percentage
+            bout_start_times = bout_dict[sensor]['bout_start_times']
+            first_5min_bouts = np.sum(bout_start_times < 300) if len(bout_start_times) > 0 else 0
+            first_5min_bout_pct = (first_5min_bouts / sensor_bouts * 100) if sensor_bouts > 0 else 0
+            first_5min_bout_pcts.append(first_5min_bout_pct)
+            print(f"  {sensor}: Total bouts = {sensor_bouts}, First 5min bouts = {first_5min_bouts}, First 5min % = {first_5min_bout_pct:.1f}%")
         else:
             bout_counts.append(0)
+            first_5min_bout_pcts.append(0)
         
         # Weights and fecal counts
         # Exclude R9O bottle weight outlier for 11/12/25 (R9O maps to Sensor_10)
@@ -2492,6 +2566,8 @@ def process_single_week(
         'weight_losses': np.array(weight_losses),
         'animal_ids': animal_ids,  # NEW: Track animal IDs for repeated measures
         'animal_sexes': animal_sexes,  # NEW: Track sex for mixed ANOVA
+        'first_5min_lick_pcts': np.array(first_5min_lick_pcts),  # NEW: First 5 min lick percentages
+        'first_5min_bout_pcts': np.array(first_5min_bout_pcts),  # NEW: First 5 min bout percentages
         'correlations': {
             'lick_weight': lick_weight_corr,
             'bout_weight': bout_weight_corr,
