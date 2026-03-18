@@ -2212,9 +2212,6 @@ def plot_lick_rate_histogram(
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     
-    # Add grid for readability
-    ax.grid(axis='y', alpha=0.3, linestyle='--')
-    
     plt.tight_layout()
     
     if save_path:
@@ -2312,9 +2309,6 @@ def plot_comprehensive_lick_rate(
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     
-    # Add grid for readability
-    ax.grid(axis='y', alpha=0.3, linestyle='--')
-    
     plt.tight_layout()
     
     print("=" * 80 + "\n")
@@ -2324,6 +2318,276 @@ def plot_comprehensive_lick_rate(
         print(f"Comprehensive lick rate plot saved to: {save_path}")
     
     if not show:
+        plt.close(fig)
+    
+    return fig
+
+
+def plot_first_5min_by_week(
+    weekly_averages: Dict,
+    save_path: Optional[Path] = None,
+    show: bool = True
+) -> plt.Figure:
+    """Create bar plot showing percentage of licks in first 5 minutes for each week.
+    
+    In the non-ramp design, all mice stay at the same CA% across all weeks.
+    This creates a single plot with one bar per week showing average percentage
+    with individual mouse data points overlaid and SEM error bars.
+    
+    Parameters:
+        weekly_averages: Dictionary from compute_weekly_averages
+        save_path: Optional path to save the figure
+        show: Whether to display the plot
+        
+    Returns:
+        The matplotlib figure object
+    """
+    print("\n" + "=" * 80)
+    print("PLOTTING: First 5-Minute Lick Percentage by Week")
+    print("=" * 80)
+    
+    # Sort dates chronologically to get proper week order
+    sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+    n_weeks = len(sorted_dates)
+    
+    if n_weeks == 0:
+        print("ERROR: No data found in weekly_averages.")
+        return None
+    
+    print(f"Found {n_weeks} weeks of data")
+    
+    # Extract data for each week
+    week_labels = []
+    ca_percents = []
+    avg_pcts = []
+    sem_pcts = []
+    individual_data = []
+    
+    for i, date in enumerate(sorted_dates):
+        data = weekly_averages[date]
+        week_labels.append(f"Week {i+1}")
+        ca_percents.append(data['ca_percent'])
+        avg_pcts.append(data['avg_first_5min_lick_pct'])
+        
+        # Calculate SEM
+        individual_pcts = data['first_5min_lick_pcts_per_animal']
+        individual_data.append(individual_pcts)
+        n = len(individual_pcts)
+        sem = data['std_first_5min_lick_pct'] / np.sqrt(n) if n > 0 else 0
+        sem_pcts.append(sem)
+        
+        print(f"  Week {i+1} ({data['ca_percent']}% CA): avg={avg_pcts[-1]:.2f}%, SEM={sem:.2f}%, n={n}")
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # In non-ramp design, CA% should be constant, so use a single color
+    ca_pct = ca_percents[0] if ca_percents else 0
+    if ca_pct == 0:
+        bar_color = 'dodgerblue'
+    elif ca_pct <= 1.0:
+        bar_color = 'skyblue'
+    else:
+        bar_color = 'orangered'
+    
+    x_positions = np.arange(n_weeks)
+    bar_width = 0.6
+    
+    # Plot bars
+    bars = ax.bar(x_positions, avg_pcts, bar_width,
+                 color=bar_color, alpha=0.7, edgecolor='black', linewidth=1.5)
+    
+    # Add error bars
+    ax.errorbar(x_positions, avg_pcts, yerr=sem_pcts,
+               fmt='none', ecolor='black', capsize=5, linewidth=2, capthick=2)
+    
+    # Overlay individual mouse data points
+    jitter_amount = 0.15
+    np.random.seed(42)  # For reproducibility
+    
+    for i, individual_pcts in enumerate(individual_data):
+        jitter = np.random.uniform(-jitter_amount, jitter_amount, len(individual_pcts))
+        ax.scatter([x_positions[i]] * len(individual_pcts) + jitter, individual_pcts,
+                  color='black', s=40, alpha=0.5, edgecolors='black', linewidths=0.5, zorder=10)
+    
+    # Formatting
+    ax.set_xlabel('Week', fontsize=12, weight='bold')
+    ax.set_ylabel('% of Licks in First 5 Minutes', fontsize=12, weight='bold')
+    ax.set_title(f'Percentage of Licks in First 5 Minutes Across Weeks\n({ca_pct}% CA - Non-Ramp Design)',
+                fontsize=14, weight='bold')
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(week_labels)
+    ax.set_ylim(bottom=0)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # Add sample size annotation
+    n_animals = len(individual_data[0]) if individual_data else 0
+    ax.text(0.98, 0.02, f'n={n_animals} mice per week', transform=ax.transAxes,
+           ha='right', va='bottom', fontsize=10, style='italic',
+           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+    
+    plt.tight_layout()
+    
+    print(f"\nPlot created with {n_weeks} weeks")
+    print("=" * 80 + "\n")
+    
+    # Save if requested
+    if save_path:
+        fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+        print(f"Figure saved to: {save_path}")
+    
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    
+    return fig
+
+
+def plot_first_5min_by_week_with_lines(
+    weekly_averages: Dict,
+    save_path: Optional[Path] = None,
+    show: bool = True
+) -> plt.Figure:
+    """Create bar plot with individual mouse trajectories connected by lines across weeks.
+    
+    Shows bars for weekly averages plus lines connecting each individual mouse's data
+    across weeks in the non-ramp design (constant CA%).
+    
+    Parameters:
+        weekly_averages: Dictionary from compute_weekly_averages
+        save_path: Optional path to save the figure
+        show: Whether to display the plot
+        
+    Returns:
+        The matplotlib figure object
+    """
+    print("\n" + "=" * 80)
+    print("PLOTTING: First 5-Minute Lick Percentage by Week (with Individual Trajectories)")
+    print("=" * 80)
+    
+    # Sort dates chronologically to get proper week order
+    sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+    n_weeks = len(sorted_dates)
+    
+    if n_weeks == 0:
+        print("ERROR: No data found in weekly_averages.")
+        return None
+    
+    print(f"Found {n_weeks} weeks of data")
+    
+    # Extract data for each week and track individual animals
+    week_labels = []
+    ca_percents = []
+    avg_pcts = []
+    sem_pcts = []
+    animal_ids_by_week = []
+    individual_data_by_week = []
+    
+    for i, date in enumerate(sorted_dates):
+        data = weekly_averages[date]
+        week_labels.append(f"Week {i+1}")
+        ca_percents.append(data['ca_percent'])
+        avg_pcts.append(data['avg_first_5min_lick_pct'])
+        
+        # Get individual animal data and IDs
+        individual_pcts = data['first_5min_lick_pcts_per_animal']
+        animal_ids = data.get('animal_ids', [f"Animal_{j+1}" for j in range(len(individual_pcts))])
+        
+        individual_data_by_week.append(individual_pcts)
+        animal_ids_by_week.append(animal_ids)
+        
+        n = len(individual_pcts)
+        sem = data['std_first_5min_lick_pct'] / np.sqrt(n) if n > 0 else 0
+        sem_pcts.append(sem)
+        
+        print(f"  Week {i+1} ({data['ca_percent']}% CA): avg={avg_pcts[-1]:.2f}%, SEM={sem:.2f}%, n={n}")
+    
+    # Build a mapping of animal ID to its trajectory across weeks
+    # animal_trajectories: dict mapping animal_id -> list of (week_idx, percentage) tuples
+    animal_trajectories = {}
+    
+    for week_idx, (animal_ids, individual_pcts) in enumerate(zip(animal_ids_by_week, individual_data_by_week)):
+        for animal_id, pct in zip(animal_ids, individual_pcts):
+            if animal_id not in animal_trajectories:
+                animal_trajectories[animal_id] = []
+            animal_trajectories[animal_id].append((week_idx, pct))
+    
+    print(f"\nTracking {len(animal_trajectories)} individual animals across {n_weeks} weeks")
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(12, 7))
+    
+    # In non-ramp design, CA% should be constant, so use a single color
+    ca_pct = ca_percents[0] if ca_percents else 0
+    if ca_pct == 0:
+        bar_color = 'dodgerblue'
+    elif ca_pct <= 1.0:
+        bar_color = 'skyblue'
+    else:
+        bar_color = 'orangered'
+    
+    x_positions = np.arange(n_weeks)
+    bar_width = 0.6
+    
+    # Plot bars
+    bars = ax.bar(x_positions, avg_pcts, bar_width,
+                 color=bar_color, alpha=0.7, edgecolor='black', linewidth=1.5, zorder=5)
+    
+    # Add error bars
+    ax.errorbar(x_positions, avg_pcts, yerr=sem_pcts,
+               fmt='none', ecolor='black', capsize=5, linewidth=2, capthick=2, zorder=6)
+    
+    # Plot individual animal trajectories with lines
+    cmap = plt.cm.tab20  # Colormap with 20 distinct colors
+    colors = [cmap(i % 20) for i in range(len(animal_trajectories))]
+    
+    for idx, (animal_id, trajectory) in enumerate(animal_trajectories.items()):
+        # Sort trajectory by week index
+        trajectory.sort(key=lambda x: x[0])
+        
+        if len(trajectory) > 1:  # Only draw lines if animal appears in multiple weeks
+            weeks = [t[0] for t in trajectory]
+            pcts = [t[1] for t in trajectory]
+            
+            # Draw line connecting this animal's data points
+            ax.plot(weeks, pcts, color=colors[idx], alpha=0.4, linewidth=1.5, zorder=3)
+            
+            # Draw markers for this animal's data points
+            ax.scatter(weeks, pcts, color=colors[idx], s=50, alpha=0.7, 
+                      edgecolors='black', linewidths=0.8, zorder=9)
+    
+    # Formatting
+    ax.set_xlabel('Week', fontsize=12, weight='bold')
+    ax.set_ylabel('% of Licks in First 5 Minutes', fontsize=12, weight='bold')
+    ax.set_title(f'Individual Mouse Trajectories of Lick Percentage Across Weeks\n({ca_pct}% CA - Non-Ramp Design)',
+                fontsize=14, weight='bold')
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(week_labels)
+    ax.set_ylim(bottom=0)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # Add sample size annotation
+    n_animals = len(animal_trajectories)
+    ax.text(0.98, 0.02, f'n={n_animals} mice tracked across weeks', transform=ax.transAxes,
+           ha='right', va='bottom', fontsize=10, style='italic',
+           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+    
+    plt.tight_layout()
+    
+    print(f"\nPlot created with {n_weeks} weeks and {n_animals} individual mouse trajectories")
+    print("=" * 80 + "\n")
+    
+    # Save if requested
+    if save_path:
+        fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+        print(f"Figure saved to: {save_path}")
+    
+    if show:
+        plt.show()
+    else:
         plt.close(fig)
     
     return fig
@@ -2801,6 +3065,14 @@ def main():
     print("\nPlotting comprehensive weekly averages (licks, bouts, fecal, weights)...")
     plot_weekly_averages(weekly_averages, show=True)
     
+    # Plot first 5-minute percentage by week
+    print("\nPlotting percentage of licks in first 5 minutes by week...")
+    plot_first_5min_by_week(weekly_averages, show=True)
+    
+    # Plot first 5-minute percentage by week with individual mouse trajectories
+    print("\nPlotting percentage of licks in first 5 minutes by week (with mouse trajectories)...")
+    plot_first_5min_by_week_with_lines(weekly_averages, show=True)
+    
     # Optional: Save comprehensive summary with all statistical results
     save_table = input("\nSave weekly averages, ANOVA, and Tukey HSD results as text file? (y/n): ").strip().lower()
     if save_table in ['y', 'yes']:
@@ -2847,6 +3119,24 @@ def main():
         fig_comp = plot_comprehensive_lick_rate(lick_rate_data, save_path=comprehensive_save_path, show=False)
         plt.close(fig_comp)  # Close after saving
         print(f"Saved {len(sorted_dates)} individual week plots + 1 comprehensive plot")
+    
+    # Optional: Save first 5-minute percentage plot
+    save_first_5min = input("\nSave first 5-minute percentage plot as SVG? (y/n): ").strip().lower()
+    if save_first_5min in ['y', 'yes']:
+        save_path_5min = master_csv.parent / "first_5min_lick_percentage_by_week.svg"
+        fig_5min = plot_first_5min_by_week(weekly_averages, save_path=save_path_5min, show=False)
+        if fig_5min:
+            plt.close(fig_5min)
+            print(f"Saved first 5-minute percentage plot to: {save_path_5min}")
+    
+    # Optional: Save first 5-minute percentage plot with trajectories
+    save_first_5min_lines = input("\nSave first 5-minute percentage plot with mouse trajectories as SVG? (y/n): ").strip().lower()
+    if save_first_5min_lines in ['y', 'yes']:
+        save_path_5min_lines = master_csv.parent / "first_5min_lick_percentage_by_week_with_trajectories.svg"
+        fig_5min_lines = plot_first_5min_by_week_with_lines(weekly_averages, save_path=save_path_5min_lines, show=False)
+        if fig_5min_lines:
+            plt.close(fig_5min_lines)
+            print(f"Saved first 5-minute percentage plot with trajectories to: {save_path_5min_lines}")
     
     print("\n" + "=" * 80)
     print("COMPREHENSIVE STATISTICAL ANALYSIS COMPLETED")
