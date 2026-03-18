@@ -86,12 +86,36 @@ def get_sensor_columns(df: pd.DataFrame) -> List[str]:
     return sensor_cols
 
 
-def compute_sensor_KDE(df: pd.DataFrame, sensor_cols: List[str], verbose: bool = False) -> pd.Series:
+def compute_sensor_KDE(df: pd.DataFrame, sensor_cols: List[str], cache_file: Path = None, verbose: bool = False) -> pd.Series:
     """Compute the KDE (Kernel Density Estimation) peak for each sensor column.
     
     Returns a Series indexed by sensor column names with their KDE peak values.
     The KDE peak represents the most probable value in the distribution.
+    
+    Parameters:
+        df: DataFrame containing sensor data
+        sensor_cols: List of sensor column names
+        cache_file: Optional path to save/load cached KDE values (speeds up subsequent runs)
+        verbose: Whether to print detailed processing info
     """
+    # Try to load from cache if available
+    if cache_file and cache_file.exists():
+        try:
+            cached_df = pd.read_csv(cache_file, index_col=0)
+            cached_kdes = cached_df['KDE_Peak']  # Convert to Series
+            # Verify cache has all required sensors
+            if all(col in cached_kdes.index for col in sensor_cols):
+                if verbose:
+                    print(f"  ✓ Loaded KDE values from cache: {cache_file.name}")
+                return cached_kdes[sensor_cols]
+            else:
+                if verbose:
+                    print(f"  ⚠ Cache incomplete, recomputing KDE values")
+        except Exception as e:
+            if verbose:
+                print(f"  ⚠ Error loading cache ({e}), recomputing KDE values")
+    
+    # Compute KDE values
     kdes = {}
     for col in sensor_cols:
         series = pd.to_numeric(df[col], errors="coerce")
@@ -122,7 +146,21 @@ def compute_sensor_KDE(df: pd.DataFrame, sensor_cols: List[str], verbose: bool =
             kdes[col] = series.iloc[0] if len(series) == 1 else None
             if verbose:
                 print(f"  {col}: Insufficient data, KDE={kdes[col]}")
-    return pd.Series(kdes)
+    
+    result = pd.Series(kdes)
+    
+    # Save to cache if path provided
+    if cache_file:
+        try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            result.to_csv(cache_file, header=['KDE_Peak'])
+            if verbose:
+                print(f"  ✓ Saved KDE values to cache: {cache_file.name}")
+        except Exception as e:
+            if verbose:
+                print(f"  ⚠ Could not save cache: {e}")
+    
+    return result
 
 
 def compute_KDE_normalizations(df: pd.DataFrame, sensor_cols: List[str], sensor_kdes: pd.Series) -> pd.DataFrame:
@@ -2734,8 +2772,14 @@ def process_single_week(
     # Load and process capacitive data
     df = load_capacitive_csv(capacitive_file)
     sensor_cols = get_sensor_columns(df)
+    
+    # Set up KDE cache file path (saves computation time on subsequent runs)
+    cache_dir = capacitive_file.parent / 'kde_cache'
+    cache_filename = capacitive_file.stem + '_kde_cache.csv'
+    cache_file = cache_dir / cache_filename
+    
     print(f"\nComputing sensor KDE baselines and raw statistics:")
-    sensor_kdes = compute_sensor_KDE(df, sensor_cols, verbose=True)
+    sensor_kdes = compute_sensor_KDE(df, sensor_cols, cache_file=cache_file, verbose=True)
     df = compute_KDE_normalizations(df, sensor_cols, sensor_kdes)
     
     # Use fixed threshold (same as lick_detection.py)
