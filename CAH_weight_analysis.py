@@ -943,7 +943,7 @@ def perform_mixed_anova_sex_stratified(df: pd.DataFrame, sex: str, measure: str 
 			within='Day',
 			between='CA (%)',
 			subject='ID',
-			correction='auto'
+			correction=True  # force GG correction; 'auto' lacks power with n=3
 		)
 		
 		print(f"\nMixed ANOVA Table:")
@@ -961,22 +961,45 @@ def perform_mixed_anova_sex_stratified(df: pd.DataFrame, sex: str, measure: str 
 		if interaction_row is None:
 			interaction_row = aov[aov['Source'] == 'Day * CA (%)'].iloc[0] if 'Day * CA (%)' in aov['Source'].values else None
 		
+		# Greenhouse-Geisser correction for within-subjects effects
+		def _gg_p(row):
+			if row is None:
+				return np.nan, False
+			p_gg = row.get('p-GG-corr', np.nan)
+			if not pd.isna(p_gg):
+				return float(p_gg), True
+			return float(row[p_col]), False
+
+		time_p, time_gg = _gg_p(time_row)
+		ca_p = float(ca_row[p_col]) if ca_row is not None else np.nan
+		int_p, int_gg = _gg_p(interaction_row)
+
+		eps_val = np.nan
+		if time_row is not None:
+			eps_val = time_row.get('eps', np.nan)
+		if not pd.isna(eps_val):
+			print(f"\nSphericity: Greenhouse-Geisser ε = {float(eps_val):.4f}")
+			if float(eps_val) < 0.75:
+				print("  ⚠ Sphericity violated — GG correction applied to within-subjects p-values")
+
 		print(f"\nFormatted Results:")
 		if time_row is not None:
-			sig = '***' if time_row[p_col] < 0.001 else '**' if time_row[p_col] < 0.01 else '*' if time_row[p_col] < 0.05 else 'ns'
+			sig = '***' if time_p < 0.001 else '**' if time_p < 0.01 else '*' if time_p < 0.05 else 'ns'
+			corr_note = " (GG-corrected)" if time_gg else ""
 			print(f"  Time: F({time_row['DF1']:.0f},{time_row['DF2']:.0f}) = "
-				  f"{time_row['F']:.3f}, p = {time_row[p_col]:.4f} {sig}")
-		
+				  f"{time_row['F']:.3f}, p = {time_p:.4f} {sig}{corr_note}")
+
 		if ca_row is not None:
-			sig = '***' if ca_row[p_col] < 0.001 else '**' if ca_row[p_col] < 0.01 else '*' if ca_row[p_col] < 0.05 else 'ns'
+			sig = '***' if ca_p < 0.001 else '**' if ca_p < 0.01 else '*' if ca_p < 0.05 else 'ns'
 			print(f"  CA%: F({ca_row['DF1']:.0f},{ca_row['DF2']:.0f}) = "
-				  f"{ca_row['F']:.3f}, p = {ca_row[p_col]:.4f} {sig}")
-		
+				  f"{ca_row['F']:.3f}, p = {ca_p:.4f} {sig}")
+
 		if interaction_row is not None:
-			sig = '***' if interaction_row[p_col] < 0.001 else '**' if interaction_row[p_col] < 0.01 else '*' if interaction_row[p_col] < 0.05 else 'ns'
+			sig = '***' if int_p < 0.001 else '**' if int_p < 0.01 else '*' if int_p < 0.05 else 'ns'
+			corr_note = " (GG-corrected)" if int_gg else ""
 			print(f"  Time × CA%: F({interaction_row['DF1']:.0f},{interaction_row['DF2']:.0f}) = "
-				  f"{interaction_row['F']:.3f}, p = {interaction_row[p_col]:.4f} {sig}")
-		
+				  f"{interaction_row['F']:.3f}, p = {int_p:.4f} {sig}{corr_note}")
+
 		results = {
 			'measure': measure,
 			'sex': sex,
@@ -984,29 +1007,34 @@ def perform_mixed_anova_sex_stratified(df: pd.DataFrame, sex: str, measure: str 
 			'anova_table': aov,
 			'time': {
 				'F': time_row['F'] if time_row is not None else np.nan,
-				'p': time_row[p_col] if time_row is not None else np.nan,
+				'p': time_p,
+				'p_unc': float(time_row[p_col]) if time_row is not None else np.nan,
+				'gg_corrected': time_gg,
+				'eps': float(eps_val) if not pd.isna(eps_val) else np.nan,
 				'df1': time_row['DF1'] if time_row is not None else np.nan,
 				'df2': time_row['DF2'] if time_row is not None else np.nan,
-				'significant': time_row[p_col] < 0.05 if time_row is not None else False
+				'significant': time_p < 0.05 if not np.isnan(time_p) else False
 			},
 			'ca_percent': {
 				'F': ca_row['F'] if ca_row is not None else np.nan,
-				'p': ca_row[p_col] if ca_row is not None else np.nan,
+				'p': ca_p,
 				'df1': ca_row['DF1'] if ca_row is not None else np.nan,
 				'df2': ca_row['DF2'] if ca_row is not None else np.nan,
-				'significant': ca_row[p_col] < 0.05 if ca_row is not None else False
+				'significant': ca_p < 0.05 if not np.isnan(ca_p) else False
 			},
 			'interaction': {
 				'F': interaction_row['F'] if interaction_row is not None else np.nan,
-				'p': interaction_row[p_col] if interaction_row is not None else np.nan,
+				'p': int_p,
+				'p_unc': float(interaction_row[p_col]) if interaction_row is not None else np.nan,
+				'gg_corrected': int_gg,
 				'df1': interaction_row['DF1'] if interaction_row is not None else np.nan,
 				'df2': interaction_row['DF2'] if interaction_row is not None else np.nan,
-				'significant': interaction_row[p_col] < 0.05 if interaction_row is not None else False
+				'significant': int_p < 0.05 if not np.isnan(int_p) else False
 			}
 		}
-		
+
 		return results
-		
+
 	except Exception as e:
 		print(f"\nERROR running mixed ANOVA: {e}")
 		import traceback
@@ -1143,7 +1171,7 @@ def perform_mixed_anova_ca_stratified(df: pd.DataFrame, ca_percent: int, measure
 			within='Day',
 			between='Sex',
 			subject='ID',
-			correction='auto'
+			correction=True  # force GG correction; 'auto' lacks power with n=3
 		)
 		
 		print(f"\nMixed ANOVA Table:")
@@ -1161,22 +1189,45 @@ def perform_mixed_anova_ca_stratified(df: pd.DataFrame, ca_percent: int, measure
 		if interaction_row is None:
 			interaction_row = aov[aov['Source'] == 'Day * Sex'].iloc[0] if 'Day * Sex' in aov['Source'].values else None
 		
+		# Greenhouse-Geisser correction for within-subjects effects
+		def _gg_p(row):
+			if row is None:
+				return np.nan, False
+			p_gg = row.get('p-GG-corr', np.nan)
+			if not pd.isna(p_gg):
+				return float(p_gg), True
+			return float(row[p_col]), False
+
+		time_p, time_gg = _gg_p(time_row)
+		sex_p = float(sex_row[p_col]) if sex_row is not None else np.nan
+		int_p, int_gg = _gg_p(interaction_row)
+
+		eps_val = np.nan
+		if time_row is not None:
+			eps_val = time_row.get('eps', np.nan)
+		if not pd.isna(eps_val):
+			print(f"\nSphericity: Greenhouse-Geisser ε = {float(eps_val):.4f}")
+			if float(eps_val) < 0.75:
+				print("  ⚠ Sphericity violated — GG correction applied to within-subjects p-values")
+
 		print(f"\nFormatted Results:")
 		if time_row is not None:
-			sig = '***' if time_row[p_col] < 0.001 else '**' if time_row[p_col] < 0.01 else '*' if time_row[p_col] < 0.05 else 'ns'
+			sig = '***' if time_p < 0.001 else '**' if time_p < 0.01 else '*' if time_p < 0.05 else 'ns'
+			corr_note = " (GG-corrected)" if time_gg else ""
 			print(f"  Time: F({time_row['DF1']:.0f},{time_row['DF2']:.0f}) = "
-				  f"{time_row['F']:.3f}, p = {time_row[p_col]:.4f} {sig}")
-		
+				  f"{time_row['F']:.3f}, p = {time_p:.4f} {sig}{corr_note}")
+
 		if sex_row is not None:
-			sig = '***' if sex_row[p_col] < 0.001 else '**' if sex_row[p_col] < 0.01 else '*' if sex_row[p_col] < 0.05 else 'ns'
+			sig = '***' if sex_p < 0.001 else '**' if sex_p < 0.01 else '*' if sex_p < 0.05 else 'ns'
 			print(f"  Sex: F({sex_row['DF1']:.0f},{sex_row['DF2']:.0f}) = "
-				  f"{sex_row['F']:.3f}, p = {sex_row[p_col]:.4f} {sig}")
-		
+				  f"{sex_row['F']:.3f}, p = {sex_p:.4f} {sig}")
+
 		if interaction_row is not None:
-			sig = '***' if interaction_row[p_col] < 0.001 else '**' if interaction_row[p_col] < 0.01 else '*' if interaction_row[p_col] < 0.05 else 'ns'
+			sig = '***' if int_p < 0.001 else '**' if int_p < 0.01 else '*' if int_p < 0.05 else 'ns'
+			corr_note = " (GG-corrected)" if int_gg else ""
 			print(f"  Time × Sex: F({interaction_row['DF1']:.0f},{interaction_row['DF2']:.0f}) = "
-				  f"{interaction_row['F']:.3f}, p = {interaction_row[p_col]:.4f} {sig}")
-		
+				  f"{interaction_row['F']:.3f}, p = {int_p:.4f} {sig}{corr_note}")
+
 		results = {
 			'measure': measure,
 			'ca_percent': ca_percent,
@@ -1184,29 +1235,34 @@ def perform_mixed_anova_ca_stratified(df: pd.DataFrame, ca_percent: int, measure
 			'anova_table': aov,
 			'time': {
 				'F': time_row['F'] if time_row is not None else np.nan,
-				'p': time_row[p_col] if time_row is not None else np.nan,
+				'p': time_p,
+				'p_unc': float(time_row[p_col]) if time_row is not None else np.nan,
+				'gg_corrected': time_gg,
+				'eps': float(eps_val) if not pd.isna(eps_val) else np.nan,
 				'df1': time_row['DF1'] if time_row is not None else np.nan,
 				'df2': time_row['DF2'] if time_row is not None else np.nan,
-				'significant': time_row[p_col] < 0.05 if time_row is not None else False
+				'significant': time_p < 0.05 if not np.isnan(time_p) else False
 			},
 			'sex': {
 				'F': sex_row['F'] if sex_row is not None else np.nan,
-				'p': sex_row[p_col] if sex_row is not None else np.nan,
+				'p': sex_p,
 				'df1': sex_row['DF1'] if sex_row is not None else np.nan,
 				'df2': sex_row['DF2'] if sex_row is not None else np.nan,
-				'significant': sex_row[p_col] < 0.05 if sex_row is not None else False
+				'significant': sex_p < 0.05 if not np.isnan(sex_p) else False
 			},
 			'interaction': {
 				'F': interaction_row['F'] if interaction_row is not None else np.nan,
-				'p': interaction_row[p_col] if interaction_row is not None else np.nan,
+				'p': int_p,
+				'p_unc': float(interaction_row[p_col]) if interaction_row is not None else np.nan,
+				'gg_corrected': int_gg,
 				'df1': interaction_row['DF1'] if interaction_row is not None else np.nan,
 				'df2': interaction_row['DF2'] if interaction_row is not None else np.nan,
-				'significant': interaction_row[p_col] < 0.05 if interaction_row is not None else False
+				'significant': int_p < 0.05 if not np.isnan(int_p) else False
 			}
 		}
-		
+
 		return results
-		
+
 	except Exception as e:
 		print(f"\nERROR running mixed ANOVA: {e}")
 		import traceback
@@ -1453,28 +1509,31 @@ def generate_analysis_report(
 			report_lines.append("Sphericity Assessment:")
 			report_lines.append("-" * 80)
 			
-			# Check if sphericity columns are present
+			# Check sphericity and Greenhouse-Geisser epsilon
+			eps_rows = aov[aov['Source'] == 'Day'] if 'Day' in aov['Source'].values else pd.DataFrame()
+			
 			if 'sphericity' in aov.columns or 'W-spher' in aov.columns:
-				day_row = aov[aov['Source'] == 'Day']
-				if not day_row.empty:
+				if not eps_rows.empty:
 					if 'sphericity' in aov.columns:
-						sphericity = day_row['sphericity'].iloc[0]
+						sphericity = eps_rows['sphericity'].iloc[0]
 						report_lines.append(f"Mauchly's Test of Sphericity: W = {sphericity:.4f}")
 					
-					# Check epsilon values for corrections
-					if 'eps' in aov.columns and not pd.isna(day_row['eps'].iloc[0]):
-						epsilon = day_row['eps'].iloc[0]
+					if 'eps' in aov.columns and not pd.isna(eps_rows['eps'].iloc[0]):
+						epsilon = float(eps_rows['eps'].iloc[0])
 						report_lines.append(f"Greenhouse-Geisser ε = {epsilon:.4f}")
-						
 						if epsilon < 0.75:
-							report_lines.append("⚠ WARNING: Sphericity assumption violated (ε < 0.75)")
-							report_lines.append("  → Greenhouse-Geisser correction applied")
+							report_lines.append("⚠ WARNING: Sphericity violated (ε < 0.75) — GG correction applied")
 						else:
 							report_lines.append("[OK] Sphericity assumption met (ε ≥ 0.75)")
-					else:
-						report_lines.append("Note: Sphericity test not available")
 				else:
 					report_lines.append("Note: Sphericity information not found in ANOVA table")
+			elif 'eps' in aov.columns and not eps_rows.empty and not pd.isna(eps_rows['eps'].iloc[0]):
+				epsilon = float(eps_rows['eps'].iloc[0])
+				report_lines.append(f"Greenhouse-Geisser ε = {epsilon:.4f}")
+				if epsilon < 0.75:
+					report_lines.append("⚠ WARNING: Sphericity violated (ε < 0.75) — GG correction applied to within-subjects p-values")
+				else:
+					report_lines.append("[OK] Sphericity assumption met (ε ≥ 0.75)")
 			else:
 				report_lines.append("Note: Sphericity statistics not available in this analysis")
 			
@@ -1484,23 +1543,34 @@ def generate_analysis_report(
 			report_lines.append("Main Effects and Interactions:")
 			report_lines.append("-" * 80)
 			
+			# Within-subjects sources where GG correction applies
+			within_sources = {'Day', 'Interaction'}
+			
 			for idx, row in aov.iterrows():
 				source = row['Source']
 				F = row.get('F', np.nan)
 				df1 = row.get('DF1', row.get('df1', np.nan))
 				df2 = row.get('DF2', row.get('df2', np.nan))
 				
-				# Get p-value (handle different column names)
-				p = row.get('p-unc', row.get('p_unc', np.nan))
+				# Use GG-corrected p for within-subjects effects when available
+				p_unc = row.get('p-unc', row.get('p_unc', np.nan))
+				p_gg = row.get('p-GG-corr', np.nan)
+				use_gg = source in within_sources and not pd.isna(p_gg)
+				p = float(p_gg) if use_gg else (float(p_unc) if not pd.isna(p_unc) else np.nan)
 				
 				if not np.isnan(F) and source not in ['Residual']:
 					sig_marker = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
+					corr_note = " (GG-corrected)" if use_gg else ""
 					report_lines.append(f"{source}:")
-					report_lines.append(f"  F({df1:.0f}, {df2:.0f}) = {F:.3f}, p = {p:.4f} {sig_marker}")
+					report_lines.append(f"  F({df1:.0f}, {df2:.0f}) = {F:.3f}, p = {p:.4f} {sig_marker}{corr_note}")
 					
 					# Effect size
-					if 'np2' in row and not np.isnan(row['np2']):
+					if 'np2' in row and not pd.isna(row.get('np2', np.nan)):
 						report_lines.append(f"  Partial η² = {row['np2']:.3f}")
+					
+					# Show epsilon for within-subjects effects
+					if source in within_sources and 'eps' in row and not pd.isna(row.get('eps', np.nan)):
+						report_lines.append(f"  Greenhouse-Geisser ε = {row['eps']:.4f}")
 					
 					report_lines.append("")
 			
@@ -1561,8 +1631,12 @@ def generate_analysis_report(
 					
 					if not np.isnan(F):
 						sig_marker = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
+						corr_note = " (GG-corrected)" if effect.get('gg_corrected', False) else ""
 						report_lines.append(f"{effect_name}:")
-						report_lines.append(f"  F({df1:.0f}, {df2:.0f}) = {F:.3f}, p = {p:.4f} {sig_marker}")
+						report_lines.append(f"  F({df1:.0f}, {df2:.0f}) = {F:.3f}, p = {p:.4f} {sig_marker}{corr_note}")
+						eps = effect.get('eps', np.nan)
+						if effect.get('gg_corrected', False) and not pd.isna(eps):
+							report_lines.append(f"  Greenhouse-Geisser ε = {eps:.4f}")
 						report_lines.append("")
 		
 		report_lines.append("")
@@ -1601,8 +1675,12 @@ def generate_analysis_report(
 					
 					if not np.isnan(F):
 						sig_marker = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
+						corr_note = " (GG-corrected)" if effect.get('gg_corrected', False) else ""
 						report_lines.append(f"{effect_name}:")
-						report_lines.append(f"  F({df1:.0f}, {df2:.0f}) = {F:.3f}, p = {p:.4f} {sig_marker}")
+						report_lines.append(f"  F({df1:.0f}, {df2:.0f}) = {F:.3f}, p = {p:.4f} {sig_marker}{corr_note}")
+						eps = effect.get('eps', np.nan)
+						if effect.get('gg_corrected', False) and not pd.isna(eps):
+							report_lines.append(f"  Greenhouse-Geisser ε = {eps:.4f}")
 						report_lines.append("")
 		
 		report_lines.append("")
@@ -1682,8 +1760,12 @@ def generate_analysis_report(
 					
 					if not np.isnan(F):
 						sig_marker = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
+						corr_note = " (GG-corrected)" if effect.get('gg_corrected', False) else ""
 						report_lines.append(f"{effect_name}:")
-						report_lines.append(f"  F({df1:.0f}, {df2:.0f}) = {F:.3f}, p = {p:.4f} {sig_marker}")
+						report_lines.append(f"  F({df1:.0f}, {df2:.0f}) = {F:.3f}, p = {p:.4f} {sig_marker}{corr_note}")
+						eps = effect.get('eps', np.nan)
+						if effect.get('gg_corrected', False) and not pd.isna(eps):
+							report_lines.append(f"  Greenhouse-Geisser ε = {eps:.4f}")
 						report_lines.append("")
 		
 		report_lines.append("")
@@ -1722,8 +1804,12 @@ def generate_analysis_report(
 					
 					if not np.isnan(F):
 						sig_marker = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
+						corr_note = " (GG-corrected)" if effect.get('gg_corrected', False) else ""
 						report_lines.append(f"{effect_name}:")
-						report_lines.append(f"  F({df1:.0f}, {df2:.0f}) = {F:.3f}, p = {p:.4f} {sig_marker}")
+						report_lines.append(f"  F({df1:.0f}, {df2:.0f}) = {F:.3f}, p = {p:.4f} {sig_marker}{corr_note}")
+						eps = effect.get('eps', np.nan)
+						if effect.get('gg_corrected', False) and not pd.isna(eps):
+							report_lines.append(f"  Greenhouse-Geisser ε = {eps:.4f}")
 						report_lines.append("")
 		
 		report_lines.append("")

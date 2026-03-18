@@ -4894,6 +4894,589 @@ def generate_cross_cohort_report_weekly(
 
 
 # =============================================================================
+# 2-WAY MIXED ANOVA: CA% × WEEK (SEX COLLAPSED) WITH POST-HOC AND SPHERICITY
+# =============================================================================
+
+def perform_mixed_anova_ca_x_week(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    measure: str = "Total Change",
+    weeks: Optional[List[int]] = None,
+) -> Dict:
+    """
+    2-Way Mixed ANOVA: CA% (between-subjects) × Week (within-subjects), sex collapsed.
+
+    This collapses across sex to give the clearest view of the CA% × time interaction
+    with maximum power. Includes:
+      - Mauchly's sphericity test for the Week within-subjects factor
+      - Greenhouse-Geisser epsilon and corrected p-values when sphericity is violated
+      - Post-hoc pairwise comparisons (Bonferroni-adjusted paired t-tests) for Week
+      - Simple-effects post-hoc when CA% × Week interaction is significant:
+          * CA% comparison at each Week (independent samples, Bonferroni across weeks)
+          * Week pairwise comparisons within each CA% group (paired, Bonferroni)
+
+    Parameters:
+        cohort_dfs: Dictionary mapping cohort labels to DataFrames
+        measure: Weight measure to analyze ('Total Change', 'Daily Change')
+        weeks: Optional list of week numbers to include (default: all)
+
+    Returns:
+        Dictionary with ANOVA table, sphericity info, post-hoc results, and descriptives
+    """
+    print("\n" + "="*80)
+    print("2-WAY MIXED ANOVA: CA% (BETWEEN) × WEEK (WITHIN) — SEX COLLAPSED")
+    print("="*80)
+
+    if not HAS_PINGOUIN:
+        print("[ERROR] pingouin is required for mixed ANOVA")
+        return {}
+
+    combined_df = combine_cohorts_for_analysis(cohort_dfs)
+    combined_df = clean_cohort(combined_df)
+    if 'Day' not in combined_df.columns:
+        combined_df = add_day_column_across_cohorts(combined_df)
+    combined_df = _add_week_column_across_cohorts(combined_df)
+    combined_df = combined_df[combined_df['Day'] >= 0]
+
+    required_cols = ['ID', 'Week', 'CA (%)', measure]
+    missing = [c for c in required_cols if c not in combined_df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    analysis_df = combined_df[required_cols].dropna().copy()
+
+    if weeks is not None:
+        analysis_df = analysis_df[analysis_df['Week'].isin(weeks)]
+        print(f"  Filtered to weeks: {sorted(weeks)}")
+
+    # Average within Week per animal (one value per ID × Week, sex ignored)
+    analysis_df = (
+        analysis_df.groupby(['ID', 'Week', 'CA (%)'])[measure]
+        .mean()
+        .reset_index()
+    )
+
+    print(f"\n  Measure: {measure}")
+    print(f"  Animals before completeness filter: {analysis_df['ID'].nunique()}")
+    print(f"  Weeks present: {sorted(analysis_df['Week'].unique())}")
+
+    analysis_df = _filter_complete_subjects_weekly(analysis_df, 'ID', 'Week')
+
+    n_subjects = analysis_df['ID'].nunique()
+    ca_levels = sorted(analysis_df['CA (%)'].unique())
+    week_levels = sorted(analysis_df['Week'].unique())
+    print(f"  Total subjects: {n_subjects}")
+    print(f"  Total observations: {len(analysis_df)}")
+    print(f"  CA% groups: {ca_levels}")
+
+    # -------------------------------------------------------------------------
+    # Descriptive statistics
+    def _desc(group):
+        n = len(group)
+        mean = group.mean()
+        std = group.std(ddof=1) if n > 1 else np.nan
+        sem = std / np.sqrt(n) if (n > 0 and np.isfinite(std)) else np.nan
+        return pd.Series({
+            'count': n, 'mean': mean, 'std': std, 'sem': sem,
+            'ci_lower': mean - 1.96 * sem if np.isfinite(sem) else np.nan,
+            'ci_upper': mean + 1.96 * sem if np.isfinite(sem) else np.nan,
+        })
+
+    ca_stats_rows = []
+    for ca_val, grp in analysis_df.groupby('CA (%)')[measure]:
+        s = _desc(grp); s['CA (%)'] = ca_val; ca_stats_rows.append(s)
+    ca_stats = pd.DataFrame(ca_stats_rows)
+
+    week_stats_rows = []
+    for wk, grp in analysis_df.groupby('Week')[measure]:
+        s = _desc(grp); s['Week'] = wk; week_stats_rows.append(s)
+    week_stats = pd.DataFrame(week_stats_rows)
+
+    cell_stats_rows = []
+    for (ca_val, wk), grp in analysis_df.groupby(['CA (%)', 'Week'])[measure]:
+        s = _desc(grp); s['CA (%)'] = ca_val; s['Week'] = wk; cell_stats_rows.append(s)
+    cell_stats = pd.DataFrame(cell_stats_rows)
+
+    print("\nDescriptive Statistics by CA%:")
+    for _, row in ca_stats.iterrows():
+        print(f"  CA%={row['CA (%)']}: n={int(row['count'])}, M={row['mean']:.3f}, "
+              f"SD={row['std']:.3f}, SEM={row['sem']:.3f}")
+
+    print("\nDescriptive Statistics by Week:")
+    for _, row in week_stats.iterrows():
+        print(f"  Week {int(row['Week'])}: n={int(row['count'])}, M={row['mean']:.3f}, "
+              f"SD={row['std']:.3f}")
+
+    # -------------------------------------------------------------------------
+    # Mixed ANOVA
+    print("\nRunning 2-way mixed ANOVA (CA% between × Week within)...")
+    try:
+        aov = pg.mixed_anova(
+            data=analysis_df,
+            dv=measure,
+            within='Week',
+            subject='ID',
+            between='CA (%)',
+            correction='auto',
+        )
+        aov['Source'] = aov['Source'].replace({'Interaction': 'CA (%) * Week'})
+
+        print("\nMixed ANOVA Results:")
+        print(aov.to_string())
+
+        p_col = 'p-unc' if 'p-unc' in aov.columns else 'p_unc'
+
+        # Extract sphericity info from Week row
+        week_row_df = aov[aov['Source'] == 'Week']
+        sphericity_info = {}
+        if len(week_row_df) > 0:
+            wr = week_row_df.iloc[0]
+            sph_violated = (wr.get('sphericity', True) is False) or (wr.get('sphericity', True) == False)
+            sphericity_info = {
+                'W': wr.get('W-spher', np.nan),
+                'p_spher': wr.get('p-spher', np.nan),
+                'sphericity_ok': not sph_violated,
+                'eps': wr.get('eps', np.nan),
+                'p_gg': wr.get('p-GG-corr', np.nan),
+            }
+            if sph_violated:
+                print(f"\n  [WARNING] Sphericity VIOLATED (Mauchly's W = {sphericity_info['W']:.4f}, "
+                      f"p = {sphericity_info['p_spher']:.4f})")
+                print(f"  Greenhouse-Geisser ε = {sphericity_info['eps']:.4f}")
+                print(f"  Using GG-corrected p = {sphericity_info['p_gg']:.4f} for Week effect")
+            else:
+                w_val = sphericity_info.get('W', float('nan'))
+                p_val = sphericity_info.get('p_spher', float('nan'))
+                if np.isfinite(w_val):
+                    print(f"\n  Sphericity OK (Mauchly's W = {w_val:.4f}, p = {p_val:.4f})")
+                else:
+                    print("\n  Sphericity: not computed (too few levels or missing values)")
+
+        # Determine significance using GG-corrected p for Week when violated
+        def _p_for_effect(src_name):
+            row_df = aov[aov['Source'] == src_name]
+            if len(row_df) == 0:
+                return np.nan
+            row = row_df.iloc[0]
+            if src_name == 'Week' and not sphericity_info.get('sphericity_ok', True):
+                gg = row.get('p-GG-corr', np.nan)
+                if np.isfinite(gg):
+                    return float(gg)
+            return float(row[p_col])
+
+        p_week = _p_for_effect('Week')
+        p_ca = _p_for_effect('CA (%)')
+        p_int = _p_for_effect('CA (%) * Week')
+        sig_week = np.isfinite(p_week) and p_week < 0.05
+        sig_ca = np.isfinite(p_ca) and p_ca < 0.05
+        sig_interaction = np.isfinite(p_int) and p_int < 0.05
+
+        # -------------------------------------------------------------------------
+        # Post-hoc tests
+        posthoc_week = None
+        posthoc_ca_per_week = {}
+        posthoc_week_per_ca = {}
+
+        # Week main effect post-hoc (within-subjects pairwise, Bonferroni-adjusted)
+        if sig_week or sig_interaction:
+            print("\nRunning Week pairwise post-hoc (within-subjects, Bonferroni-adjusted)...")
+            try:
+                posthoc_week = pg.pairwise_tests(
+                    data=analysis_df,
+                    dv=measure,
+                    within='Week',
+                    subject='ID',
+                    padjust='bonf',
+                )
+                print(f"  {len(posthoc_week)} pairwise comparisons computed")
+            except Exception as e:
+                print(f"  [WARNING] Week post-hoc failed: {e}")
+
+        # Interaction post-hoc: CA% comparison at each Week
+        if sig_interaction:
+            n_weeks_for_bonf = len(week_levels)
+            print(f"\nRunning interaction post-hoc: CA% comparison at each Week "
+                  f"(Bonferroni k={n_weeks_for_bonf} across weeks)...")
+            if len(ca_levels) == 2:
+                for wk in week_levels:
+                    wk_data = analysis_df[analysis_df['Week'] == wk]
+                    g1 = wk_data[wk_data['CA (%)'] == ca_levels[0]][measure]
+                    g2 = wk_data[wk_data['CA (%)'] == ca_levels[1]][measure]
+                    try:
+                        t_res = pg.ttest(g1, g2)
+                        raw_p = float(t_res['p-val'].iloc[0])
+                        t_res = t_res.copy()
+                        t_res['p-bonf'] = min(1.0, raw_p * n_weeks_for_bonf)
+                        t_res['Week'] = wk
+                        t_res['CA_comparison'] = f"{ca_levels[0]}% vs {ca_levels[1]}%"
+                        posthoc_ca_per_week[wk] = t_res
+                        sig_str = "SIGNIFICANT" if t_res['p-bonf'].iloc[0] < 0.05 else "ns"
+                        print(f"  Week {wk}: t = {float(t_res['T'].iloc[0]):.3f}, "
+                              f"raw p = {raw_p:.4f}, Bonf p = {t_res['p-bonf'].iloc[0]:.4f} ({sig_str})")
+                    except Exception as e:
+                        print(f"  [WARNING] CA% comparison at Week {wk} failed: {e}")
+
+            # Interaction post-hoc: Week pairwise within each CA% group
+            print("\nRunning interaction post-hoc: Week pairwise within each CA% group...")
+            for ca_val in ca_levels:
+                subset = analysis_df[analysis_df['CA (%)'] == ca_val].copy()
+                try:
+                    ph = pg.pairwise_tests(
+                        data=subset,
+                        dv=measure,
+                        within='Week',
+                        subject='ID',
+                        padjust='bonf',
+                    )
+                    posthoc_week_per_ca[ca_val] = ph
+                    n_sig = (ph['p-corr'] < 0.05).sum() if 'p-corr' in ph.columns else 0
+                    print(f"  CA%={ca_val}: {len(ph)} comparisons, {n_sig} significant after correction")
+                except Exception as e:
+                    print(f"  [WARNING] Week post-hoc for CA%={ca_val} failed: {e}")
+
+        return {
+            'measure': measure,
+            'type': 'mixed_anova_ca_x_week',
+            'n_subjects': n_subjects,
+            'n_observations': len(analysis_df),
+            'weeks': week_levels,
+            'ca_levels': ca_levels,
+            'anova_table': aov,
+            'sphericity_info': sphericity_info,
+            'sig_week': sig_week,
+            'sig_ca': sig_ca,
+            'sig_interaction': sig_interaction,
+            'p_week': p_week,
+            'p_ca': p_ca,
+            'p_int': p_int,
+            'ca_stats': ca_stats,
+            'week_stats': week_stats,
+            'cell_stats': cell_stats,
+            'data': analysis_df,
+            'posthoc_week': posthoc_week,
+            'posthoc_ca_per_week': posthoc_ca_per_week,
+            'posthoc_week_per_ca': posthoc_week_per_ca,
+        }
+    except Exception as e:
+        print(f"[ERROR] Mixed ANOVA failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {}
+
+
+def generate_ca_x_week_report(
+    results: Optional[Dict] = None,
+    cohort_dfs: Optional[Dict[str, pd.DataFrame]] = None,
+    include_preamble: bool = True,
+    include_footer: bool = True,
+) -> str:
+    """
+    Generate a report for the 2-way CA% × Week mixed ANOVA with post-hoc tests.
+
+    Parameters:
+        results: Output from perform_mixed_anova_ca_x_week()
+        cohort_dfs: Cohort DataFrames for study design section
+        include_preamble: Whether to include title and methodology header
+        include_footer: Whether to include end-of-report footer
+    """
+    lines = []
+
+    def h1(text):
+        lines.append("=" * 80)
+        lines.append(text)
+        lines.append("=" * 80)
+
+    def h2(text):
+        lines.append(text)
+        lines.append("-" * 80)
+
+    def sig_stars(p):
+        if not np.isfinite(p):
+            return "?"
+        if p < 0.001:
+            return "***"
+        if p < 0.01:
+            return "**"
+        if p < 0.05:
+            return "*"
+        return "ns"
+
+    # Detect measure label
+    _measure_label = results.get('measure', 'Unknown') if results else 'Unknown'
+
+    # Per-measure banner (always shown)
+    lines.append("=" * 80)
+    lines.append(f"MEASURE: {_measure_label}")
+    lines.append("=" * 80)
+    lines.append("")
+
+    if include_preamble:
+        h1("CROSS-COHORT — 2-WAY MIXED ANOVA: CA% × WEEK (SEX COLLAPSED)")
+        lines.append("")
+        h2("METHODOLOGICAL NOTES")
+        lines.append("")
+        lines.append("  Design: CA% (between-subjects) × Week (within-subjects).")
+        lines.append("  Sex is collapsed (all animals in each CA% group combined).")
+        lines.append("  One value per animal per week (daily observations averaged within each week).")
+        lines.append("  Complete-subject design: animals missing any week are excluded.")
+        lines.append("")
+        lines.append("  Sphericity is tested using Mauchly's W test.")
+        lines.append("  When sphericity is violated (p < 0.05), the Greenhouse-Geisser (GG)")
+        lines.append("  corrected p-value and epsilon (ε) are reported for the Week effect.")
+        lines.append("")
+        lines.append("  Post-hoc tests:")
+        lines.append("    • Week main effect: pairwise paired t-tests, Bonferroni-adjusted")
+        lines.append("      (within-subjects; equivalent to Tukey HSD for the within factor)")
+        lines.append("    • CA% × Week interaction — simple effects:")
+        lines.append("        - CA% comparison (0% vs 2%) at each Week, Bonferroni across weeks")
+        lines.append("        - Week pairwise comparisons within each CA% group, Bonferroni-adjusted")
+        lines.append("")
+
+    # -------------------------------------------------------------------------
+    # Study design
+    if include_preamble and cohort_dfs is not None:
+        h1("STUDY DESIGN")
+        lines.append("")
+        for label, df in cohort_dfs.items():
+            n_animals = df['ID'].nunique() if 'ID' in df.columns else len(df)
+            lines.append(f"  {label}: {n_animals} animals")
+        if results:
+            lines.append(f"\n  Total subjects in analysis: {results.get('n_subjects', 'Unknown')}")
+            lines.append(f"  Total observations: {results.get('n_observations', 'Unknown')}")
+            lines.append(f"  Weeks: {results.get('weeks', 'Unknown')}")
+            lines.append(f"  CA% levels: {results.get('ca_levels', 'Unknown')}")
+        lines.append("")
+
+    if results is None or not results:
+        lines.append("  [No results available]")
+        lines.append("")
+        if include_footer:
+            h1("END OF REPORT")
+            lines.append("")
+        return "\n".join(lines)
+
+    # -------------------------------------------------------------------------
+    # Descriptive statistics
+    h1("DESCRIPTIVE STATISTICS")
+    lines.append("")
+
+    ca_stats = results.get('ca_stats')
+    if ca_stats is not None and len(ca_stats) > 0:
+        h2("By CA% Group (averaged across all weeks)")
+        for _, row in ca_stats.iterrows():
+            lines.append(f"  CA%={row['CA (%)']}: n={int(row['count'])}, "
+                         f"M={row['mean']:.3f}, SD={row['std']:.3f}, SEM={row['sem']:.3f}, "
+                         f"95% CI [{row['ci_lower']:.3f}, {row['ci_upper']:.3f}]")
+        lines.append("")
+
+    week_stats = results.get('week_stats')
+    if week_stats is not None and len(week_stats) > 0:
+        h2("By Week (averaged across all CA% groups)")
+        for _, row in week_stats.iterrows():
+            lines.append(f"  Week {int(row['Week'])}: n={int(row['count'])}, "
+                         f"M={row['mean']:.3f}, SD={row['std']:.3f}, SEM={row['sem']:.3f}, "
+                         f"95% CI [{row['ci_lower']:.3f}, {row['ci_upper']:.3f}]")
+        lines.append("")
+
+    cell_stats = results.get('cell_stats')
+    if cell_stats is not None and len(cell_stats) > 0:
+        h2("Cell Means: CA% × Week")
+        ca_levels = sorted(cell_stats['CA (%)'].unique())
+        week_levels = sorted(cell_stats['Week'].unique())
+        # Header row
+        header = f"  {'CA%':<8}" + "".join([f"  Week {int(w):<6}" for w in week_levels])
+        lines.append(header)
+        lines.append("  " + "-" * (len(header) - 2))
+        for ca_val in ca_levels:
+            row_vals = []
+            for wk in week_levels:
+                cell = cell_stats[(cell_stats['CA (%)'] == ca_val) & (cell_stats['Week'] == wk)]
+                if len(cell) > 0:
+                    row_vals.append(f"  {cell.iloc[0]['mean']:>8.3f}")
+                else:
+                    row_vals.append(f"  {'–':>8}")
+            lines.append(f"  {ca_val}%{'':<5}" + "".join(row_vals))
+        lines.append("")
+
+    # -------------------------------------------------------------------------
+    # ANOVA table + sphericity
+    h1("MIXED ANOVA RESULTS")
+    lines.append("")
+
+    aov = results.get('anova_table')
+    sph = results.get('sphericity_info', {})
+    p_col = 'p-unc'
+
+    # Sphericity section
+    h2("Sphericity Assessment (Mauchly's Test for Week factor)")
+    w_val = sph.get('W', float('nan'))
+    p_spher = sph.get('p_spher', float('nan'))
+    eps = sph.get('eps', float('nan'))
+    sph_ok = sph.get('sphericity_ok', True)
+
+    if np.isfinite(w_val):
+        lines.append(f"  Mauchly's W = {w_val:.4f}")
+        lines.append(f"  p (Mauchly) = {p_spher:.4f}")
+        if sph_ok:
+            lines.append("  Decision: Sphericity SATISFIED — use uncorrected p-values")
+        else:
+            lines.append("  Decision: Sphericity VIOLATED — Greenhouse-Geisser correction applied")
+            lines.append(f"  Greenhouse-Geisser ε = {eps:.4f}")
+            lines.append(f"  (ε < 0.75 indicates substantial non-sphericity; ε = 1.0 = perfect sphericity)")
+    else:
+        lines.append("  Mauchly's W: not available (2-level within factor or missing)")
+        if np.isfinite(eps):
+            lines.append(f"  Greenhouse-Geisser ε = {eps:.4f}")
+    lines.append("")
+
+    # ANOVA table
+    if aov is not None:
+        h2("ANOVA Table")
+        lines.append(aov.to_string())
+        lines.append("")
+
+        # Interpretation
+        h2("Interpretation")
+        lines.append("")
+
+        for _, row in aov.iterrows():
+            src = row['Source']
+            p_raw = row[p_col]
+            # Use GG-corrected p for Week if sphericity violated
+            if src == 'Week' and not sph_ok:
+                p_use = row.get('p-GG-corr', p_raw)
+                if not np.isfinite(p_use):
+                    p_use = p_raw
+                p_note = f"GG-corrected p = {p_use:.4f}" if np.isfinite(p_use) else f"p = {p_raw:.4f}"
+            else:
+                p_use = p_raw
+                p_note = f"p = {p_use:.4f}"
+            sig = sig_stars(p_use)
+            sig_str = "SIGNIFICANT" if p_use < 0.05 else "NOT SIGNIFICANT"
+            lines.append(f"  {src}: {sig_str}")
+            lines.append(f"     F({int(row['DF1'])}, {int(row['DF2'])}) = {row['F']:.3f}, {p_note} {sig}")
+            # Effect size
+            np2 = row.get('np2', float('nan'))
+            if np.isfinite(np2):
+                lines.append(f"     η²p = {np2:.4f}")
+            # Narrative
+            if src == 'CA (%)':
+                lines.append("     → 0% and 2% CA groups differ overall in " + _measure_label
+                              if p_use < 0.05 else
+                              "     → No significant overall difference between CA% groups")
+            elif src == 'Week':
+                if not sph_ok:
+                    lines.append(f"     (Sphericity violated — GG correction applied, ε = {eps:.4f})")
+                lines.append("     → " + _measure_label + " changes significantly across weeks"
+                              if p_use < 0.05 else
+                              "     → No significant week-to-week change overall")
+            elif src == 'CA (%) * Week':
+                lines.append("     → CA% groups follow different weekly trajectories (interaction)"
+                              if p_use < 0.05 else
+                              "     → Both CA% groups follow similar weekly trajectories")
+            lines.append("")
+
+    # -------------------------------------------------------------------------
+    # Post-hoc: Week main effect
+    posthoc_week = results.get('posthoc_week')
+    p_col_ph = 'p-corr' if (posthoc_week is not None and 'p-corr' in posthoc_week.columns) else 'p-unc'
+
+    if posthoc_week is not None and len(posthoc_week) > 0:
+        h1("POST-HOC: WEEK PAIRWISE COMPARISONS")
+        lines.append("")
+        lines.append("  Within-subjects pairwise comparisons (Bonferroni-adjusted).")
+        lines.append("  All pairs of adjacent and non-adjacent weeks tested.")
+        lines.append("")
+        h2("Pairwise Week Comparisons")
+        p_corr_col = 'p-corr' if 'p-corr' in posthoc_week.columns else 'p-unc'
+        lines.append(f"  {'Comparison':<20} {'T':>8} {'df':>6} {'p (raw)':>10} {'p (Bonf.)':>10} {'Sig':>5}")
+        lines.append("  " + "-" * 60)
+        for _, row in posthoc_week.iterrows():
+            a = row.get('A', row.get('Week1', '?'))
+            b = row.get('B', row.get('Week2', '?'))
+            comp_label = f"Week {int(a)} vs {int(b)}"
+            t_val = row.get('T', row.get('t', float('nan')))
+            df_val = row.get('dof', row.get('df', float('nan')))
+            p_raw_val = row.get('p-unc', float('nan'))
+            p_corr_val = row.get(p_corr_col, float('nan'))
+            sig = sig_stars(p_corr_val)
+            t_str = f"{t_val:.3f}" if np.isfinite(t_val) else "–"
+            df_str = f"{df_val:.0f}" if np.isfinite(df_val) else "–"
+            p_raw_str = f"{p_raw_val:.4f}" if np.isfinite(p_raw_val) else "–"
+            p_corr_str = f"{p_corr_val:.4f}" if np.isfinite(p_corr_val) else "–"
+            lines.append(f"  {comp_label:<20} {t_str:>8} {df_str:>6} {p_raw_str:>10} {p_corr_str:>10} {sig:>5}")
+        lines.append("")
+
+    # -------------------------------------------------------------------------
+    # Post-hoc: Interaction simple effects
+    posthoc_ca_per_week = results.get('posthoc_ca_per_week', {})
+    posthoc_week_per_ca = results.get('posthoc_week_per_ca', {})
+    ca_levels_res = results.get('ca_levels', [])
+
+    if posthoc_ca_per_week or posthoc_week_per_ca:
+        h1("POST-HOC: CA% × WEEK INTERACTION SIMPLE EFFECTS")
+        lines.append("")
+
+    if posthoc_ca_per_week:
+        h2(f"CA% Comparison ({ca_levels_res[0]}% vs {ca_levels_res[-1]}%) at Each Week")
+        lines.append("")
+        lines.append("  Bonferroni correction applied across all weeks (k = number of weeks).")
+        lines.append("")
+        n_weeks_k = len(posthoc_ca_per_week)
+        lines.append(f"  {'Week':<8} {'T':>8} {'df':>6} {'p (raw)':>10} "
+                     f"{'p (Bonf.)':>12} {'Sig':>5} {'Cohen d':>9}")
+        lines.append("  " + "-" * 60)
+        for wk in sorted(posthoc_ca_per_week.keys()):
+            t_res = posthoc_ca_per_week[wk]
+            t_val = float(t_res['T'].iloc[0])
+            df_val = float(t_res['dof'].iloc[0])
+            p_raw_val = float(t_res['p-val'].iloc[0])
+            p_bonf_val = float(t_res['p-bonf'].iloc[0])
+            d_val = float(t_res['cohen-d'].iloc[0]) if 'cohen-d' in t_res.columns else float('nan')
+            sig = sig_stars(p_bonf_val)
+            d_str = f"{d_val:.3f}" if np.isfinite(d_val) else "–"
+            lines.append(f"  Week {int(wk):<3}  {t_val:>8.3f} {df_val:>6.0f} {p_raw_val:>10.4f} "
+                         f"{p_bonf_val:>12.4f} {sig:>5} {d_str:>9}")
+        lines.append("")
+
+    if posthoc_week_per_ca:
+        h2("Week Pairwise Comparisons Within Each CA% Group")
+        lines.append("")
+        lines.append("  Within-subjects paired comparisons, Bonferroni-adjusted.")
+        lines.append("")
+        for ca_val in sorted(posthoc_week_per_ca.keys()):
+            ph = posthoc_week_per_ca[ca_val]
+            lines.append(f"  ── CA% = {ca_val}% ──")
+            if ph is None or len(ph) == 0:
+                lines.append("    No post-hoc data available")
+                continue
+            p_c_col = 'p-corr' if 'p-corr' in ph.columns else 'p-unc'
+            lines.append(f"  {'Comparison':<20} {'T':>8} {'df':>6} {'p (raw)':>10} {'p (Bonf.)':>10} {'Sig':>5}")
+            lines.append("  " + "-" * 60)
+            for _, row in ph.iterrows():
+                a = row.get('A', row.get('Week1', '?'))
+                b = row.get('B', row.get('Week2', '?'))
+                comp_label = f"Week {int(a)} vs {int(b)}"
+                t_val = row.get('T', row.get('t', float('nan')))
+                df_val = row.get('dof', row.get('df', float('nan')))
+                p_raw_val = row.get('p-unc', float('nan'))
+                p_c_val = row.get(p_c_col, float('nan'))
+                sig = sig_stars(p_c_val)
+                t_str = f"{t_val:.3f}" if np.isfinite(t_val) else "–"
+                df_str = f"{df_val:.0f}" if np.isfinite(df_val) else "–"
+                p_raw_str = f"{p_raw_val:.4f}" if np.isfinite(p_raw_val) else "–"
+                p_c_str = f"{p_c_val:.4f}" if np.isfinite(p_c_val) else "–"
+                lines.append(f"  {comp_label:<20} {t_str:>8} {df_str:>6} {p_raw_str:>10} {p_c_str:>10} {sig:>5}")
+            lines.append("")
+
+    # -------------------------------------------------------------------------
+    if include_footer:
+        h1("END OF CA% × WEEK REPORT")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# =============================================================================
 
 
 # =============================================================================
@@ -5011,8 +5594,9 @@ if __name__ == "__main__":
         print("  8. Generate INTERACTION PLOTS for significant interactions")
         print("  9. All analyses + report + all plots (weight + interactions)")
         print(" 10. Week-level conservative analyses + auto-save reports (all measures, Bonferroni-corrected)")
+        print(" 11. 2-way CA% × Week mixed ANOVA (sex collapsed) + post-hoc Tukey + sphericity/GG")
         
-        user_input = input("\nSelect option (1-10) or 'n' to skip: ")
+        user_input = input("\nSelect option (1-11) or 'n' to skip: ")
         
         mixed_results = None
         between_final_results = None
@@ -5338,7 +5922,53 @@ if __name__ == "__main__":
             print(f"\n{'='*80}")
             print(f"[OK] Combined weekly report saved to: {report_file}")
             print(f"{'='*80}")
-        
+
+        # --- Option 11: 2-way CA% × Week mixed ANOVA (sex collapsed) with post-hoc ---
+        if user_input == '11':
+            print("\n" + "="*80)
+            print("2-WAY CA% × WEEK MIXED ANOVA (SEX COLLAPSED) — WITH POST-HOC & SPHERICITY")
+            print("="*80)
+
+            measures_to_run = ["Total Change", "Daily Change"]
+
+            combined_temp = combine_cohorts_for_analysis(cohorts)
+            available_measures = [m for m in measures_to_run if m in combined_temp.columns]
+            print(f"\n  Available measures: {available_measures}")
+
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            all_sections = []
+            for i, measure in enumerate(available_measures):
+                is_first = (i == 0)
+                is_last  = (i == len(available_measures) - 1)
+
+                print(f"\n{'='*80}")
+                print(f"MEASURE: {measure}")
+                print(f"{'='*80}")
+
+                ca_week_results = None
+                try:
+                    ca_week_results = perform_mixed_anova_ca_x_week(cohorts, measure=measure)
+                except Exception as e:
+                    print(f"  [WARNING] CA% × Week ANOVA failed for {measure}: {e}")
+
+                section = generate_ca_x_week_report(
+                    results=ca_week_results,
+                    cohort_dfs=cohorts if is_first else None,
+                    include_preamble=is_first,
+                    include_footer=is_last,
+                )
+                all_sections.append(section)
+                print("\n" + section)
+
+            combined_report = "\n\n".join(all_sections)
+            report_file = Path(f"cross_cohort_CA_x_WEEK_{timestamp}.txt")
+            report_file.write_text(combined_report, encoding='utf-8')
+            print(f"\n{'='*80}")
+            print(f"[OK] CA% × Week report saved to: {report_file}")
+            print(f"{'='*80}")
+
         # Summary of what was run
         if mixed_results or between_final_results or between_avg_results or daily_results or results_males or results_females or results_ca0 or results_ca2 or plot_figures or interaction_figures:
             print("\n" + "="*80)

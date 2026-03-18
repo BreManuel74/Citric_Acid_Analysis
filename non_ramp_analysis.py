@@ -12,7 +12,6 @@ from matplotlib.patches import Patch
 import matplotlib.transforms as mtransforms
 from scipy import stats
 from scipy.stats import f_oneway
-from statsmodels.stats.multicomp import pairwise_tukeyhsd
 
 # Try to import pingouin for mixed ANOVA (repeated measures)
 try:
@@ -1306,261 +1305,225 @@ def _perform_standard_anova_fallback(df: pd.DataFrame) -> dict:
 
 def perform_tukey_hsd_weight(weight_results: dict, df: pd.DataFrame) -> dict:
 	"""
-	Perform Tukey HSD post-hoc tests for significant main effects in the mixed ANOVA.
-	
+	Perform Bonferroni-corrected paired t-test post-hoc tests for significant main
+	effects in the mixed ANOVA.  Week is the within-subjects factor (the same animals
+	are measured each week), so paired t-tests are used.
+
 	For Week main effect: Pairwise comparisons across all Week levels (collapsed across Sex)
 	For Sex main effect: Not applicable (only 2 levels - F-test is sufficient)
 	For Interaction: Simple effects of Week within each Sex level
-	
+
 	Parameters:
 		weight_results: Dictionary from perform_two_way_anova_weight
 		df: Master DataFrame with columns ID, Sex, Week, Daily Change, Total Change
-		
+
 	Returns:
-		Dictionary containing Tukey HSD results for each measure
+		Dictionary containing post-hoc results for each measure
 	"""
+	import itertools
 	tukey_results = {}
-	
+
 	# Clean and prepare data
 	cdf = clean_master_dataframe(df)
 	cdf = _add_day_number_column(cdf)
 	cdf = _add_week_column(cdf)
-	
+
 	# Filter to exclude Day < 0 (baseline measurements)
 	cdf = cdf[cdf["Day"] >= 0]
-	
+
 	# Keep only rows with complete data
 	required_cols = ["ID", "Sex", "Week", "Daily Change", "Total Change"]
 	cdf = cdf.dropna(subset=required_cols)
-	
+
+	week_levels = sorted(cdf['Week'].unique())
+	pairs = list(itertools.combinations(week_levels, 2))
+	k = len(pairs)  # total comparisons for Bonferroni
+
+	def _bonferroni_paired(data_df, group_col, pairs, k, col):
+		"""Paired t-tests with Bonferroni correction for within-subjects comparisons."""
+		per_id = data_df.groupby(['ID', group_col])[col].mean().reset_index()
+		comparisons = []
+		for g1, g2 in pairs:
+			v1s = per_id[per_id[group_col] == g1].set_index('ID')[col]
+			v2s = per_id[per_id[group_col] == g2].set_index('ID')[col]
+			common = v1s.index.intersection(v2s.index)
+			if len(common) < 2:
+				continue
+			v1 = v1s.loc[common].values
+			v2 = v2s.loc[common].values
+			diffs = v1 - v2
+			mean_diff = float(np.mean(diffs))
+			se_diff = float(np.std(diffs, ddof=1) / np.sqrt(len(diffs)))
+			t_stat, p_raw = stats.ttest_rel(v1, v2)
+			df_val = len(diffs) - 1
+			p_adj = min(float(p_raw) * k, 1.0)
+			t_crit = stats.t.ppf(0.975, df_val)
+			lower_ci = mean_diff - t_crit * se_diff
+			upper_ci = mean_diff + t_crit * se_diff
+			comparisons.append({
+				'group1': f"Week {int(g1)}",
+				'group2': f"Week {int(g2)}",
+				'meandiff': mean_diff,
+				't_stat': float(t_stat),
+				'df': df_val,
+				'p_raw': float(p_raw),
+				'p_adj': p_adj,
+				'lower_ci': lower_ci,
+				'upper_ci': upper_ci,
+				'significant': p_adj < 0.05,
+			})
+		return comparisons
+
 	measures = {
 		'Daily Change': 'Daily Change',
 		'Total Change': 'Total Change'
 	}
-	
+
 	for measure_name, column in measures.items():
 		if measure_name not in weight_results:
 			continue
-		
+
 		results = weight_results[measure_name]
-		
+
 		# Check if Week main effect is significant
 		week_significant = results.get('week', {}).get('significant', False)
 		interaction_significant = results.get('interaction', {}).get('significant', False)
-		
+
 		if not week_significant and not interaction_significant:
 			# Skip if no significant effects involving Week
 			continue
-		
+
 		tukey_results[measure_name] = {
 			'measure_name': measure_name,
 			'week_pairwise': None,
 			'simple_effects': None
 		}
-		
+
 		try:
 			# Week main effect pairwise comparisons (collapsed across Sex)
 			if week_significant:
-				print(f"\nPerforming Tukey HSD for Week main effect ({measure_name})...")
-				
-				# Prepare data: all observations with Week grouping
-				week_data = cdf[['Week', column]].copy()
-				week_data = week_data.dropna()
-				
-				# Perform Tukey HSD
-				tukey_week = pairwise_tukeyhsd(
-					endog=week_data[column],
-					groups=week_data['Week'],
-					alpha=0.05
-				)
-				
-				# Parse results
-				comparisons = []
-				summary_data = tukey_week.summary().data[1:]  # Skip header row
-				
-				for row in summary_data:
-					group1, group2, meandiff, p_adj, lower_ci, upper_ci, reject = row
-					
-					comparisons.append({
-						'group1': f"Week {int(group1)}",
-						'group2': f"Week {int(group2)}",
-						'meandiff': float(meandiff),
-						'p_adj': float(p_adj),
-						'lower_ci': float(lower_ci),
-						'upper_ci': float(upper_ci),
-						'significant': bool(reject)
-					})
-				
-				tukey_results[measure_name]['week_pairwise'] = {
-					'comparisons': comparisons,
-					'tukey_object': tukey_week
-				}
-				
+				print(f"\nPerforming Bonferroni post-hoc for Week main effect ({measure_name})...")
+				comparisons = _bonferroni_paired(cdf, 'Week', pairs, k, column)
+				tukey_results[measure_name]['week_pairwise'] = {'comparisons': comparisons}
+
 			if interaction_significant:
 				print(f"\nPerforming simple effects analysis for Sex × Week interaction ({measure_name})...")
-				
-				# Simple effects: Week pairwise comparisons within each Sex
 				simple_effects = {}
-				
 				for sex in sorted(cdf['Sex'].unique()):
-					sex_data = cdf[cdf['Sex'] == sex][['Week', column]].copy()
-					sex_data = sex_data.dropna()
-					
-					if len(sex_data) < 2:
-						continue
-					
-					# Perform Tukey HSD for this sex
-					tukey_sex = pairwise_tukeyhsd(
-						endog=sex_data[column],
-						groups=sex_data['Week'],
-						alpha=0.05
-					)
-					
-					# Parse results
-					comparisons = []
-					summary_data = tukey_sex.summary().data[1:]  # Skip header row
-					
-					for row in summary_data:
-						group1, group2, meandiff, p_adj, lower_ci, upper_ci, reject = row
-						
-						comparisons.append({
-							'group1': f"Week {int(group1)}",
-							'group2': f"Week {int(group2)}",
-							'meandiff': float(meandiff),
-							'p_adj': float(p_adj),
-							'lower_ci': float(lower_ci),
-							'upper_ci': float(upper_ci),
-							'significant': bool(reject)
-						})
-					
-					simple_effects[sex] = {
-						'comparisons': comparisons,
-						'tukey_object': tukey_sex
-					}
-				
+					sex_df = cdf[cdf['Sex'] == sex].copy()
+					comparisons = _bonferroni_paired(sex_df, 'Week', pairs, k, column)
+					if comparisons:
+						simple_effects[sex] = {'comparisons': comparisons}
 				tukey_results[measure_name]['simple_effects'] = simple_effects
-				
+
 		except Exception as e:
 			tukey_results[measure_name] = {
 				'measure_name': measure_name,
-				'error': f"Error performing Tukey HSD: {str(e)}"
+				'error': f"Error performing post-hoc tests: {str(e)}"
 			}
-	
+
 	return tukey_results
 
 
 def display_tukey_hsd_results(tukey_results: dict) -> str:
 	"""
-	Display Tukey HSD post-hoc test results in a formatted table.
-	
+	Display Bonferroni-corrected paired t-test post-hoc results in a formatted table.
+
 	Parameters:
 		tukey_results: Dictionary from perform_tukey_hsd_weight
-		
+
 	Returns:
-		Formatted string with Tukey HSD results
+		Formatted string with post-hoc results
 	"""
 	if not tukey_results:
-		return "\n" + "="*80 + "\nNo significant Week or interaction effects found - Tukey HSD not needed.\n" + "="*80 + "\n"
-	
+		return "\n" + "="*80 + "\nNo significant Week or interaction effects found - post-hoc tests not needed.\n" + "="*80 + "\n"
+
 	lines = []
 	lines.append("\n" + "="*80)
-	lines.append("TUKEY HSD POST-HOC TEST RESULTS")
+	lines.append("BONFERRONI POST-HOC TEST RESULTS (PAIRED T-TESTS)")
 	lines.append("="*80)
 	lines.append("")
-	lines.append("Pairwise comparisons for significant main effects and interactions.")
-	lines.append("Alpha = 0.05 (family-wise error rate controlled)")
+	lines.append("Paired t-tests with Bonferroni correction for within-subjects Week comparisons.")
+	lines.append("Week is a within-subjects factor (same animals measured each week).")
+	lines.append("Alpha = 0.05 (Bonferroni-adjusted family-wise error rate)")
 	lines.append("")
-	
+
 	for measure, results in tukey_results.items():
 		if 'error' in results:
 			lines.append(f"{results['measure_name']}: {results['error']}")
 			lines.append("")
 			continue
-		
+
 		lines.append(f"MEASURE: {results['measure_name'].upper()}")
 		lines.append("-"*80)
 		lines.append("")
-		
+
 		# Week main effect pairwise comparisons
 		if results.get('week_pairwise'):
 			lines.append("Week Main Effect - Pairwise Comparisons (collapsed across Sex):")
 			lines.append("-"*60)
-			
-			header = f"{'Comparison':<20} {'Mean Diff':<12} {'Adj p-value':<12} {'95% CI Lower':<12} {'95% CI Upper':<12} {'Significant':<12}"
+			header = f"{'Comparison':<20} {'Mean Diff':<12} {'T':<8} {'df':<6} {'p(raw)':<10} {'p(Bonf.)':<10} {'Sig':<6}"
 			lines.append(header)
 			lines.append("-"*80)
-			
-			# Sort comparisons by p-value
+
 			sorted_comps = sorted(results['week_pairwise']['comparisons'], key=lambda x: x['p_adj'])
-			
 			for comp in sorted_comps:
 				comparison_name = f"{comp['group1']} vs {comp['group2']}"
-				significance = "Yes" if comp['significant'] else "No"
-				
+				sig = "*" if comp['significant'] else "ns"
 				row = (f"{comparison_name:<20} "
 					   f"{comp['meandiff']:<12.3f} "
-					   f"{comp['p_adj']:<12.6f} "
-					   f"{comp['lower_ci']:<12.3f} "
-					   f"{comp['upper_ci']:<12.3f} "
-					   f"{significance:<12}")
+					   f"{comp.get('t_stat', float('nan')):<8.3f} "
+					   f"{comp.get('df', 0):<6} "
+					   f"{comp.get('p_raw', float('nan')):<10.4f} "
+					   f"{comp['p_adj']:<10.4f} "
+					   f"{sig:<6}")
 				lines.append(row)
-			
+
 			lines.append("")
-			
-			# Summary of significant comparisons
 			sig_comps = [c for c in results['week_pairwise']['comparisons'] if c['significant']]
 			if sig_comps:
 				lines.append(f"Found {len(sig_comps)} significant pairwise difference(s):")
 				for comp in sig_comps:
-					lines.append(f"  {comp['group1']} vs {comp['group2']}: p = {comp['p_adj']:.4f}")
+					lines.append(f"  {comp['group1']} vs {comp['group2']}: p(Bonf.) = {comp['p_adj']:.4f}")
 			else:
 				lines.append("No significant pairwise differences found.")
-			
 			lines.append("")
-		
+
 		# Simple effects for interaction
 		if results.get('simple_effects'):
 			lines.append("Sex × Week Interaction - Simple Effects (Week comparisons within each Sex):")
 			lines.append("-"*60)
 			lines.append("")
-			
 			for sex, sex_results in sorted(results['simple_effects'].items()):
 				lines.append(f"  Sex = {sex}:")
-				
-				header = f"  {'Comparison':<20} {'Mean Diff':<12} {'Adj p-value':<12} {'Significant':<12}"
+				header = f"  {'Comparison':<20} {'Mean Diff':<12} {'T':<8} {'df':<6} {'p(raw)':<10} {'p(Bonf.)':<10} {'Sig':<6}"
 				lines.append(header)
-				lines.append("  " + "-"*60)
-				
+				lines.append("  " + "-"*70)
 				sorted_comps = sorted(sex_results['comparisons'], key=lambda x: x['p_adj'])
-				
 				for comp in sorted_comps:
 					comparison_name = f"{comp['group1']} vs {comp['group2']}"
-					significance = "Yes" if comp['significant'] else "No"
-					
+					sig = "*" if comp['significant'] else "ns"
 					row = (f"  {comparison_name:<20} "
 						   f"{comp['meandiff']:<12.3f} "
-						   f"{comp['p_adj']:<12.6f} "
-						   f"{significance:<12}")
+						   f"{comp.get('t_stat', float('nan')):<8.3f} "
+						   f"{comp.get('df', 0):<6} "
+						   f"{comp.get('p_raw', float('nan')):<10.4f} "
+						   f"{comp['p_adj']:<10.4f} "
+						   f"{sig:<6}")
 					lines.append(row)
-				
-				# Summary for this sex
 				sig_comps = [c for c in sex_results['comparisons'] if c['significant']]
 				if sig_comps:
 					lines.append(f"  Found {len(sig_comps)} significant difference(s) for {sex}")
 				else:
 					lines.append(f"  No significant differences for {sex}")
-				
 				lines.append("")
-		
+
 		lines.append("")
-	
+
 	lines.append("="*80)
 	lines.append("")
-	
-	# Join lines and print
 	formatted_output = "\n".join(lines)
 	print(formatted_output)
-	
 	return formatted_output
 
 

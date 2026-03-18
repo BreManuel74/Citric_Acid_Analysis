@@ -22,7 +22,6 @@ from tkinter import filedialog
 from datetime import datetime
 from scipy import stats
 from scipy.signal import find_peaks
-from statsmodels.stats.multicomp import pairwise_tukeyhsd
 
 # Try importing pingouin for mixed ANOVA
 try:
@@ -914,42 +913,31 @@ def _perform_standard_anova_fallback(weekly_averages: Dict) -> Dict:
 
 def perform_tukey_hsd(anova_results: Dict, weekly_averages: Dict) -> Dict:
     """
-    Perform Tukey's HSD post-hoc test for significant CA% main effects.
-    
-    For mixed ANOVA or repeated measures ANOVA with significant CA% effects,
-    performs pairwise comparisons across CA% levels.
-    
-    Note: For repeated measures data, this is an approximation. Proper RM post-hoc
-    tests would account for the correlated nature of repeated observations.
-    
+    Perform Bonferroni-corrected paired t-test post-hoc tests for significant
+    CA% main effects. Animal IDs are preserved across sessions, so paired
+    t-tests are used to properly account for the repeated-measures structure.
+
     Parameters:
         anova_results: Dictionary from perform_anova_analysis
-        weekly_averages: Dictionary from compute_weekly_averages (needed to reconstruct data)
-        
+        weekly_averages: Dictionary from compute_weekly_averages
+
     Returns:
-        Dictionary containing Tukey HSD results for significant measures
+        Dictionary containing post-hoc results for significant measures
     """
+    import itertools
     tukey_results = {}
-    
+
     for measure, anova_data in anova_results.items():
-        # Check if CA% effect is significant (either in one-way RM or mixed ANOVA)
         if not anova_data.get('significant', False):
             continue
-        
-        # Skip if there's an error
+
         if 'error' in anova_data:
             continue
-        
+
         try:
-            # Reconstruct long-format data from weekly_averages
-            all_data = []
-            group_labels = []
-            
-            # Get group stats from ANOVA results (contains CA% info)
             if 'group_stats' not in anova_data or not anova_data['group_stats']:
                 continue
-            
-            # Map measure name to data key in weekly_averages
+
             measure_to_key = {
                 'licks': 'avg_licks_per_animal',
                 'bouts': 'avg_bouts_per_animal',
@@ -957,161 +945,162 @@ def perform_tukey_hsd(anova_results: Dict, weekly_averages: Dict) -> Dict:
                 'bottle_weight': 'avg_bottle_weight_per_animal',
                 'total_weight': 'avg_total_weight_per_animal'
             }
-            
+
             data_key = measure_to_key.get(measure)
             if not data_key:
                 continue
-            
-            # Reconstruct data for each CA%
-            sorted_dates = sorted(weekly_averages.keys(), key=lambda d: weekly_averages[d]['ca_percent'])
-            
+
+            # Build {ca_label: {animal_id: value}} mapping, sorted by CA%
+            sorted_dates = sorted(weekly_averages.keys(),
+                                  key=lambda d: weekly_averages[d]['ca_percent'])
+            ca_maps = {}
             for date in sorted_dates:
-                ca_percent = weekly_averages[date]['ca_percent']
-                ca_data = weekly_averages[date][data_key]
-                
-                # For bottle_weight, exclude zeros (outliers)
+                ca_pct = weekly_averages[date]['ca_percent']
+                label = f"{ca_pct}%"
+                raw = weekly_averages[date][data_key]
+                ids = weekly_averages[date].get('animal_ids', [])
                 if measure == 'bottle_weight':
-                    ca_data = [x for x in ca_data if x > 0]
-                
-                # Add to combined data
-                all_data.extend(ca_data)
-                group_labels.extend([f"{ca_percent}%"] * len(ca_data))
-            
-            if len(all_data) == 0 or len(set(group_labels)) < 2:
+                    id_val = {aid: v for aid, v in zip(ids, raw) if v > 0}
+                else:
+                    id_val = {aid: v for aid, v in zip(ids, raw)
+                              if not (isinstance(v, float) and np.isnan(v))}
+                if id_val:
+                    ca_maps[label] = id_val
+
+            group_labels = list(ca_maps.keys())
+            pairs = list(itertools.combinations(group_labels, 2))
+            k = len(pairs)
+            if k == 0:
                 continue
-            
-            # Perform Tukey HSD
-            tukey_result = pairwise_tukeyhsd(endog=all_data, groups=group_labels, alpha=0.05)
-            
-            # Parse results into a more accessible format
+
             comparisons = []
-            
-            # Extract pairwise comparison results directly from tukey_result
-            # The tukey HSD result contains arrays for each comparison
-            summary_data = tukey_result.summary().data[1:]  # Skip header row
-            
-            for row in summary_data:
-                group1, group2, meandiff, p_adj, lower_ci, upper_ci, reject = row
-                
+            for g1, g2 in pairs:
+                map1, map2 = ca_maps[g1], ca_maps[g2]
+                common = sorted(set(map1.keys()) & set(map2.keys()))
+                if len(common) < 2:
+                    continue
+                v1 = np.array([map1[aid] for aid in common], dtype=float)
+                v2 = np.array([map2[aid] for aid in common], dtype=float)
+                diffs = v1 - v2
+                mean_diff = float(np.mean(diffs))
+                se_diff = float(np.std(diffs, ddof=1) / np.sqrt(len(diffs)))
+                t_stat, p_raw = stats.ttest_rel(v1, v2)
+                df_val = len(diffs) - 1
+                p_adj = min(float(p_raw) * k, 1.0)
+                t_crit = stats.t.ppf(0.975, df_val)
                 comparisons.append({
-                    'group1': str(group1),
-                    'group2': str(group2), 
-                    'meandiff': float(meandiff),
-                    'p_adj': float(p_adj),
-                    'lower_ci': float(lower_ci),
-                    'upper_ci': float(upper_ci),
-                    'significant': bool(reject)
+                    'group1': g1,
+                    'group2': g2,
+                    'meandiff': mean_diff,
+                    't_stat': float(t_stat),
+                    'df': df_val,
+                    'p_raw': float(p_raw),
+                    'p_adj': p_adj,
+                    'lower_ci': mean_diff - t_crit * se_diff,
+                    'upper_ci': mean_diff + t_crit * se_diff,
+                    'significant': p_adj < 0.05,
+                    'n_pairs': len(common),
                 })
-            
+
             tukey_results[measure] = {
                 'measure_name': anova_data['measure_name'],
                 'comparisons': comparisons,
-                'tukey_object': tukey_result  # Store the full result for summary table
             }
-            
+
         except Exception as e:
             tukey_results[measure] = {
                 'measure_name': anova_data['measure_name'],
-                'error': f"Error performing Tukey HSD: {str(e)}"
+                'error': f"Error performing post-hoc tests: {str(e)}"
             }
-    
+
     return tukey_results
 
 
 def display_tukey_results(tukey_results: Dict) -> str:
     """
-    Display Tukey HSD results in a formatted table and return formatted string.
-    
+    Display Bonferroni-corrected paired t-test post-hoc results in a formatted table.
+
     Parameters:
         tukey_results: Dictionary from perform_tukey_hsd
-        
+
     Returns:
-        Formatted string with Tukey HSD results
+        Formatted string with post-hoc results
     """
     if not tukey_results:
-        return "\n" + "=" * 80 + "\nNo significant CA% effects found - Tukey HSD post-hoc tests not needed.\n" + "=" * 80 + "\n"
-    
+        return "\n" + "=" * 80 + "\nNo significant CA% effects found - post-hoc tests not needed.\n" + "=" * 80 + "\n"
+
     lines = []
     lines.append("\n" + "=" * 80)
-    lines.append("TUKEY HSD POST-HOC TEST RESULTS")
+    lines.append("BONFERRONI POST-HOC TEST RESULTS (PAIRED T-TESTS)")
     lines.append("=" * 80)
     lines.append("")
-    lines.append("Tukey HSD performed for measures with significant CA% main effects.")
-    lines.append("Pairwise comparisons across CA% levels (collapsed across Sex if applicable).")
-    lines.append("Alpha = 0.05 (family-wise error rate controlled)")
+    lines.append("Paired t-tests with Bonferroni correction for within-subjects CA% comparisons.")
+    lines.append("Same animals tested at each CA% level; observations paired by animal ID.")
+    lines.append("Alpha = 0.05 (Bonferroni-adjusted family-wise error rate)")
     lines.append("")
-    
+
     for measure, results in tukey_results.items():
         if 'error' in results:
             lines.append(f"{results['measure_name']}: {results['error']}")
             lines.append("")
             continue
-            
+
         lines.append(f"MEASURE: {results['measure_name'].upper()}")
         lines.append("-" * 60)
-        
-        # Header for pairwise comparisons
-        header = f"{'Comparison':<15} {'Mean Diff':<12} {'Adj p-value':<12} {'95% CI Lower':<12} {'95% CI Upper':<12} {'Significant':<12}"
+        header = f"{'Comparison':<15} {'Mean Diff':<12} {'T':<8} {'df':<6} {'n':<5} {'p(raw)':<10} {'p(Bonf.)':<10} {'Sig':<6}"
         lines.append(header)
         lines.append("-" * 80)
-        
-        # Sort comparisons by p-value for better readability
+
         sorted_comparisons = sorted(results['comparisons'], key=lambda x: x['p_adj'])
-        
         for comp in sorted_comparisons:
             comparison_name = f"{comp['group1']} vs {comp['group2']}"
-            significance = "Yes" if comp['significant'] else "No"
-            
+            sig = "*" if comp['significant'] else "ns"
             row = (f"{comparison_name:<15} "
                    f"{comp['meandiff']:<12.3f} "
-                   f"{comp['p_adj']:<12.6f} "
-                   f"{comp['lower_ci']:<12.3f} "
-                   f"{comp['upper_ci']:<12.3f} "
-                   f"{significance:<12}")
+                   f"{comp.get('t_stat', float('nan')):<8.3f} "
+                   f"{comp.get('df', 0):<6} "
+                   f"{comp.get('n_pairs', ''):<5} "
+                   f"{comp.get('p_raw', float('nan')):<10.4f} "
+                   f"{comp['p_adj']:<10.4f} "
+                   f"{sig:<6}")
             lines.append(row)
-        
+
         lines.append("")
-        
-        # Summary of significant comparisons
         significant_comps = [comp for comp in results['comparisons'] if comp['significant']]
         if significant_comps:
             lines.append("Significant pairwise differences:")
             for comp in significant_comps:
                 direction = "higher" if comp['meandiff'] > 0 else "lower"
-                lines.append(f"  • {comp['group1']} vs {comp['group2']}: {comp['group1']} is {direction} (p = {comp['p_adj']:.4f})")
+                lines.append(f"  \u2022 {comp['group1']} vs {comp['group2']}: {comp['group1']} is {direction} (p(Bonf.) = {comp['p_adj']:.4f})")
         else:
             lines.append("No significant pairwise differences found (despite significant ANOVA).")
             lines.append("This may indicate the effect is distributed across groups rather than")
             lines.append("concentrated in specific pairwise comparisons.")
-        
+
         lines.append("")
         lines.append("")
-    
-    # Overall summary
+
     total_measures = len(tukey_results)
-    measures_with_sig_pairs = len([r for r in tukey_results.values() 
-                                   if 'comparisons' in r and 
+    measures_with_sig_pairs = len([r for r in tukey_results.values()
+                                   if 'comparisons' in r and
                                    any(comp['significant'] for comp in r['comparisons'])])
-    
-    lines.append("SUMMARY OF TUKEY HSD RESULTS:")
+
+    lines.append("SUMMARY OF BONFERRONI POST-HOC RESULTS:")
     lines.append("-" * 40)
     lines.append(f"Measures tested: {total_measures}")
     lines.append(f"Measures with significant pairwise differences: {measures_with_sig_pairs}")
-    
+
     if measures_with_sig_pairs > 0:
         lines.append("\nSignificant pairwise differences were found, indicating specific")
         lines.append("CA% concentrations that differ significantly from each other.")
     else:
         lines.append("\nNo significant pairwise differences found, despite significant ANOVA results.")
         lines.append("This suggests the overall effect may be more complex than simple pairwise differences.")
-    
+
     lines.append("\n" + "=" * 80)
     lines.append("")
-    
-    # Join lines and print
     formatted_output = "\n".join(lines)
     print(formatted_output)
-    
     return formatted_output
 
 
@@ -1325,7 +1314,7 @@ def display_anova_results(anova_results: Dict) -> str:
             lines.append("No significant CA% effects found.")
     
     if significant_ca:
-        lines.append("\nConsider Tukey HSD post-hoc tests for pairwise CA% comparisons.")
+        lines.append("\nConsider Bonferroni-corrected paired t-test post-hoc tests for pairwise CA% comparisons.")
     
     # Note about sphericity violations
     sphericity_violated = [results['measure_name'] for results in anova_results.values()
@@ -2218,202 +2207,189 @@ def display_frontloading_anova_results(anova_results: Dict) -> str:
 
 def perform_frontloading_tukey_hsd(anova_results: Dict, weekly_averages: Dict) -> Dict:
     """
-    Perform Tukey's HSD post-hoc test for significant front-loading measures.
-    
-    For repeated measures ANOVA with significant CA% effects, performs pairwise
-    comparisons across CA% levels for:
-    - % of licks in first 5 minutes
-    - % of bouts in first 5 minutes
-    - Time to 50% of total licks (minutes)
-    
-    Note: For repeated measures data, this is an approximation. Proper RM post-hoc
-    tests would account for the correlated nature of repeated observations.
-    
+    Perform Bonferroni-corrected paired t-test post-hoc tests for significant
+    front-loading measures. Animal IDs are preserved across sessions, so paired
+    t-tests are used to properly account for the repeated-measures structure.
+
     Parameters:
         anova_results: Dictionary from perform_frontloading_anova
         weekly_averages: Dictionary from compute_weekly_averages
-        
+
     Returns:
-        Dictionary containing Tukey HSD results for significant measures
+        Dictionary containing post-hoc results for significant measures
     """
+    import itertools
     tukey_results = {}
-    
+
     for measure, anova_data in anova_results.items():
-        # Check if CA% effect is significant
         if not anova_data.get('significant', False):
             continue
-        
-        # Skip if there's an error
+
         if 'error' in anova_data:
             continue
-        
+
         try:
-            # Reconstruct long-format data from weekly_averages
-            all_data = []
-            group_labels = []
-            
-            # Map measure name to data key in weekly_averages
             measure_to_key = {
                 'first_5min_lick_pct': 'first_5min_lick_pcts_per_animal',
                 'first_5min_bout_pct': 'first_5min_bout_pcts_per_animal',
                 'time_to_50pct': 'time_to_50pct_licks_per_animal'
             }
-            
+
             data_key = measure_to_key.get(measure)
             if not data_key:
                 continue
-            
-            # Reconstruct data for each CA%
-            sorted_dates = sorted(weekly_averages.keys(), key=lambda d: weekly_averages[d]['ca_percent'])
-            
+
+            # Build {ca_label: {animal_id: value}} mapping, sorted by CA%
+            sorted_dates = sorted(weekly_averages.keys(),
+                                  key=lambda d: weekly_averages[d]['ca_percent'])
+            ca_maps = {}
             for date in sorted_dates:
-                ca_percent = weekly_averages[date]['ca_percent']
-                ca_data = weekly_averages[date].get(data_key, [])
-                
-                # For time_to_50pct, exclude NaN values
-                if measure == 'time_to_50pct':
-                    ca_data = [x for x in ca_data if not np.isnan(x)]
-                
-                # Add to combined data
-                all_data.extend(ca_data)
-                group_labels.extend([f"{ca_percent}%"] * len(ca_data))
-            
-            if len(all_data) == 0 or len(set(group_labels)) < 2:
+                ca_pct = weekly_averages[date]['ca_percent']
+                label = f"{ca_pct}%"
+                raw = weekly_averages[date].get(data_key, [])
+                ids = weekly_averages[date].get('animal_ids', [])
+                id_val = {aid: v for aid, v in zip(ids, raw)
+                          if not (isinstance(v, float) and np.isnan(v))}
+                if id_val:
+                    ca_maps[label] = id_val
+
+            group_labels = list(ca_maps.keys())
+            pairs = list(itertools.combinations(group_labels, 2))
+            k = len(pairs)
+            if k == 0:
                 continue
-            
-            # Perform Tukey HSD
-            tukey_result = pairwise_tukeyhsd(endog=all_data, groups=group_labels, alpha=0.05)
-            
-            # Parse results into a more accessible format
+
             comparisons = []
-            
-            # Extract pairwise comparison results
-            summary_data = tukey_result.summary().data[1:]  # Skip header row
-            
-            for row in summary_data:
-                group1, group2, meandiff, p_adj, lower_ci, upper_ci, reject = row
-                
+            for g1, g2 in pairs:
+                map1, map2 = ca_maps[g1], ca_maps[g2]
+                common = sorted(set(map1.keys()) & set(map2.keys()))
+                if len(common) < 2:
+                    continue
+                v1 = np.array([map1[aid] for aid in common], dtype=float)
+                v2 = np.array([map2[aid] for aid in common], dtype=float)
+                diffs = v1 - v2
+                mean_diff = float(np.mean(diffs))
+                se_diff = float(np.std(diffs, ddof=1) / np.sqrt(len(diffs)))
+                t_stat, p_raw = stats.ttest_rel(v1, v2)
+                df_val = len(diffs) - 1
+                p_adj = min(float(p_raw) * k, 1.0)
+                t_crit = stats.t.ppf(0.975, df_val)
                 comparisons.append({
-                    'group1': str(group1),
-                    'group2': str(group2), 
-                    'meandiff': float(meandiff),
-                    'p_adj': float(p_adj),
-                    'lower_ci': float(lower_ci),
-                    'upper_ci': float(upper_ci),
-                    'significant': bool(reject)
+                    'group1': g1,
+                    'group2': g2,
+                    'meandiff': mean_diff,
+                    't_stat': float(t_stat),
+                    'df': df_val,
+                    'p_raw': float(p_raw),
+                    'p_adj': p_adj,
+                    'lower_ci': mean_diff - t_crit * se_diff,
+                    'upper_ci': mean_diff + t_crit * se_diff,
+                    'significant': p_adj < 0.05,
+                    'n_pairs': len(common),
                 })
-            
+
             tukey_results[measure] = {
                 'measure_name': anova_data['measure_name'],
                 'comparisons': comparisons,
-                'tukey_object': tukey_result
             }
-            
-            print(f"\nTukey HSD completed for: {anova_data['measure_name']}")
+
+            print(f"\nBonferroni post-hoc completed for: {anova_data['measure_name']}")
             print(f"  Total comparisons: {len(comparisons)}")
             print(f"  Significant pairs: {sum(1 for c in comparisons if c['significant'])}")
-            
+
         except Exception as e:
             tukey_results[measure] = {
                 'measure_name': anova_data['measure_name'],
-                'error': f"Error performing Tukey HSD: {str(e)}"
+                'error': f"Error performing post-hoc tests: {str(e)}"
             }
-    
+
     return tukey_results
 
 
 def display_frontloading_tukey_results(tukey_results: Dict) -> str:
     """
-    Display Tukey HSD results for front-loading measures in formatted output.
-    
+    Display Bonferroni-corrected paired t-test results for front-loading measures.
+
     Parameters:
         tukey_results: Dictionary from perform_frontloading_tukey_hsd
-        
+
     Returns:
-        Formatted string with Tukey HSD results
+        Formatted string with post-hoc results
     """
     if not tukey_results:
-        return "\nNo Tukey HSD results to display (no significant CA% effects)\n"
-    
+        return "\nNo post-hoc results to display (no significant CA% effects)\n"
+
     lines = []
     lines.append("\n" + "=" * 80)
-    lines.append("TUKEY HSD POST-HOC TEST RESULTS - FRONT-LOADING MEASURES")
+    lines.append("BONFERRONI POST-HOC TEST RESULTS - FRONT-LOADING MEASURES")
     lines.append("=" * 80)
     lines.append("")
-    lines.append("Tukey HSD performed for measures with significant CA% effects.")
-    lines.append("Pairwise comparisons across CA% levels.")
-    lines.append("Alpha = 0.05 (family-wise error rate controlled)")
+    lines.append("Paired t-tests with Bonferroni correction for within-subjects CA% comparisons.")
+    lines.append("Same animals tested at each CA% level; observations paired by animal ID.")
+    lines.append("Alpha = 0.05 (Bonferroni-adjusted family-wise error rate)")
     lines.append("")
-    
+
     for measure, results in tukey_results.items():
         lines.append(f"MEASURE: {results['measure_name'].upper()}")
         lines.append("-" * 80)
-        
+
         if 'error' in results:
             lines.append(f"ERROR: {results['error']}")
             lines.append("")
             continue
-        
+
         if 'comparisons' not in results or not results['comparisons']:
             lines.append("No pairwise comparisons available")
             lines.append("")
             continue
-        
-        # Display comparison table
-        lines.append(f"{'Comparison':<16} {'Mean Diff':<12} {'Adj p-value':<13} {'95% CI Lower':<14} {'95% CI Upper':<14} {'Significant':<12}")
+
+        lines.append(f"{'Comparison':<16} {'Mean Diff':<12} {'T':<8} {'df':<6} {'n':<5} {'p(raw)':<10} {'p(Bonf.)':<10} {'Sig':<6}")
         lines.append("-" * 80)
-        
+
         for comp in results['comparisons']:
-            group1 = comp['group1']
-            group2 = comp['group2']
-            comparison = f"{group1} vs {group2}"
-            meandiff = comp['meandiff']
-            p_adj = comp['p_adj']
-            lower_ci = comp['lower_ci']
-            upper_ci = comp['upper_ci']
-            sig = "Yes" if comp['significant'] else "No"
-            
-            lines.append(f"{comparison:<16} {meandiff:<12.3f} {p_adj:<13.6f} {lower_ci:<14.3f} {upper_ci:<14.3f} {sig:<12}")
-        
+            comparison = f"{comp['group1']} vs {comp['group2']}"
+            sig = "*" if comp['significant'] else "ns"
+            lines.append(f"{comparison:<16} "
+                         f"{comp['meandiff']:<12.3f} "
+                         f"{comp.get('t_stat', float('nan')):<8.3f} "
+                         f"{comp.get('df', 0):<6} "
+                         f"{comp.get('n_pairs', ''):<5} "
+                         f"{comp.get('p_raw', float('nan')):<10.4f} "
+                         f"{comp['p_adj']:<10.4f} "
+                         f"{sig:<6}")
+
         lines.append("")
-        
-        # Summarize significant pairs
         sig_comps = [c for c in results['comparisons'] if c['significant']]
         if sig_comps:
             lines.append("Significant pairwise differences:")
             for comp in sig_comps:
                 direction = "higher" if comp['meandiff'] > 0 else "lower"
-                lines.append(f"  • {comp['group1']} vs {comp['group2']}: {comp['group1']} is {direction} (p = {comp['p_adj']:.4f})")
+                lines.append(f"  \u2022 {comp['group1']} vs {comp['group2']}: {comp['group1']} is {direction} (p(Bonf.) = {comp['p_adj']:.4f})")
         else:
             lines.append("No significant pairwise differences found.")
-        
+
         lines.append("")
         lines.append("")
-    
-    # Overall summary
+
     total_measures = len(tukey_results)
-    measures_with_sig_pairs = len([r for r in tukey_results.values() 
-                                   if 'comparisons' in r and 
+    measures_with_sig_pairs = len([r for r in tukey_results.values()
+                                   if 'comparisons' in r and
                                    any(comp['significant'] for comp in r['comparisons'])])
-    
-    lines.append("SUMMARY OF TUKEY HSD RESULTS:")
+    lines.append("SUMMARY OF BONFERRONI POST-HOC RESULTS:")
     lines.append("-" * 40)
     lines.append(f"Measures tested: {total_measures}")
     lines.append(f"Measures with significant pairwise differences: {measures_with_sig_pairs}")
-    
+
     if measures_with_sig_pairs > 0:
         lines.append("\nSignificant pairwise differences were found, indicating specific")
         lines.append("CA% concentrations that differ significantly from each other.")
     else:
         lines.append("\nNo significant pairwise differences found despite significant omnibus test.")
-    
+
     lines.append("\n" + "=" * 80)
     lines.append("")
-    
-    # Join lines and print
     formatted_output = "\n".join(lines)
     print(formatted_output)
-    
     return formatted_output
 
 
