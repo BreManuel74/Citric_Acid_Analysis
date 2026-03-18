@@ -1787,11 +1787,11 @@ def _sex_to_style(sex: Optional[str]) -> Tuple[str, str]:
 
 
 def _ca_to_style(ca_pct: Optional[float]) -> Tuple[str, str]:
-    """Return (color, marker) based on CA%: 0=dodgerblue/triangle-up, 2=orangered/triangle-down."""
+    """Return (color, marker) based on CA%: 0=dodgerblue/triangle, 2=orangered/circle."""
     if ca_pct == 0.0:
         return ("dodgerblue", "^")
     if ca_pct == 2.0:
-        return ("orangered", "v")
+        return ("orangered", "o")
     return ("gray", "d")  # diamond for unknown
 
 
