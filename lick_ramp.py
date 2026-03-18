@@ -268,6 +268,49 @@ def compute_lick_bouts(events_df: pd.DataFrame, sensor_cols: List[str], ili_cuto
     return bout_results
 
 
+def calculate_time_to_50_percent_licks(events_df: pd.DataFrame, sensor_col: str) -> float:
+    """Calculate the time (in minutes) when a sensor reaches 50% of its total licks.
+    
+    Parameters:
+        events_df: DataFrame with Time_sec and event columns
+        sensor_col: Sensor column name (e.g., 'Sensor_1')
+        
+    Returns:
+        Time in minutes when 50% of total licks is reached, or np.nan if no licks
+    """
+    event_col = f"{sensor_col}_event"
+    
+    if event_col not in events_df.columns:
+        return np.nan
+    
+    # Get all event times for this sensor
+    event_times = events_df[events_df[event_col]]['Time_sec'].values
+    
+    if len(event_times) == 0:
+        return np.nan
+    
+    # Sort times (should already be sorted, but just in case)
+    event_times = np.sort(event_times)
+    
+    # Calculate total licks and 50% threshold
+    total_licks = len(event_times)
+    licks_at_50_percent = total_licks / 2.0
+    
+    # Find the index where cumulative licks reaches 50%
+    # If total is 100, we want time at lick #50
+    idx_50_percent = int(np.ceil(licks_at_50_percent)) - 1  # -1 for 0-indexing
+    
+    # Ensure index is valid
+    if idx_50_percent >= len(event_times):
+        idx_50_percent = len(event_times) - 1
+    
+    # Get the time at 50% in seconds, then convert to minutes
+    time_at_50_percent_sec = event_times[idx_50_percent]
+    time_at_50_percent_min = time_at_50_percent_sec / 60.0
+    
+    return time_at_50_percent_min
+
+
 def compute_weekly_averages(weekly_results: Dict) -> Dict:
     """Compute average licks, bouts, and weight metrics across all 12 animals for each week.
     
@@ -302,6 +345,7 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
         total_weights = result['weight_losses']  # total weight change
         first_5min_lick_pcts = result.get('first_5min_lick_pcts', np.zeros(len(lick_counts)))  # NEW
         first_5min_bout_pcts = result.get('first_5min_bout_pcts', np.zeros(len(bout_counts)))  # NEW
+        time_to_50pct_licks = result.get('time_to_50pct_licks', np.full(len(lick_counts), np.nan))  # NEW
         
         # Calculate averages and statistics for all metrics
         avg_licks = np.mean(lick_counts)
@@ -324,6 +368,11 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
         avg_first_5min_lick_pct = np.mean(first_5min_lick_pcts)
         avg_first_5min_bout_pct = np.mean(first_5min_bout_pcts)
         
+        # Calculate time-to-50% averages (excluding NaN values)
+        time_to_50pct_valid = time_to_50pct_licks[~np.isnan(time_to_50pct_licks)]
+        avg_time_to_50pct = np.mean(time_to_50pct_valid) if len(time_to_50pct_valid) > 0 else np.nan
+        std_time_to_50pct = np.std(time_to_50pct_valid) if len(time_to_50pct_valid) > 0 else np.nan
+        
         # Print detailed calculation breakdown for first-5-min percentages
         print(f"\n--- First 5-Minute Average Calculation Details ---")
         print(f"Individual animal lick percentages: {first_5min_lick_pcts}")
@@ -334,6 +383,13 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
         print(f"Sum of all bout percentages: {np.sum(first_5min_bout_pcts):.2f}")
         print(f"Number of animals: {len(first_5min_bout_pcts)}")
         print(f"Average bout % = {np.sum(first_5min_bout_pcts):.2f} / {len(first_5min_bout_pcts)} = {avg_first_5min_bout_pct:.2f}%")
+        print(f"\n--- Time to 50% of Total Licks (minutes) ---")
+        print(f"Individual animal times: {time_to_50pct_licks}")
+        print(f"Valid measurements (non-NaN): {len(time_to_50pct_valid)}/{len(time_to_50pct_licks)}")
+        if len(time_to_50pct_valid) > 0:
+            print(f"Average time to 50%: {avg_time_to_50pct:.2f} minutes")
+            print(f"Std Dev: {std_time_to_50pct:.2f} minutes")
+            print(f"Range: {np.min(time_to_50pct_valid):.2f} - {np.max(time_to_50pct_valid):.2f} minutes")
         print(f"--------------------------------------------------\n")
         
         std_licks = np.std(lick_counts)
@@ -344,12 +400,14 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
         std_first_5min_bout_pct = np.std(first_5min_bout_pcts)
         
         n = len(lick_counts)
+        n_time_to_50pct = len(time_to_50pct_valid)
         sem_licks = std_licks / np.sqrt(n) if n > 0 else 0
         sem_bouts = std_bouts / np.sqrt(n) if n > 0 else 0
         sem_fecal = std_fecal / np.sqrt(n) if n > 0 else 0
         sem_total_weight = std_total_weight / np.sqrt(n) if n > 0 else 0
         sem_first_5min_lick_pct = std_first_5min_lick_pct / np.sqrt(n) if n > 0 else 0
         sem_first_5min_bout_pct = std_first_5min_bout_pct / np.sqrt(n) if n > 0 else 0
+        sem_time_to_50pct = std_time_to_50pct / np.sqrt(n_time_to_50pct) if n_time_to_50pct > 0 else np.nan
         
         n_bottle = len(bottle_weights_filtered) if date == '11/12/25' else n
         sem_bottle_weight = std_bottle_weight / np.sqrt(n_bottle) if n_bottle > 0 else 0
@@ -364,6 +422,7 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
             'avg_total_weight_loss': avg_total_weight,
             'avg_first_5min_lick_pct': avg_first_5min_lick_pct,  # NEW
             'avg_first_5min_bout_pct': avg_first_5min_bout_pct,  # NEW
+            'avg_time_to_50pct_licks': avg_time_to_50pct,  # NEW: Average time to reach 50% of total licks (minutes)
             'avg_licks_per_animal': lick_counts,
             'avg_bouts_per_animal': bout_counts,
             'avg_fecal_per_animal': fecal_counts,
@@ -371,6 +430,7 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
             'avg_total_weight_per_animal': total_weights,
             'first_5min_lick_pcts_per_animal': first_5min_lick_pcts,  # NEW
             'first_5min_bout_pcts_per_animal': first_5min_bout_pcts,  # NEW
+            'time_to_50pct_licks_per_animal': time_to_50pct_licks,  # NEW: Per-animal time to 50% (minutes)
             'std_licks': std_licks,
             'std_bouts': std_bouts,
             'std_fecal': std_fecal,
@@ -378,6 +438,7 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
             'std_total_weight': std_total_weight,
             'std_first_5min_lick_pct': std_first_5min_lick_pct,  # NEW
             'std_first_5min_bout_pct': std_first_5min_bout_pct,  # NEW
+            'std_time_to_50pct_licks': std_time_to_50pct,  # NEW: Std dev of time to 50% (minutes)
             'sem_licks': sem_licks,
             'sem_bouts': sem_bouts,
             'sem_fecal': sem_fecal,
@@ -385,6 +446,7 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
             'sem_total_weight': sem_total_weight,
             'sem_first_5min_lick_pct': sem_first_5min_lick_pct,  # NEW
             'sem_first_5min_bout_pct': sem_first_5min_bout_pct,  # NEW
+            'sem_time_to_50pct_licks': sem_time_to_50pct,  # NEW: SEM of time to 50% (minutes)
             'total_animals': len(lick_counts),
             'sum_total_licks': result['total_licks'],
             'sum_total_bouts': result['total_bouts'],
@@ -593,6 +655,13 @@ def perform_anova_analysis(weekly_averages: Dict) -> Dict:
                 f_stat_interaction = interaction_row['F'].values[0] if len(interaction_row) > 0 else np.nan
                 p_value_interaction = interaction_row['p-unc'].values[0] if len(interaction_row) > 0 else np.nan
                 
+                # Extract sphericity information for CA% (within-subjects factor)
+                sphericity_met = ca_row['sphericity'].values[0] if len(ca_row) > 0 and 'sphericity' in ca_row.columns else None
+                w_sphericity = ca_row['W-spher'].values[0] if len(ca_row) > 0 and 'W-spher' in ca_row.columns else None
+                p_sphericity = ca_row['p-spher'].values[0] if len(ca_row) > 0 and 'p-spher' in ca_row.columns else None
+                p_gg_corrected = ca_row['p-GG-corr'].values[0] if len(ca_row) > 0 and 'p-GG-corr' in ca_row.columns else None
+                epsilon_gg = ca_row['eps-GG'].values[0] if len(ca_row) > 0 and 'eps-GG' in ca_row.columns else None
+                
             else:
                 # ONE-WAY REPEATED MEASURES ANOVA (CA% only)
                 result_table = pg.rm_anova(
@@ -604,8 +673,16 @@ def perform_anova_analysis(weekly_averages: Dict) -> Dict:
                 )
                 
                 # Extract results
-                f_stat_ca = result_table.loc[result_table['Source'] == 'CA_Percent', 'F'].values[0]
-                p_value_ca = result_table.loc[result_table['Source'] == 'CA_Percent', 'p-unc'].values[0]
+                ca_row = result_table[result_table['Source'] == 'CA_Percent']
+                f_stat_ca = ca_row['F'].values[0]
+                p_value_ca = ca_row['p-unc'].values[0]
+                
+                # Extract sphericity information if available
+                sphericity_met = ca_row['sphericity'].values[0] if 'sphericity' in ca_row.columns else None
+                w_sphericity = ca_row['W-spher'].values[0] if 'W-spher' in ca_row.columns else None
+                p_sphericity = ca_row['p-spher'].values[0] if 'p-spher' in ca_row.columns else None
+                p_gg_corrected = ca_row['p-GG-corr'].values[0] if 'p-GG-corr' in ca_row.columns else None
+                epsilon_gg = ca_row['eps-GG'].values[0] if 'eps-GG' in ca_row.columns else None
                 
                 # Set sex/interaction to NaN for one-way design
                 f_stat_sex = np.nan
@@ -666,6 +743,12 @@ def perform_anova_analysis(weekly_averages: Dict) -> Dict:
                 'f_statistic_interaction': f_stat_interaction,
                 'p_value_interaction': p_value_interaction,
                 'significant_interaction': p_value_interaction < 0.05 if not np.isnan(p_value_interaction) else False,
+                # Sphericity test (for within-subjects CA% factor)
+                'sphericity_met': sphericity_met,
+                'w_sphericity': w_sphericity,
+                'p_sphericity': p_sphericity,
+                'p_gg_corrected': p_gg_corrected,
+                'epsilon_gg': epsilon_gg,
                 # Descriptive stats
                 'group_stats': group_stats,
                 'sex_stats': sex_stats,
@@ -1065,6 +1148,26 @@ def display_anova_results(anova_results: Dict) -> str:
                 lines.append(f"  Result: SIGNIFICANT (p < 0.05) - Significant differences across CA% concentrations")
             else:
                 lines.append(f"  Result: NOT SIGNIFICANT (p ≥ 0.05) - No significant CA% differences")
+            
+            # Sphericity test information
+            if results.get('sphericity_met') is not None:
+                lines.append("")
+                lines.append("  Sphericity Test (Mauchly's W):")
+                w_val = results.get('w_sphericity') if results.get('w_sphericity') is not None else np.nan
+                p_val = results.get('p_sphericity') if results.get('p_sphericity') is not None else np.nan
+                lines.append(f"    W = {w_val:.4f}, p = {p_val:.4f}")
+                if results.get('sphericity_met'):
+                    lines.append(f"    Sphericity assumption MET (p ≥ 0.05)")
+                else:
+                    lines.append(f"    Sphericity assumption VIOLATED (p < 0.05)")
+                    eps_gg = results.get('epsilon_gg') if results.get('epsilon_gg') is not None else np.nan
+                    p_gg = results.get('p_gg_corrected') if results.get('p_gg_corrected') is not None else np.nan
+                    lines.append(f"    Greenhouse-Geisser epsilon: {eps_gg:.4f}")
+                    lines.append(f"    GG-corrected p-value: {p_gg:.6f}")
+                    if results.get('p_gg_corrected') is not None and results.get('p_gg_corrected') < 0.05:
+                        lines.append(f"    Result remains SIGNIFICANT after GG correction")
+                    elif results.get('p_gg_corrected') is not None:
+                        lines.append(f"    Result becomes NOT SIGNIFICANT after GG correction")
             lines.append("")
             
             # Interaction (Sex × CA%)
@@ -1091,6 +1194,26 @@ def display_anova_results(anova_results: Dict) -> str:
                 lines.append(f"Result: SIGNIFICANT (p < 0.05) - Significant differences across CA% concentrations")
             else:
                 lines.append(f"Result: NOT SIGNIFICANT (p ≥ 0.05) - No significant differences")
+            
+            # Sphericity test information
+            if results.get('sphericity_met') is not None:
+                lines.append("")
+                lines.append("Sphericity Test (Mauchly's W):")
+                w_val = results.get('w_sphericity') if results.get('w_sphericity') is not None else np.nan
+                p_val = results.get('p_sphericity') if results.get('p_sphericity') is not None else np.nan
+                lines.append(f"  W = {w_val:.4f}, p = {p_val:.4f}")
+                if results.get('sphericity_met'):
+                    lines.append(f"  Sphericity assumption MET (p ≥ 0.05)")
+                else:
+                    lines.append(f"  Sphericity assumption VIOLATED (p < 0.05)")
+                    eps_gg = results.get('epsilon_gg') if results.get('epsilon_gg') is not None else np.nan
+                    p_gg = results.get('p_gg_corrected') if results.get('p_gg_corrected') is not None else np.nan
+                    lines.append(f"  Greenhouse-Geisser epsilon: {eps_gg:.4f}")
+                    lines.append(f"  GG-corrected p-value: {p_gg:.6f}")
+                    if results.get('p_gg_corrected') is not None and results.get('p_gg_corrected') < 0.05:
+                        lines.append(f"  Result remains SIGNIFICANT after GG correction")
+                    elif results.get('p_gg_corrected') is not None:
+                        lines.append(f"  Result becomes NOT SIGNIFICANT after GG correction")
             lines.append("")
         
         # Group descriptive statistics
@@ -1171,6 +1294,13 @@ def display_anova_results(anova_results: Dict) -> str:
     
     if significant_ca:
         lines.append("\nConsider Tukey HSD post-hoc tests for pairwise CA% comparisons.")
+    
+    # Note about sphericity violations
+    sphericity_violated = [results['measure_name'] for results in anova_results.values()
+                           if results.get('sphericity_met') is False]
+    if sphericity_violated:
+        lines.append(f"\nNote: Sphericity assumption violated for: {', '.join(sphericity_violated)}")
+        lines.append("Greenhouse-Geisser corrected p-values are provided above.")
     
     lines.append("\n" + "=" * 80)
     lines.append("")
@@ -1475,6 +1605,33 @@ def display_weekly_averages(weekly_averages: Dict) -> str:
         lines.append(row)
     
     lines.append("")
+    lines.append("TIME TO 50% OF TOTAL LICKS (MINUTES):")
+    header_50pct = f"{'Date':<12} {'CA%':<8} {'Avg Time':<12} {'Std':<12} {'SEM':<12} {'Min':<12} {'Max':<12}"
+    lines.append(header_50pct)
+    lines.append("-" * 80)
+    
+    for date in sorted_dates:
+        avg_data = weekly_averages[date]
+        time_data = avg_data.get('time_to_50pct_licks_per_animal', np.array([]))
+        valid_times = time_data[~np.isnan(time_data)] if len(time_data) > 0 else np.array([])
+        
+        avg_time = avg_data.get('avg_time_to_50pct_licks', np.nan)
+        std_time = avg_data.get('std_time_to_50pct_licks', np.nan)
+        sem_time = avg_data.get('sem_time_to_50pct_licks', np.nan)
+        min_time = np.min(valid_times) if len(valid_times) > 0 else np.nan
+        max_time = np.max(valid_times) if len(valid_times) > 0 else np.nan
+        ca_pct = avg_data['ca_percent']
+        
+        row = (f"{date:<12} "
+               f"{ca_pct:<8.1f} "
+               f"{avg_time:<12.2f} "
+               f"{std_time:<12.2f} "
+               f"{sem_time:<12.2f} "
+               f"{min_time:<12.2f} "
+               f"{max_time:<12.2f}")
+        lines.append(row)
+    
+    lines.append("")
     lines.append("WEIGHT AND FECAL AVERAGES:")
     header2 = f"{'Date':<12} {'Avg Fecal':<12} {'Std Fecal':<12} {'Avg Bottle':<12} {'Std Bottle':<12} {'Avg Total':<12} {'Std Total':<12}"
     lines.append(header2)
@@ -1502,6 +1659,8 @@ def display_weekly_averages(weekly_averages: Dict) -> str:
         all_avg_total = [avg['avg_total_weight_loss'] for avg in weekly_averages.values()]
         all_avg_first_5min_lick = [avg['avg_first_5min_lick_pct'] for avg in weekly_averages.values()]
         all_avg_first_5min_bout = [avg['avg_first_5min_bout_pct'] for avg in weekly_averages.values()]
+        all_avg_time_to_50pct = [avg.get('avg_time_to_50pct_licks', np.nan) for avg in weekly_averages.values()]
+        all_avg_time_to_50pct_valid = [t for t in all_avg_time_to_50pct if not np.isnan(t)]
         
         lines.append("")
         lines.append("CROSS-WEEK STATISTICS:")
@@ -1517,6 +1676,10 @@ def display_weekly_averages(weekly_averages: Dict) -> str:
         lines.append(f"First 5-min Bout % - Mean: {np.mean(all_avg_first_5min_bout):.1f}%, "
                     f"Std: {np.std(all_avg_first_5min_bout):.1f}%, "
                     f"Range: {np.min(all_avg_first_5min_bout):.1f}% - {np.max(all_avg_first_5min_bout):.1f}%")
+        if len(all_avg_time_to_50pct_valid) > 0:
+            lines.append(f"Time to 50% Licks - Mean: {np.mean(all_avg_time_to_50pct_valid):.2f} min, "
+                        f"Std: {np.std(all_avg_time_to_50pct_valid):.2f} min, "
+                        f"Range: {np.min(all_avg_time_to_50pct_valid):.2f} - {np.max(all_avg_time_to_50pct_valid):.2f} min")
         lines.append(f"Fecal - Mean: {np.mean(all_avg_fecal):.1f}, "
                     f"Std: {np.std(all_avg_fecal):.1f}, "
                     f"Range: {np.min(all_avg_fecal):.1f} - {np.max(all_avg_fecal):.1f}")
@@ -1773,6 +1936,527 @@ def save_brief_lick_summary(weekly_averages: Dict, save_path: Path) -> Path:
             f.write("\n")
         
         f.write("=" * 60 + "\n")
+    
+    return save_path
+
+
+def perform_frontloading_anova(weekly_averages: Dict) -> Dict:
+    """
+    Perform ONE-WAY REPEATED MEASURES ANOVA for front-loading measures:
+    - % of licks in first 5 minutes
+    - Time to 50% of total licks (minutes)
+    
+    Within-subjects factor: CA% (repeated measures across concentrations)
+    
+    Uses pingouin.rm_anova() for repeated measures analysis.
+    
+    Parameters:
+        weekly_averages: Dictionary from compute_weekly_averages
+        
+    Returns:
+        Dictionary containing repeated measures ANOVA results for front-loading measures
+    """
+    # Check if pingouin is available
+    if not HAS_PINGOUIN:
+        print("\n" + "="*80)
+        print("WARNING: Repeated measures ANOVA requires pingouin library")
+        print("Front-loading ANOVA cannot be performed without pingouin")
+        print("Install pingouin with: pip install pingouin")
+        print("="*80 + "\n")
+        return {}
+    
+    # Build long-format dataframe for repeated measures ANOVA
+    long_data = []
+    
+    # Sort by CA% concentration
+    sorted_dates = sorted(weekly_averages.keys(), key=lambda d: weekly_averages[d]['ca_percent'])
+    
+    print("\n" + "="*80)
+    print("FRONT-LOADING ANOVA: Building Data")
+    print("="*80)
+    
+    for date in sorted_dates:
+        data = weekly_averages[date]
+        ca_percent = data['ca_percent']
+        animal_ids = data.get('animal_ids', [])
+        
+        # If no animal IDs, create generic ones
+        if not animal_ids:
+            animal_ids = [f"Animal_{i+1}" for i in range(len(data.get('first_5min_lick_pcts_per_animal', [])))]
+        
+        first_5min_pcts = data.get('first_5min_lick_pcts_per_animal', [])
+        time_to_50pct = data.get('time_to_50pct_licks_per_animal', [])
+        
+        for i, animal_id in enumerate(animal_ids):
+            # Get front-loading metrics
+            first_5min_val = first_5min_pcts[i] if i < len(first_5min_pcts) else np.nan
+            time_50pct_val = time_to_50pct[i] if i < len(time_to_50pct) else np.nan
+            
+            long_data.append({
+                'Animal': animal_id,
+                'CA_Percent': ca_percent,
+                'Date': date,
+                'first_5min_lick_pct': first_5min_val,
+                'time_to_50pct': time_50pct_val
+            })
+    
+    print(f"Total data points: {len(long_data)}")
+    print(f"Unique animals: {len(set(row['Animal'] for row in long_data))}")
+    print("="*80 + "\n")
+    
+    df_long = pd.DataFrame(long_data)
+    
+    # Perform repeated measures ANOVA for each front-loading measure
+    anova_results = {}
+    measures = ['first_5min_lick_pct', 'time_to_50pct']
+    measure_names = {
+        'first_5min_lick_pct': '% Licks in First 5 Minutes',
+        'time_to_50pct': 'Time to 50% of Total Licks (min)'
+    }
+    
+    print("\n" + "="*80)
+    print("PERFORMING ONE-WAY REPEATED MEASURES ANOVA: CA% Effect for Front-Loading Measures")
+    print("="*80)
+    
+    for measure in measures:
+        measure_name = measure_names[measure]
+        print(f"\nAnalyzing: {measure_name}")
+        print("-" * 40)
+        
+        # Remove NaN values for this measure
+        df_measure = df_long[['Animal', 'CA_Percent', measure]].dropna()
+        
+        if len(df_measure) == 0:
+            print(f"  ERROR: No valid data for {measure_name}")
+            anova_results[measure] = {
+                'measure_name': measure_name,
+                'error': 'No valid data available'
+            }
+            continue
+        
+        print(f"  Valid data points: {len(df_measure)}")
+        print(f"  Animals: {df_measure['Animal'].nunique()}")
+        print(f"  CA% levels: {sorted(df_measure['CA_Percent'].unique())}")
+        
+        try:
+            # Repeated measures ANOVA: CA% only
+            aov = pg.rm_anova(
+                data=df_measure,
+                dv=measure,
+                within='CA_Percent',
+                subject='Animal',
+                detailed=True
+            )
+            
+            print("\n  Repeated Measures ANOVA Results:")
+            print(aov)
+            
+            ca_effect = aov[aov['Source'] == 'CA_Percent'].iloc[0]
+            
+            # Extract degrees of freedom
+            df1 = ca_effect['ddof1'] if 'ddof1' in ca_effect.index else (ca_effect['DF1'] if 'DF1' in ca_effect.index else None)
+            df2 = ca_effect['ddof2'] if 'ddof2' in ca_effect.index else (ca_effect['DF2'] if 'DF2' in ca_effect.index else None)
+            
+            # Extract sphericity information
+            sphericity_met = ca_effect['sphericity'] if 'sphericity' in ca_effect.index else None
+            w_sphericity = ca_effect['W-spher'] if 'W-spher' in ca_effect.index else None
+            p_sphericity = ca_effect['p-spher'] if 'p-spher' in ca_effect.index else None
+            p_gg_corrected = ca_effect['p-GG-corr'] if 'p-GG-corr' in ca_effect.index else None
+            epsilon_gg = ca_effect['eps-GG'] if 'eps-GG' in ca_effect.index else None
+            
+            anova_results[measure] = {
+                'measure_name': measure_name,
+                'is_repeated_measures': True,
+                'anova_table': aov,
+                'f_statistic': ca_effect['F'],
+                'p_value': ca_effect['p-unc'],
+                'significant': ca_effect['p-unc'] < 0.05,
+                'df1': df1,
+                'df2': df2,
+                # Sphericity test information
+                'sphericity_met': sphericity_met,
+                'w_sphericity': w_sphericity,
+                'p_sphericity': p_sphericity,
+                'p_gg_corrected': p_gg_corrected,
+                'epsilon_gg': epsilon_gg
+            }
+        
+        except Exception as e:
+            print(f"  ERROR performing ANOVA: {e}")
+            anova_results[measure] = {
+                'measure_name': measure_name,
+                'error': str(e)
+            }
+    
+    return anova_results
+
+
+def display_frontloading_anova_results(anova_results: Dict) -> str:
+    """Display front-loading ANOVA results in formatted output.
+    
+    Parameters:
+        anova_results: Dictionary from perform_frontloading_anova
+        
+    Returns:
+        Formatted string with ANOVA results
+    """
+    lines = []
+    lines.append("\n" + "=" * 80)
+    lines.append("FRONT-LOADING ANALYSIS: ONE-WAY REPEATED MEASURES ANOVA RESULTS")
+    lines.append("=" * 80)
+    lines.append("")
+    
+    if not anova_results:
+        lines.append("No ANOVA results available (pingouin library may not be installed)")
+        lines.append("=" * 80)
+        return "\n".join(lines)
+    
+    lines.append("Repeated Measures ANOVA: CA% (within-subjects)")
+    lines.append("")
+    
+    for measure, results in anova_results.items():
+        lines.append(f"MEASURE: {results['measure_name']}")
+        lines.append("-" * 80)
+        
+        if 'error' in results:
+            lines.append(f"ERROR: {results['error']}")
+            lines.append("")
+            continue
+        
+        lines.append("")
+        lines.append("CA% Effect:")
+        if results.get('df1') is not None and results.get('df2') is not None:
+            lines.append(f"  F({results['df1']:.0f}, {results['df2']:.0f}) = {results['f_statistic']:.4f}")
+        else:
+            lines.append(f"  F-statistic: {results['f_statistic']:.4f}")
+        lines.append(f"  p-value: {results['p_value']:.6f}")
+        if results['significant']:
+            lines.append(f"  *** SIGNIFICANT CA% EFFECT (p < 0.05) ***")
+        else:
+            lines.append(f"  Not significant (p >= 0.05)")
+        
+        # Sphericity test information
+        if results.get('sphericity_met') is not None:
+            lines.append("")
+            lines.append("Sphericity Test (Mauchly's W):")
+            w_val = results.get('w_sphericity') if results.get('w_sphericity') is not None else np.nan
+            p_val = results.get('p_sphericity') if results.get('p_sphericity') is not None else np.nan
+            lines.append(f"  W = {w_val:.4f}, p = {p_val:.4f}")
+            if results.get('sphericity_met'):
+                lines.append(f"  Sphericity assumption MET (p >= 0.05)")
+            else:
+                lines.append(f"  Sphericity assumption VIOLATED (p < 0.05)")
+                eps_gg = results.get('epsilon_gg') if results.get('epsilon_gg') is not None else np.nan
+                p_gg = results.get('p_gg_corrected') if results.get('p_gg_corrected') is not None else np.nan
+                lines.append(f"  Greenhouse-Geisser epsilon: {eps_gg:.4f}")
+                lines.append(f"  GG-corrected p-value: {p_gg:.6f}")
+                if results.get('p_gg_corrected') is not None and results.get('p_gg_corrected') < 0.05:
+                    lines.append(f"  Result remains SIGNIFICANT after GG correction")
+                elif results.get('p_gg_corrected') is not None:
+                    lines.append(f"  Result becomes NOT SIGNIFICANT after GG correction")
+        
+        lines.append("")
+    
+    # Summary
+    lines.append("=" * 80)
+    lines.append("SUMMARY:")
+    significant_ca = [r['measure_name'] for r in anova_results.values() if r.get('significant', False)]
+    lines.append(f"Significant CA% effects: {', '.join(significant_ca) if significant_ca else 'None'}")
+    
+    # Note about sphericity violations
+    sphericity_violated = [r['measure_name'] for r in anova_results.values()
+                           if r.get('sphericity_met') is False]
+    if sphericity_violated:
+        lines.append(f"\nNote: Sphericity assumption violated for: {', '.join(sphericity_violated)}")
+        lines.append("Greenhouse-Geisser corrected p-values are provided above.")
+    
+    lines.append("=" * 80)
+    lines.append("")
+    
+    formatted_output = "\n".join(lines)
+    print(formatted_output)
+    
+    return formatted_output
+
+
+def perform_frontloading_tukey_hsd(anova_results: Dict, weekly_averages: Dict) -> Dict:
+    """
+    Perform Tukey's HSD post-hoc test for significant front-loading measures.
+    
+    For repeated measures ANOVA with significant CA% effects, performs pairwise
+    comparisons across CA% levels for:
+    - % of licks in first 5 minutes
+    - Time to 50% of total licks (minutes)
+    
+    Note: For repeated measures data, this is an approximation. Proper RM post-hoc
+    tests would account for the correlated nature of repeated observations.
+    
+    Parameters:
+        anova_results: Dictionary from perform_frontloading_anova
+        weekly_averages: Dictionary from compute_weekly_averages
+        
+    Returns:
+        Dictionary containing Tukey HSD results for significant measures
+    """
+    tukey_results = {}
+    
+    for measure, anova_data in anova_results.items():
+        # Check if CA% effect is significant
+        if not anova_data.get('significant', False):
+            continue
+        
+        # Skip if there's an error
+        if 'error' in anova_data:
+            continue
+        
+        try:
+            # Reconstruct long-format data from weekly_averages
+            all_data = []
+            group_labels = []
+            
+            # Map measure name to data key in weekly_averages
+            measure_to_key = {
+                'first_5min_lick_pct': 'first_5min_lick_pcts_per_animal',
+                'time_to_50pct': 'time_to_50pct_licks_per_animal'
+            }
+            
+            data_key = measure_to_key.get(measure)
+            if not data_key:
+                continue
+            
+            # Reconstruct data for each CA%
+            sorted_dates = sorted(weekly_averages.keys(), key=lambda d: weekly_averages[d]['ca_percent'])
+            
+            for date in sorted_dates:
+                ca_percent = weekly_averages[date]['ca_percent']
+                ca_data = weekly_averages[date].get(data_key, [])
+                
+                # For time_to_50pct, exclude NaN values
+                if measure == 'time_to_50pct':
+                    ca_data = [x for x in ca_data if not np.isnan(x)]
+                
+                # Add to combined data
+                all_data.extend(ca_data)
+                group_labels.extend([f"{ca_percent}%"] * len(ca_data))
+            
+            if len(all_data) == 0 or len(set(group_labels)) < 2:
+                continue
+            
+            # Perform Tukey HSD
+            tukey_result = pairwise_tukeyhsd(endog=all_data, groups=group_labels, alpha=0.05)
+            
+            # Parse results into a more accessible format
+            comparisons = []
+            
+            # Extract pairwise comparison results
+            summary_data = tukey_result.summary().data[1:]  # Skip header row
+            
+            for row in summary_data:
+                group1, group2, meandiff, p_adj, lower_ci, upper_ci, reject = row
+                
+                comparisons.append({
+                    'group1': str(group1),
+                    'group2': str(group2), 
+                    'meandiff': float(meandiff),
+                    'p_adj': float(p_adj),
+                    'lower_ci': float(lower_ci),
+                    'upper_ci': float(upper_ci),
+                    'significant': bool(reject)
+                })
+            
+            tukey_results[measure] = {
+                'measure_name': anova_data['measure_name'],
+                'comparisons': comparisons,
+                'tukey_object': tukey_result
+            }
+            
+            print(f"\nTukey HSD completed for: {anova_data['measure_name']}")
+            print(f"  Total comparisons: {len(comparisons)}")
+            print(f"  Significant pairs: {sum(1 for c in comparisons if c['significant'])}")
+            
+        except Exception as e:
+            tukey_results[measure] = {
+                'measure_name': anova_data['measure_name'],
+                'error': f"Error performing Tukey HSD: {str(e)}"
+            }
+    
+    return tukey_results
+
+
+def display_frontloading_tukey_results(tukey_results: Dict) -> str:
+    """
+    Display Tukey HSD results for front-loading measures in formatted output.
+    
+    Parameters:
+        tukey_results: Dictionary from perform_frontloading_tukey_hsd
+        
+    Returns:
+        Formatted string with Tukey HSD results
+    """
+    if not tukey_results:
+        return "\nNo Tukey HSD results to display (no significant CA% effects)\n"
+    
+    lines = []
+    lines.append("\n" + "=" * 80)
+    lines.append("TUKEY HSD POST-HOC TEST RESULTS - FRONT-LOADING MEASURES")
+    lines.append("=" * 80)
+    lines.append("")
+    lines.append("Tukey HSD performed for measures with significant CA% effects.")
+    lines.append("Pairwise comparisons across CA% levels.")
+    lines.append("Alpha = 0.05 (family-wise error rate controlled)")
+    lines.append("")
+    
+    for measure, results in tukey_results.items():
+        lines.append(f"MEASURE: {results['measure_name'].upper()}")
+        lines.append("-" * 80)
+        
+        if 'error' in results:
+            lines.append(f"ERROR: {results['error']}")
+            lines.append("")
+            continue
+        
+        if 'comparisons' not in results or not results['comparisons']:
+            lines.append("No pairwise comparisons available")
+            lines.append("")
+            continue
+        
+        # Display comparison table
+        lines.append(f"{'Comparison':<16} {'Mean Diff':<12} {'Adj p-value':<13} {'95% CI Lower':<14} {'95% CI Upper':<14} {'Significant':<12}")
+        lines.append("-" * 80)
+        
+        for comp in results['comparisons']:
+            group1 = comp['group1']
+            group2 = comp['group2']
+            comparison = f"{group1} vs {group2}"
+            meandiff = comp['meandiff']
+            p_adj = comp['p_adj']
+            lower_ci = comp['lower_ci']
+            upper_ci = comp['upper_ci']
+            sig = "Yes" if comp['significant'] else "No"
+            
+            lines.append(f"{comparison:<16} {meandiff:<12.3f} {p_adj:<13.6f} {lower_ci:<14.3f} {upper_ci:<14.3f} {sig:<12}")
+        
+        lines.append("")
+        
+        # Summarize significant pairs
+        sig_comps = [c for c in results['comparisons'] if c['significant']]
+        if sig_comps:
+            lines.append("Significant pairwise differences:")
+            for comp in sig_comps:
+                direction = "higher" if comp['meandiff'] > 0 else "lower"
+                lines.append(f"  • {comp['group1']} vs {comp['group2']}: {comp['group1']} is {direction} (p = {comp['p_adj']:.4f})")
+        else:
+            lines.append("No significant pairwise differences found.")
+        
+        lines.append("")
+        lines.append("")
+    
+    # Overall summary
+    total_measures = len(tukey_results)
+    measures_with_sig_pairs = len([r for r in tukey_results.values() 
+                                   if 'comparisons' in r and 
+                                   any(comp['significant'] for comp in r['comparisons'])])
+    
+    lines.append("SUMMARY OF TUKEY HSD RESULTS:")
+    lines.append("-" * 40)
+    lines.append(f"Measures tested: {total_measures}")
+    lines.append(f"Measures with significant pairwise differences: {measures_with_sig_pairs}")
+    
+    if measures_with_sig_pairs > 0:
+        lines.append("\nSignificant pairwise differences were found, indicating specific")
+        lines.append("CA% concentrations that differ significantly from each other.")
+    else:
+        lines.append("\nNo significant pairwise differences found despite significant omnibus test.")
+    
+    lines.append("\n" + "=" * 80)
+    lines.append("")
+    
+    # Join lines and print
+    formatted_output = "\n".join(lines)
+    print(formatted_output)
+    
+    return formatted_output
+
+
+def save_frontloading_analysis_to_file(weekly_averages: Dict, anova_output: str, save_path: Path, tukey_output: str = "") -> Path:
+    """Save front-loading analysis report to a text file.
+    
+    Parameters:
+        weekly_averages: Dictionary from compute_weekly_averages
+        anova_output: Formatted ANOVA output string
+        save_path: Path where to save the text file
+        
+    Returns:
+        Path to the saved text file
+    """
+    with open(save_path, 'w', encoding='utf-8') as f:
+        f.write("=" * 80 + "\n")
+        f.write("FRONT-LOADING BEHAVIOR ANALYSIS REPORT\n")
+        f.write("=" * 80 + "\n")
+        f.write(f"Generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("\n")
+        f.write("This report analyzes front-loading behavior using two metrics:\n")
+        f.write("1. % of Licks in First 5 Minutes\n")
+        f.write("2. Time to Reach 50% of Total Licks (minutes)\n")
+        f.write("\n")
+        f.write("=" * 80 + "\n")
+        f.write("\n")
+        
+        # Sort dates chronologically
+        sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+        
+        # Descriptive statistics table
+        f.write("DESCRIPTIVE STATISTICS BY WEEK\n")
+        f.write("=" * 80 + "\n\n")
+        
+        f.write("% OF LICKS IN FIRST 5 MINUTES:\n")
+        f.write(f"{'Week':<8} {'Date':<12} {'CA%':<8} {'Mean':<12} {'Std':<12} {'SEM':<12} {'Min':<12} {'Max':<12}\n")
+        f.write("-" * 80 + "\n")
+        
+        for i, date in enumerate(sorted_dates, 1):
+            data = weekly_averages[date]
+            pcts = data.get('first_5min_lick_pcts_per_animal', np.array([]))
+            mean_pct = data.get('avg_first_5min_lick_pct', np.nan)
+            std_pct = data.get('std_first_5min_lick_pct', np.nan)
+            sem_pct = data.get('sem_first_5min_lick_pct', np.nan)
+            min_pct = np.min(pcts) if len(pcts) > 0 else np.nan
+            max_pct = np.max(pcts) if len(pcts) > 0 else np.nan
+            ca_pct = data['ca_percent']
+            
+            f.write(f"{i:<8} {date:<12} {ca_pct:<8.1f} {mean_pct:<12.2f} {std_pct:<12.2f} {sem_pct:<12.2f} {min_pct:<12.2f} {max_pct:<12.2f}\n")
+        
+        f.write("\n\n")
+        f.write("TIME TO 50% OF TOTAL LICKS (MINUTES):\n")
+        f.write(f"{'Week':<8} {'Date':<12} {'CA%':<8} {'Mean':<12} {'Std':<12} {'SEM':<12} {'Min':<12} {'Max':<12}\n")
+        f.write("-" * 80 + "\n")
+        
+        for i, date in enumerate(sorted_dates, 1):
+            data = weekly_averages[date]
+            times = data.get('time_to_50pct_licks_per_animal', np.array([]))
+            valid_times = times[~np.isnan(times)] if len(times) > 0 else np.array([])
+            mean_time = data.get('avg_time_to_50pct_licks', np.nan)
+            std_time = data.get('std_time_to_50pct_licks', np.nan)
+            sem_time = data.get('sem_time_to_50pct_licks', np.nan)
+            min_time = np.min(valid_times) if len(valid_times) > 0 else np.nan
+            max_time = np.max(valid_times) if len(valid_times) > 0 else np.nan
+            ca_pct = data['ca_percent']
+            
+            f.write(f"{i:<8} {date:<12} {ca_pct:<8.1f} {mean_time:<12.2f} {std_time:<12.2f} {sem_time:<12.2f} {min_time:<12.2f} {max_time:<12.2f}\n")
+        
+        f.write("\n\n")
+        
+        # Write ANOVA results
+        f.write(anova_output)
+        
+        # Write Tukey HSD results if provided
+        if tukey_output:
+            f.write("\n")
+            f.write(tukey_output)
+        
+        f.write("\n")
+        f.write("=" * 80 + "\n")
+        f.write("END OF FRONT-LOADING ANALYSIS REPORT\n")
+        f.write("=" * 80 + "\n")
     
     return save_path
 
@@ -2783,6 +3467,7 @@ def process_single_week(
     animal_ids = []  # Track animal IDs in same order as measurements
     first_5min_lick_pcts = []  # NEW: Percentage of licks in first 5 minutes
     first_5min_bout_pcts = []  # NEW: Percentage of bouts in first 5 minutes
+    time_to_50pct_licks = []  # NEW: Time (in minutes) to reach 50% of total licks
     
     for sensor in selected_sensors:
         # Lick counts
@@ -2796,10 +3481,16 @@ def process_single_week(
             first_5min_licks = ((events_df[event_col]) & (events_df['Time_sec'] < 300)).sum()
             first_5min_lick_pct = (first_5min_licks / sensor_licks * 100) if sensor_licks > 0 else 0
             first_5min_lick_pcts.append(first_5min_lick_pct)
-            print(f"  {sensor}: Total licks = {sensor_licks}, First 5min licks = {first_5min_licks}, First 5min % = {first_5min_lick_pct:.1f}%")
+            
+            # Calculate time to 50% of total licks
+            time_to_50pct = calculate_time_to_50_percent_licks(events_df, sensor)
+            time_to_50pct_licks.append(time_to_50pct)
+            
+            print(f"  {sensor}: Total licks = {sensor_licks}, First 5min licks = {first_5min_licks}, First 5min % = {first_5min_lick_pct:.1f}%, Time to 50% = {time_to_50pct:.2f} min")
         else:
             lick_counts.append(0)
             first_5min_lick_pcts.append(0)
+            time_to_50pct_licks.append(np.nan)
         
         # Bout counts
         if sensor in bout_dict:
@@ -2859,6 +3550,7 @@ def process_single_week(
         'animal_sexes': animal_sexes,  # NEW: Track sex for mixed ANOVA
         'first_5min_lick_pcts': np.array(first_5min_lick_pcts),  # NEW: First 5 min lick percentages
         'first_5min_bout_pcts': np.array(first_5min_bout_pcts),  # NEW: First 5 min bout percentages
+        'time_to_50pct_licks': np.array(time_to_50pct_licks),  # NEW: Time to reach 50% of total licks (minutes)
         'correlations': {
             'lick_weight': lick_weight_corr,
             'bout_weight': bout_weight_corr,
@@ -2972,6 +3664,20 @@ def main():
     
     interaction_figures = plot_interaction_effects(anova_results, weekly_averages, show=True)
     
+    # Perform Front-Loading ANOVA Analysis (% first 5min, time to 50%)
+    print("\nStep 6c: Performing Front-Loading ANOVA Analysis")
+    print("-" * 40)
+    
+    frontloading_anova_results = perform_frontloading_anova(weekly_averages)
+    frontloading_anova_output = display_frontloading_anova_results(frontloading_anova_results)
+    
+    # Perform Tukey HSD for Front-Loading measures with significant results
+    print("\nStep 6d: Performing Tukey HSD Post-Hoc Tests for Front-Loading Measures")
+    print("-" * 40)
+    
+    frontloading_tukey_results = perform_frontloading_tukey_hsd(frontloading_anova_results, weekly_averages)
+    frontloading_tukey_output = display_frontloading_tukey_results(frontloading_tukey_results)
+    
     # Compute and plot lick rate histograms (5-minute bins over 30 minutes)
     print("\nStep 7: Computing Lick Rate Averages (5-Minute Bins)")
     print("-" * 40)
@@ -3023,6 +3729,11 @@ def main():
     brief_path = master_csv.parent / "weekly_lick_summary_brief.txt"
     save_brief_lick_summary(weekly_averages, brief_path)
     print(f"Brief lick summary saved to: {brief_path}")
+    
+    # Always save front-loading analysis report
+    frontloading_path = master_csv.parent / "frontloading_analysis_report.txt"
+    save_frontloading_analysis_to_file(weekly_averages, frontloading_anova_output, frontloading_path, frontloading_tukey_output)
+    print(f"Front-loading analysis report saved to: {frontloading_path}")
     
     # Optional: Save plots
     save_plot = input("\nSave weekly averages plots as SVG? (y/n): ").strip().lower()
