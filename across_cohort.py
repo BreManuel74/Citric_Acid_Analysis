@@ -29,6 +29,7 @@ from typing import Optional, Dict, List, Tuple
 import pandas as pd
 import numpy as np
 import re
+import math
 from datetime import datetime
 
 # Try to import pingouin for mixed ANOVA
@@ -54,6 +55,19 @@ try:
     import matplotlib.pyplot as plt
     import matplotlib.ticker as mticker
     HAS_MATPLOTLIB = True
+    # Global Matplotlib defaults (match non_ramp_analysis style)
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = ["Arial"]
+    plt.rcParams["svg.fonttype"] = "none"
+    plt.rcParams.update({
+        "font.size": 11,
+        "axes.titlesize": 13,
+        "axes.labelsize": 12,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        "legend.fontsize": 10,
+        "figure.titlesize": 14,
+    })
 except ImportError:
     HAS_MATPLOTLIB = False
     print("Warning: matplotlib not installed. Plotting will not be available.")
@@ -488,9 +502,10 @@ def add_day_column_across_cohorts(combined_df: pd.DataFrame) -> pd.DataFrame:
     # Sort by ID and Date
     df = df.sort_values(['ID', 'Date']).reset_index(drop=True)
     
-    # Compute day number per ID (Day 0 = first date for that animal)
+    # Compute day number per ID (Day 0 = first measurement day, subtracting 1
+    # so that the first actual data day is Day 0 rather than Day 1)
     first_dates = df.groupby('ID')['Date'].transform('min')
-    df['Day'] = (df['Date'] - first_dates).dt.days
+    df['Day'] = (df['Date'] - first_dates).dt.days - 1
     
     print(f"[OK] Added 'Day' column (range: {df['Day'].min()} to {df['Day'].max()})")
     
@@ -1435,7 +1450,8 @@ def perform_mixed_anova_sex_stratified(
         aov['Source'] = aov['Source'].replace({
             'CA_percent': 'CA (%)',
             'CA_percent * Day': 'CA (%) * Day',
-            'Day * CA_percent': 'CA (%) * Day'
+            'Day * CA_percent': 'CA (%) * Day',
+            'Interaction': 'CA (%) * Day'
         })
         
         print("\nMixed ANOVA Results:")
@@ -1655,6 +1671,12 @@ def perform_mixed_anova_ca_stratified(
         print("\nMixed ANOVA Results:")
         print(aov.to_string())
         
+        # Rename interaction term for clarity
+        aov['Source'] = aov['Source'].replace({
+            'Interaction': 'Sex * Day',
+            'Day * Sex': 'Sex * Day'
+        })
+        
         # Format results
         p_col = 'p-unc' if 'p-unc' in aov.columns else 'p_unc'
         
@@ -1848,20 +1870,91 @@ def apply_common_plot_style(
     remove_x_margins: bool = True,
     remove_y_margins: bool = True,
     ticks_in: bool = True,
-) -> None:
+    draw_zero_dotted_line: bool = True,
+) -> plt.Axes:
     """Apply common styling to plots: remove spines, set tick directions, adjust margins."""
     if remove_top_right:
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-    
+
     if ticks_in:
-        ax.tick_params(direction='in')
-    
+        ax.tick_params(direction='in', which='both', length=5)
+
     if remove_x_margins:
         ax.margins(x=0)
-    
+
     if remove_y_margins:
         ax.margins(y=0)
+        ax.autoscale(axis='y', tight=True)
+
+    if start_x_at_zero:
+        left, right = ax.get_xlim()
+        ax.set_xlim(left=0, right=right)
+
+    if draw_zero_dotted_line:
+        try:
+            ax.axhline(0, linestyle='-', color='0', linewidth=1.5, alpha=0.8, zorder=1)
+        except Exception:
+            pass
+
+    return ax
+
+
+def _auto_integer_step(
+    vmin: float,
+    vmax: float,
+    target_ticks: int = 7,
+    allow_sub5: bool = False,
+) -> int:
+    """Choose a 'nice' integer step so about target_ticks cover the range."""
+    if not (np.isfinite(vmin) and np.isfinite(vmax)):
+        return 1
+    range_int = int(abs(math.ceil(vmax) - math.floor(vmin)))
+    if range_int <= 0:
+        return 1
+    approx = max(1.0, range_int / max(1, target_ticks))
+    pow10 = 10 ** int(math.floor(math.log10(approx)))
+    multipliers = (1, 2, 2.5, 3, 4, 5) if allow_sub5 else (1, 2, 5)
+    for m in multipliers:
+        step = int(max(1, math.ceil(m * pow10)))
+        if range_int / step <= target_ticks:
+            return step
+    return int(max(1, 10 * pow10))
+
+
+def _apply_integer_axis(
+    ax: plt.Axes,
+    *,
+    axis: str,
+    data_min: float,
+    data_max: float,
+    step: int,
+    clamp_min: Optional[int] = None,
+    left_pad_steps: int = 0,
+    right_pad_steps: int = 1,
+) -> None:
+    """Apply integer ticks and limits to the chosen axis with one extra step beyond data."""
+    step = int(max(1, step))
+    base_start = int(math.floor(data_min / step) * step)
+    base_end_tick = int(math.ceil(data_max / step) * step)
+    tick_start = base_start - left_pad_steps * step
+    tick_end = base_end_tick + right_pad_steps * step
+    start = tick_start
+    if clamp_min is not None and start < clamp_min:
+        start = clamp_min
+    end = int(data_max) + right_pad_steps * step
+    if end <= start:
+        end = start + step
+    all_ticks = list(range(tick_start, tick_end + 1, step))
+    ticks = [t for t in all_ticks if start <= t <= end]
+    if axis == 'x':
+        ax.set_xlim(start, end)
+        ax.set_xticks(ticks)
+        ax.xaxis.set_major_formatter(mticker.FormatStrFormatter('%d'))
+    elif axis == 'y':
+        ax.set_ylim(start, end)
+        ax.set_yticks(ticks)
+        ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.0f'))
 
 
 # =============================================================================
@@ -1898,28 +1991,25 @@ def plot_total_change_by_id(
 
     # Plot each ID as a separate line
     for mid, s in series_by_id.items():
-        sex = sex_map.get(mid)
-        color, marker = _sex_to_style(sex)
-        
+        color, marker = _sex_to_style(sex_map.get(mid))
         ax.plot(
             s.index,
             s.values,
+            label=str(mid),
             marker=marker,
-            markersize=5,
+            markersize=3,
             linewidth=1.5,
+            alpha=0.9,
             color=color,
-            label=f"{mid} ({sex or 'Unknown'})",
-            alpha=0.7
         )
 
-    ax.set_xlabel("Day", fontsize=12)
-    ax.set_ylabel("Total Change (g)", fontsize=12)
+    ax.set_xlabel("Day")
+    ax.set_ylabel("Total Change")
     ax.grid(False)
-    ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 
     if title is None:
         title = "Total Change by Animal ID"
-    ax.set_title(title, fontsize=14, weight='bold')
+    ax.set_title(title)
 
     apply_common_plot_style(
         ax,
@@ -1930,16 +2020,30 @@ def plot_total_change_by_id(
         ticks_in=True,
     )
 
+    # Integer axis ticks
+    all_y = np.concatenate([s.values for s in series_by_id.values() if len(s) > 0])
+    y_data_min = float(np.nanmin(all_y)) if all_y.size else 0.0
+    y_data_max = float(np.nanmax(all_y)) if all_y.size else 1.0
+    all_x = np.concatenate([np.asarray(s.index, dtype=float) for s in series_by_id.values() if len(s) > 0])
+    x_data_min = int(np.nanmin(all_x)) if all_x.size else 0
+    x_data_max = int(np.nanmax(all_x)) if all_x.size else 1
+    x_step = _auto_integer_step(x_data_min, x_data_max, target_ticks=10, allow_sub5=True)
+    _apply_integer_axis(ax, axis='x', data_min=x_data_min, data_max=x_data_max,
+                        step=x_step, clamp_min=0, left_pad_steps=0, right_pad_steps=0)
+    y_step = _auto_integer_step(y_data_min, y_data_max, target_ticks=7)
+    _apply_integer_axis(ax, axis='y', data_min=y_data_min, data_max=y_data_max,
+                        step=y_step, left_pad_steps=0, right_pad_steps=1)
+
     # Legend placement
     if len(series_by_id) > 6:
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=9)
+        ax.legend(title="ID", bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0.)
+        fig.tight_layout(rect=[0, 0, 0.85, 1])
     else:
-        ax.legend(loc='best', fontsize=10)
-
-    plt.tight_layout()
+        ax.legend(title="ID", loc="best")
+        fig.tight_layout()
 
     if save_path is not None:
-        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
         print(f"[OK] Saved plot to: {save_path}")
 
     if show:
@@ -1980,28 +2084,25 @@ def plot_daily_change_by_id(
 
     # Plot each ID as a separate line
     for mid, s in series_by_id.items():
-        sex = sex_map.get(mid)
-        color, marker = _sex_to_style(sex)
-        
+        color, marker = _sex_to_style(sex_map.get(mid))
         ax.plot(
             s.index,
             s.values,
+            label=str(mid),
             marker=marker,
-            markersize=5,
+            markersize=3,
             linewidth=1.5,
+            alpha=0.9,
             color=color,
-            label=f"{mid} ({sex or 'Unknown'})",
-            alpha=0.7
         )
 
-    ax.set_xlabel("Day", fontsize=12)
-    ax.set_ylabel("Daily Change (g)", fontsize=12)
+    ax.set_xlabel("Day")
+    ax.set_ylabel("Daily Change")
     ax.grid(False)
-    ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 
     if title is None:
         title = "Daily Change by Animal ID"
-    ax.set_title(title, fontsize=14, weight='bold')
+    ax.set_title(title)
 
     apply_common_plot_style(
         ax,
@@ -2012,16 +2113,30 @@ def plot_daily_change_by_id(
         ticks_in=True,
     )
 
+    # Integer axis ticks
+    all_y = np.concatenate([s.values for s in series_by_id.values() if len(s) > 0])
+    y_data_min = float(np.nanmin(all_y)) if all_y.size else 0.0
+    y_data_max = float(np.nanmax(all_y)) if all_y.size else 1.0
+    all_x = np.concatenate([np.asarray(s.index, dtype=float) for s in series_by_id.values() if len(s) > 0])
+    x_data_min = int(np.nanmin(all_x)) if all_x.size else 0
+    x_data_max = int(np.nanmax(all_x)) if all_x.size else 1
+    x_step = _auto_integer_step(x_data_min, x_data_max, target_ticks=10, allow_sub5=True)
+    _apply_integer_axis(ax, axis='x', data_min=x_data_min, data_max=x_data_max,
+                        step=x_step, clamp_min=0, left_pad_steps=0, right_pad_steps=0)
+    y_step = _auto_integer_step(y_data_min, y_data_max, target_ticks=7)
+    _apply_integer_axis(ax, axis='y', data_min=y_data_min, data_max=y_data_max,
+                        step=y_step, left_pad_steps=0, right_pad_steps=1)
+
     # Legend placement
     if len(series_by_id) > 6:
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=9)
+        ax.legend(title="ID", bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0.)
+        fig.tight_layout(rect=[0, 0, 0.85, 1])
     else:
-        ax.legend(loc='best', fontsize=10)
-
-    plt.tight_layout()
+        ax.legend(title="ID", loc="best")
+        fig.tight_layout()
 
     if save_path is not None:
-        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
         print(f"[OK] Saved plot to: {save_path}")
 
     if show:
@@ -2069,44 +2184,65 @@ def plot_total_change_by_sex(
     
     # Plot male data
     if not male_mean.empty:
-        ax.errorbar(
-            male_mean.index, male_mean.values, yerr=male_sem.values,
-            marker='s', markersize=6, linewidth=2, capsize=4,
-            color='green', label='Male', alpha=0.8
-        )
-    
+        ax.plot(male_mean.index, male_mean.values, label="Male", color="green", marker="s",
+                markersize=4, linewidth=2, alpha=0.9)
+        ax.fill_between(male_mean.index,
+                        male_mean - male_sem,
+                        male_mean + male_sem,
+                        color="green", alpha=0.2)
+
     # Plot female data
     if not female_mean.empty:
-        ax.errorbar(
-            female_mean.index, female_mean.values, yerr=female_sem.values,
-            marker='o', markersize=6, linewidth=2, capsize=4,
-            color='purple', label='Female', alpha=0.8
-        )
-    
-    ax.set_xlabel("Day", fontsize=12)
-    ax.set_ylabel("Total Change (g, Mean ± SEM)", fontsize=12)
+        ax.plot(female_mean.index, female_mean.values, label="Female", color="purple", marker="o",
+                markersize=4, linewidth=2, alpha=0.9)
+        ax.fill_between(female_mean.index,
+                        female_mean - female_sem,
+                        female_mean + female_sem,
+                        color="purple", alpha=0.2)
+
+    ax.set_xlabel("Day")
+    ax.set_ylabel("Total Change (Mean ± SEM)")
     ax.grid(False)
-    ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-    
+
     if title is None:
-        title = "Total Change by Sex"
-    ax.set_title(title, fontsize=14, weight='bold')
-    
+        title = "Total Change by Sex (Mean ± SEM)"
+    ax.set_title(title)
+
     apply_common_plot_style(ax, start_x_at_zero=False, remove_top_right=True,
                             remove_x_margins=True, remove_y_margins=True, ticks_in=True)
-    
-    ax.legend(title="Sex", loc="best", fontsize=11)
+
+    # Integer axis ticks
+    all_means = pd.concat([male_mean, female_mean], ignore_index=False)
+    if not all_means.empty:
+        y_data_min = float(all_means.min())
+        y_data_max = float(all_means.max())
+    else:
+        y_data_min, y_data_max = 0.0, 1.0
+    all_indices = pd.concat([male_mean.index.to_series(), female_mean.index.to_series()])
+    if not all_indices.empty:
+        x_data_min = int(all_indices.min())
+        x_data_max = int(all_indices.max())
+    else:
+        x_data_min, x_data_max = 0, 1
+    x_step = _auto_integer_step(x_data_min, x_data_max, target_ticks=10, allow_sub5=True)
+    _apply_integer_axis(ax, axis='x', data_min=x_data_min, data_max=x_data_max,
+                        step=x_step, clamp_min=0, left_pad_steps=0, right_pad_steps=0)
+    y_step = _auto_integer_step(y_data_min, y_data_max, target_ticks=7)
+    _apply_integer_axis(ax, axis='y', data_min=y_data_min, data_max=y_data_max,
+                        step=y_step, left_pad_steps=0, right_pad_steps=1)
+
+    ax.legend(title="Sex", loc="best")
     fig.tight_layout()
-    
+
     if save_path is not None:
-        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
         print(f"[OK] Saved plot to: {save_path}")
-    
+
     if show:
         plt.show()
     else:
         plt.close(fig)
-    
+
     return fig
 
 
@@ -2147,44 +2283,65 @@ def plot_daily_change_by_sex(
     
     # Plot male data
     if not male_mean.empty:
-        ax.errorbar(
-            male_mean.index, male_mean.values, yerr=male_sem.values,
-            marker='s', markersize=6, linewidth=2, capsize=4,
-            color='green', label='Male', alpha=0.8
-        )
-    
+        ax.plot(male_mean.index, male_mean.values, label="Male", color="green", marker="s",
+                markersize=4, linewidth=2, alpha=0.9)
+        ax.fill_between(male_mean.index,
+                        male_mean - male_sem,
+                        male_mean + male_sem,
+                        color="green", alpha=0.2)
+
     # Plot female data
     if not female_mean.empty:
-        ax.errorbar(
-            female_mean.index, female_mean.values, yerr=female_sem.values,
-            marker='o', markersize=6, linewidth=2, capsize=4,
-            color='purple', label='Female', alpha=0.8
-        )
-    
-    ax.set_xlabel("Day", fontsize=12)
-    ax.set_ylabel("Daily Change (g, Mean ± SEM)", fontsize=12)
+        ax.plot(female_mean.index, female_mean.values, label="Female", color="purple", marker="o",
+                markersize=4, linewidth=2, alpha=0.9)
+        ax.fill_between(female_mean.index,
+                        female_mean - female_sem,
+                        female_mean + female_sem,
+                        color="purple", alpha=0.2)
+
+    ax.set_xlabel("Day")
+    ax.set_ylabel("Daily Change (Mean ± SEM)")
     ax.grid(False)
-    ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-    
+
     if title is None:
-        title = "Daily Change by Sex"
-    ax.set_title(title, fontsize=14, weight='bold')
-    
+        title = "Daily Change by Sex (Mean ± SEM)"
+    ax.set_title(title)
+
     apply_common_plot_style(ax, start_x_at_zero=False, remove_top_right=True,
                             remove_x_margins=True, remove_y_margins=True, ticks_in=True)
-    
-    ax.legend(title="Sex", loc="best", fontsize=11)
+
+    # Integer axis ticks
+    all_means = pd.concat([male_mean, female_mean], ignore_index=False)
+    if not all_means.empty:
+        y_data_min = float(all_means.min())
+        y_data_max = float(all_means.max())
+    else:
+        y_data_min, y_data_max = 0.0, 1.0
+    all_indices = pd.concat([male_mean.index.to_series(), female_mean.index.to_series()])
+    if not all_indices.empty:
+        x_data_min = int(all_indices.min())
+        x_data_max = int(all_indices.max())
+    else:
+        x_data_min, x_data_max = 0, 1
+    x_step = _auto_integer_step(x_data_min, x_data_max, target_ticks=10, allow_sub5=True)
+    _apply_integer_axis(ax, axis='x', data_min=x_data_min, data_max=x_data_max,
+                        step=x_step, clamp_min=0, left_pad_steps=0, right_pad_steps=0)
+    y_step = _auto_integer_step(y_data_min, y_data_max, target_ticks=7)
+    _apply_integer_axis(ax, axis='y', data_min=y_data_min, data_max=y_data_max,
+                        step=y_step, left_pad_steps=0, right_pad_steps=1)
+
+    ax.legend(title="Sex", loc="best")
     fig.tight_layout()
-    
+
     if save_path is not None:
-        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
         print(f"[OK] Saved plot to: {save_path}")
-    
+
     if show:
         plt.show()
     else:
         plt.close(fig)
-    
+
     return fig
 
 
@@ -2226,41 +2383,56 @@ def plot_total_change_by_ca(
     fig, ax = plt.subplots(figsize=(11, 6))
     
     # Plot each CA% group
+    all_group_means = []
+    all_group_indices = []
     for ca_val in sorted(ca_groups.keys()):
         color, marker = _ca_to_style(ca_val)
         mean, sem = _compute_mean_sem(ca_groups[ca_val])
-        
         if not mean.empty:
-            ax.errorbar(
-                mean.index, mean.values, yerr=sem.values,
-                marker=marker, markersize=6, linewidth=2, capsize=4,
-                color=color, label=f'{ca_val:.0f}% CA', alpha=0.8
-            )
-    
-    ax.set_xlabel("Day", fontsize=12)
-    ax.set_ylabel("Total Change (g, Mean ± SEM)", fontsize=12)
+            ax.plot(mean.index, mean.values, label=f'{ca_val:.0f}% CA',
+                    marker=marker, markersize=4, linewidth=2, alpha=0.9, color=color)
+            ax.fill_between(mean.index, mean - sem, mean + sem, color=color, alpha=0.2)
+            all_group_means.append(mean)
+            all_group_indices.append(mean.index.to_series())
+
+    ax.set_xlabel("Day")
+    ax.set_ylabel("Total Change (Mean ± SEM)")
     ax.grid(False)
-    ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-    
+
     if title is None:
         title = "Total Change by CA%"
-    ax.set_title(title, fontsize=14, weight='bold')
-    
+    ax.set_title(title)
+
     apply_common_plot_style(ax, start_x_at_zero=False, remove_top_right=True,
                             remove_x_margins=True, remove_y_margins=True, ticks_in=True)
-    
-    ax.legend(title="CA%", loc="best", fontsize=11)
+
+    # Integer axis ticks
+    if all_group_means:
+        all_means_concat = pd.concat(all_group_means, ignore_index=False)
+        y_data_min = float(all_means_concat.min())
+        y_data_max = float(all_means_concat.max())
+        all_idx_concat = pd.concat(all_group_indices)
+        x_data_min = int(all_idx_concat.min())
+        x_data_max = int(all_idx_concat.max())
+        x_step = _auto_integer_step(x_data_min, x_data_max, target_ticks=10, allow_sub5=True)
+        _apply_integer_axis(ax, axis='x', data_min=x_data_min, data_max=x_data_max,
+                            step=x_step, clamp_min=0, left_pad_steps=0, right_pad_steps=0)
+        y_step = _auto_integer_step(y_data_min, y_data_max, target_ticks=7)
+        _apply_integer_axis(ax, axis='y', data_min=y_data_min, data_max=y_data_max,
+                            step=y_step, left_pad_steps=0, right_pad_steps=1)
+
+    ax.legend(title="CA%", loc="best")
     fig.tight_layout()
-    
+
     if save_path is not None:
-        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
         print(f"[OK] Saved plot to: {save_path}")
-    
+
     if show:
         plt.show()
     else:
         plt.close(fig)
-    
+
     return fig
 
 
@@ -2302,34 +2474,49 @@ def plot_daily_change_by_ca(
     fig, ax = plt.subplots(figsize=(11, 6))
     
     # Plot each CA% group
+    all_group_means = []
+    all_group_indices = []
     for ca_val in sorted(ca_groups.keys()):
         color, marker = _ca_to_style(ca_val)
         mean, sem = _compute_mean_sem(ca_groups[ca_val])
-        
         if not mean.empty:
-            ax.errorbar(
-                mean.index, mean.values, yerr=sem.values,
-                marker=marker, markersize=6, linewidth=2, capsize=4,
-                color=color, label=f'{ca_val:.0f}% CA', alpha=0.8
-            )
-    
-    ax.set_xlabel("Day", fontsize=12)
-    ax.set_ylabel("Daily Change (g, Mean ± SEM)", fontsize=12)
+            ax.plot(mean.index, mean.values, label=f'{ca_val:.0f}% CA',
+                    marker=marker, markersize=4, linewidth=2, alpha=0.9, color=color)
+            ax.fill_between(mean.index, mean - sem, mean + sem, color=color, alpha=0.2)
+            all_group_means.append(mean)
+            all_group_indices.append(mean.index.to_series())
+
+    ax.set_xlabel("Day")
+    ax.set_ylabel("Daily Change (Mean ± SEM)")
     ax.grid(False)
-    ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-    
+
     if title is None:
         title = "Daily Change by CA%"
-    ax.set_title(title, fontsize=14, weight='bold')
-    
+    ax.set_title(title)
+
     apply_common_plot_style(ax, start_x_at_zero=False, remove_top_right=True,
                             remove_x_margins=True, remove_y_margins=True, ticks_in=True)
-    
-    ax.legend(title="CA%", loc="best", fontsize=11)
+
+    # Integer axis ticks
+    if all_group_means:
+        all_means_concat = pd.concat(all_group_means, ignore_index=False)
+        y_data_min = float(all_means_concat.min())
+        y_data_max = float(all_means_concat.max())
+        all_idx_concat = pd.concat(all_group_indices)
+        x_data_min = int(all_idx_concat.min())
+        x_data_max = int(all_idx_concat.max())
+        x_step = _auto_integer_step(x_data_min, x_data_max, target_ticks=10, allow_sub5=True)
+        _apply_integer_axis(ax, axis='x', data_min=x_data_min, data_max=x_data_max,
+                            step=x_step, clamp_min=0, left_pad_steps=0, right_pad_steps=0)
+        y_step = _auto_integer_step(y_data_min, y_data_max, target_ticks=7)
+        _apply_integer_axis(ax, axis='y', data_min=y_data_min, data_max=y_data_max,
+                            step=y_step, left_pad_steps=0, right_pad_steps=1)
+
+    ax.legend(title="CA%", loc="best")
     fig.tight_layout()
-    
+
     if save_path is not None:
-        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
         print(f"[OK] Saved plot to: {save_path}")
     
     if show:
@@ -2338,6 +2525,606 @@ def plot_daily_change_by_ca(
         plt.close(fig)
     
     return fig
+
+
+# =============================================================================
+# INTERACTION PLOTTING FUNCTIONS
+# =============================================================================
+
+def plot_interaction_ca_sex(
+    anova_results: Dict,
+    title: Optional[str] = None,
+    save_path: Optional[Path] = None,
+    show: bool = True
+) -> Optional[plt.Figure]:
+    """
+    Plot CA% × Sex interaction from between-subjects ANOVA.
+    
+    Shows mean values for each CA% × Sex combination with error bars (SEM).
+    Only creates plot if the interaction is significant (p < 0.05).
+    
+    Parameters:
+        anova_results: Results dict from perform_between_subjects_anova()
+        title: Optional custom title
+        save_path: Optional path to save figure
+        show: Whether to display the plot
+        
+    Returns:
+        matplotlib Figure object, or None if interaction not significant
+    """
+    if not HAS_MATPLOTLIB:
+        print("[ERROR] matplotlib is required for plotting")
+        return None
+    
+    # Check if CA% × Sex interaction is significant
+    anova_table = anova_results.get('anova_table')
+    if anova_table is None:
+        print("[WARNING] No ANOVA table found in results")
+        return None
+    
+    p_col = 'p-unc' if 'p-unc' in anova_table.columns else 'p_unc'
+    interaction_row = anova_table[anova_table['Source'] == 'CA (%) * Sex']
+    
+    if len(interaction_row) == 0:
+        print(f"[WARNING] CA% × Sex interaction not found in ANOVA table. Available sources: {list(anova_table['Source'])}")
+        return None
+    
+    p_value = interaction_row.iloc[0][p_col]
+    
+    if p_value >= 0.05:
+        print(f"[INFO] CA% × Sex interaction not significant (p = {p_value:.4f}). Skipping plot.")
+        return None
+    
+    print(f"\n[INFO] Plotting CA% × Sex interaction (p = {p_value:.4f})")
+    
+    # Get descriptive statistics
+    group_stats = anova_results.get('descriptive_stats')
+    if group_stats is None or len(group_stats) == 0:
+        print("[WARNING] No descriptive statistics found")
+        return None
+    
+    measure = anova_results.get('measure', 'Measure')
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(9, 6))
+    
+    # Get unique CA% levels and Sex levels
+    ca_levels = sorted(group_stats['CA (%)'].unique())
+    sex_levels = sorted(group_stats['Sex'].unique())
+    
+    # Plot separate line for each sex
+    for sex in sex_levels:
+        sex_data = group_stats[group_stats['Sex'] == sex].sort_values('CA (%)')
+        
+        color = 'green' if sex == 'M' else 'purple'
+        marker = 'o' if sex == 'M' else 's'
+        label = 'Males' if sex == 'M' else 'Females'
+        
+        ax.errorbar(
+            sex_data['CA (%)'], 
+            sex_data['mean'],
+            yerr=sex_data['sem'],
+            marker=marker, markersize=8, linewidth=2.5, capsize=5,
+            color=color, label=label, alpha=0.85, markeredgewidth=1.5,
+            markeredgecolor='black'
+        )
+    
+    ax.set_xlabel('CA% Concentration')
+    ax.set_ylabel(f'{measure} (Mean ± SEM)')
+    
+    if title is None:
+        analysis_type = anova_results.get('analysis_type', '')
+        title = f'CA% × Sex Interaction: {measure}\n({analysis_type})'
+    
+    ax.set_title(title, pad=15)
+    
+    ax.grid(False)
+    apply_common_plot_style(ax, remove_top_right=True, ticks_in=True, remove_x_margins=False, remove_y_margins=True)
+    ax.legend(title='Sex', loc='best')
+    
+    # Add significance annotation
+    ax.text(0.02, 0.98, f'Interaction: p = {p_value:.4f}', 
+            transform=ax.transAxes, fontsize=10, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    fig.tight_layout()
+    
+    if save_path is not None:
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"[OK] Saved interaction plot to: {save_path}")
+    
+    if show:
+        plt.show()
+    
+    return fig
+
+
+def plot_interaction_time_ca(
+    anova_results: Dict,
+    title: Optional[str] = None,
+    save_path: Optional[Path] = None,
+    show: bool = True
+) -> Optional[plt.Figure]:
+    """
+    Plot Time × CA% interaction from sex-stratified mixed ANOVA.
+    
+    Shows trajectories over time for each CA% level with error bars (SEM).
+    Only creates plot if the interaction is significant (p < 0.05).
+    
+    Parameters:
+        anova_results: Results dict from perform_mixed_anova_sex_stratified()
+        title: Optional custom title
+        save_path: Optional path to save figure
+        show: Whether to display the plot
+        
+    Returns:
+        matplotlib Figure object, or None if interaction not significant
+    """
+    if not HAS_MATPLOTLIB:
+        print("[ERROR] matplotlib is required for plotting")
+        return None
+    
+    # Check if Time × CA% interaction is significant
+    anova_table = anova_results.get('anova_table')
+    if anova_table is None:
+        print("[WARNING] No ANOVA table found in results")
+        return None
+    
+    p_col = 'p-unc' if 'p-unc' in anova_table.columns else 'p_unc'
+    interaction_row = anova_table[anova_table['Source'] == 'CA (%) * Day']
+    
+    if len(interaction_row) == 0:
+        print(f"[WARNING] CA% × Day interaction not found in ANOVA table. Available sources: {list(anova_table['Source'])}")
+        return None
+    
+    p_value = interaction_row.iloc[0][p_col]
+    
+    if p_value >= 0.05:
+        print(f"[INFO] Time × CA% interaction not significant (p = {p_value:.4f}). Skipping plot.")
+        return None
+    
+    print(f"\n[INFO] Plotting Time × CA% interaction (p = {p_value:.4f})")
+    
+    # Get data
+    data_df = anova_results.get('data')
+    if data_df is None or len(data_df) == 0:
+        print("[WARNING] No data found in results")
+        return None
+    
+    measure = anova_results.get('measure', 'Measure')
+    sex = anova_results.get('sex', 'Unknown')
+    sex_label = 'Males' if sex == 'M' else 'Females'
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(11, 6))
+    
+    # Compute mean and SEM for each Day × CA% combination
+    summary = data_df.groupby(['Day', 'CA (%)'])[measure].agg(['mean', 'sem', 'count']).reset_index()
+    
+    # Get unique CA% levels
+    ca_levels = sorted(summary['CA (%)'].unique())
+    
+    # Plot trajectory for each CA% level
+    colors = plt.cm.viridis(np.linspace(0.2, 0.9, len(ca_levels)))
+    
+    for i, ca_val in enumerate(ca_levels):
+        ca_data = summary[summary['CA (%)'] == ca_val].sort_values('Day')
+        
+        ax.plot(
+            ca_data['Day'], ca_data['mean'],
+            marker='o', markersize=4, linewidth=2, alpha=0.9,
+            color=colors[i], label=f'{ca_val:.0f}% CA'
+        )
+        ax.fill_between(
+            ca_data['Day'],
+            ca_data['mean'] - ca_data['sem'],
+            ca_data['mean'] + ca_data['sem'],
+            color=colors[i], alpha=0.2
+        )
+    
+    ax.set_xlabel('Day')
+    ax.set_ylabel(f'{measure} (Mean ± SEM)')
+    
+    if title is None:
+        title = f'Time × CA% Interaction: {measure}\n({sex_label} Only)'
+    
+    ax.set_title(title, pad=15)
+    
+    ax.grid(False)
+    apply_common_plot_style(ax, remove_top_right=True, ticks_in=True, remove_x_margins=False, remove_y_margins=True)
+    ax.legend(title='CA% Level', loc='best')
+    ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+    
+    # Add significance annotation
+    ax.text(0.02, 0.98, f'Interaction: p = {p_value:.4f}', 
+            transform=ax.transAxes, fontsize=10, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    fig.tight_layout()
+    
+    if save_path is not None:
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"[OK] Saved interaction plot to: {save_path}")
+    
+    if show:
+        plt.show()
+    
+    return fig
+
+
+def plot_interaction_time_sex(
+    anova_results: Dict,
+    title: Optional[str] = None,
+    save_path: Optional[Path] = None,
+    show: bool = True
+) -> Optional[plt.Figure]:
+    """
+    Plot Time × Sex interaction from CA%-stratified mixed ANOVA.
+    
+    Shows trajectories over time for Males vs Females with error bars (SEM).
+    Only creates plot if the interaction is significant (p < 0.05).
+    
+    Parameters:
+        anova_results: Results dict from perform_mixed_anova_ca_stratified()
+        title: Optional custom title
+        save_path: Optional path to save figure
+        show: Whether to display the plot
+        
+    Returns:
+        matplotlib Figure object, or None if interaction not significant
+    """
+    if not HAS_MATPLOTLIB:
+        print("[ERROR] matplotlib is required for plotting")
+        return None
+    
+    # Check if Time × Sex interaction is significant
+    anova_table = anova_results.get('anova_table')
+    if anova_table is None:
+        print("[WARNING] No ANOVA table found in results")
+        return None
+    
+    p_col = 'p-unc' if 'p-unc' in anova_table.columns else 'p_unc'
+    interaction_row = anova_table[anova_table['Source'] == 'Sex * Day']
+    
+    if len(interaction_row) == 0:
+        # Try alternate name
+        interaction_row = anova_table[anova_table['Source'] == 'Day * Sex']
+    
+    if len(interaction_row) == 0:
+        print(f"[WARNING] Sex × Day interaction not found in ANOVA table. Available sources: {list(anova_table['Source'])}")
+        return None
+    
+    p_value = interaction_row.iloc[0][p_col]
+    
+    if p_value >= 0.05:
+        print(f"[INFO] Time × Sex interaction not significant (p = {p_value:.4f}). Skipping plot.")
+        return None
+    
+    print(f"\n[INFO] Plotting Time × Sex interaction (p = {p_value:.4f})")
+    
+    # Get data
+    data_df = anova_results.get('data')
+    if data_df is None or len(data_df) == 0:
+        print("[WARNING] No data found in results")
+        return None
+    
+    measure = anova_results.get('measure', 'Measure')
+    ca_percent = anova_results.get('ca_percent', 'Unknown')
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(11, 6))
+    
+    # Compute mean and SEM for each Day × Sex combination
+    summary = data_df.groupby(['Day', 'Sex'])[measure].agg(['mean', 'sem', 'count']).reset_index()
+    
+    # Get unique Sex levels
+    sex_levels = sorted(summary['Sex'].unique())
+    
+    # Plot trajectory for each sex
+    for sex in sex_levels:
+        sex_data = summary[summary['Sex'] == sex].sort_values('Day')
+        
+        color = 'green' if sex == 'M' else 'purple'
+        label = 'Males' if sex == 'M' else 'Females'
+        marker = 'o' if sex == 'M' else 's'
+        
+        ax.plot(
+            sex_data['Day'], sex_data['mean'],
+            marker=marker, markersize=4, linewidth=2, alpha=0.9,
+            color=color, label=label
+        )
+        ax.fill_between(
+            sex_data['Day'],
+            sex_data['mean'] - sex_data['sem'],
+            sex_data['mean'] + sex_data['sem'],
+            color=color, alpha=0.2
+        )
+    
+    ax.set_xlabel('Day')
+    ax.set_ylabel(f'{measure} (Mean ± SEM)')
+    
+    if title is None:
+        title = f'Time × Sex Interaction: {measure}\n({ca_percent}% CA Only)'
+    
+    ax.set_title(title, pad=15)
+    
+    ax.grid(False)
+    apply_common_plot_style(ax, remove_top_right=True, ticks_in=True, remove_x_margins=False, remove_y_margins=True)
+    ax.legend(title='Sex', loc='best')
+    ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+    
+    # Add significance annotation
+    ax.text(0.02, 0.98, f'Interaction: p = {p_value:.4f}', 
+            transform=ax.transAxes, fontsize=10, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    fig.tight_layout()
+    
+    if save_path is not None:
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"[OK] Saved interaction plot to: {save_path}")
+    
+    if show:
+        plt.show()
+    
+    return fig
+
+
+def plot_three_way_interaction(
+    anova_results: Dict,
+    title: Optional[str] = None,
+    save_path: Optional[Path] = None,
+    show: bool = True
+) -> Optional[plt.Figure]:
+    """
+    Plot CA% × Sex × Time three-way interaction from full mixed ANOVA.
+    
+    Creates a 1×2 panel plot showing Time × CA% trajectories separately for
+    Males (left) and Females (right) with error bars (SEM).
+    
+    Only creates plot if the three-way interaction is significant OR if both
+    two-way interactions (Time × CA% and Time × Sex) are significant.
+    
+    Parameters:
+        anova_results: Results dict from perform_cross_cohort_mixed_anova()
+        title: Optional custom title
+        save_path: Optional path to save figure
+        show: Whether to display the plot
+        
+    Returns:
+        matplotlib Figure object, or None if interaction not significant
+    """
+    if not HAS_MATPLOTLIB:
+        print("[ERROR] matplotlib is required for plotting")
+        return None
+    
+    # Get data
+    data_df = anova_results.get('data')
+    if data_df is None or len(data_df) == 0:
+        print("[WARNING] No data found in results")
+        return None
+    
+    measure = anova_results.get('measure', 'Measure')
+    
+    # Check for significant interactions
+    mixed_anova = anova_results.get('mixed_anova_table')
+    between_anova = anova_results.get('between_anova_table')
+    
+    plot_three_way = False
+    
+    # Check if Day × Group interaction is significant (proxy for three-way)
+    if mixed_anova is not None:
+        p_col = 'p-unc' if 'p-unc' in mixed_anova.columns else 'p_unc'
+        interaction_row = mixed_anova[mixed_anova['Source'] == 'Interaction']
+        
+        if len(interaction_row) > 0:
+            p_value_time_group = interaction_row.iloc[0][p_col]
+            if p_value_time_group < 0.05:
+                print(f"\n[INFO] Time × Group interaction significant (p = {p_value_time_group:.4f})")
+                plot_three_way = True
+    
+    # Check if CA% × Sex interaction is significant
+    if between_anova is not None and not plot_three_way:
+        p_col = 'p-unc' if 'p-unc' in between_anova.columns else 'p_unc'
+        ca_sex_row = between_anova[between_anova['Source'] == 'CA (%) * Sex']
+        
+        if len(ca_sex_row) > 0:
+            p_value_ca_sex = ca_sex_row.iloc[0][p_col]
+            if p_value_ca_sex < 0.05:
+                print(f"\n[INFO] CA% × Sex interaction significant (p = {p_value_ca_sex:.4f})")
+                plot_three_way = True
+    
+    if not plot_three_way:
+        print("[INFO] No significant three-way or relevant two-way interactions. Skipping plot.")
+        return None
+    
+    print("\n[INFO] Creating three-way interaction plot (Time × CA% × Sex)")
+    
+    # Create 1×2 panel figure
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6), sharey=True)
+    
+    # Get unique CA% levels
+    ca_levels = sorted(data_df['CA (%)'].unique())
+    colors = plt.cm.viridis(np.linspace(0.2, 0.9, len(ca_levels)))
+    
+    for sex_idx, sex in enumerate(['M', 'F']):
+        ax = axes[sex_idx]
+        sex_data = data_df[data_df['Sex'] == sex]
+        
+        if len(sex_data) == 0:
+            continue
+        
+        # Compute mean and SEM for each Day × CA% combination
+        summary = sex_data.groupby(['Day', 'CA (%)'])[measure].agg(['mean', 'sem', 'count']).reset_index()
+        
+        # Plot trajectory for each CA% level
+        for i, ca_val in enumerate(ca_levels):
+            ca_data = summary[summary['CA (%)'] == ca_val].sort_values('Day')
+            
+            ax.plot(
+                ca_data['Day'], ca_data['mean'],
+                marker='o', markersize=4, linewidth=2, alpha=0.9,
+                color=colors[i], label=f'{ca_val:.0f}% CA'
+            )
+            ax.fill_between(
+                ca_data['Day'],
+                ca_data['mean'] - ca_data['sem'],
+                ca_data['mean'] + ca_data['sem'],
+                color=colors[i], alpha=0.2
+            )
+        
+        ax.set_xlabel('Day')
+        
+        if sex_idx == 0:
+            ax.set_ylabel(f'{measure} (Mean ± SEM)')
+        
+        sex_label = 'Males' if sex == 'M' else 'Females'
+        ax.set_title(sex_label, pad=10)
+        
+        ax.grid(False)
+        apply_common_plot_style(ax, remove_top_right=True, ticks_in=True, remove_x_margins=False, remove_y_margins=True)
+        ax.legend(title='CA% Level', loc='best')
+        ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+    
+    if title is None:
+        title = f'Three-Way Interaction: Time × CA% × Sex\n{measure}'
+    
+    fig.suptitle(title, y=1.00)
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    
+    if save_path is not None:
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"[OK] Saved three-way interaction plot to: {save_path}")
+    
+    if show:
+        plt.show()
+    
+    return fig
+
+
+def plot_all_significant_interactions(
+    between_results: Optional[Dict] = None,
+    mixed_results: Optional[Dict] = None,
+    sex_stratified_results: Optional[Dict] = None,
+    ca_stratified_results: Optional[Dict] = None,
+    save_dir: Optional[Path] = None,
+    show: bool = True
+) -> Dict[str, plt.Figure]:
+    """
+    Convenience function to plot all significant interactions from various analyses.
+    
+    Automatically detects which interactions are significant and creates
+    appropriate plots for each.
+    
+    Parameters:
+        between_results: Results from perform_between_subjects_anova()
+        mixed_results: Results from perform_cross_cohort_mixed_anova()
+        sex_stratified_results: Dict with 'males' and 'females' keys from 
+                               perform_mixed_anova_sex_stratified()
+        ca_stratified_results: Dict with CA% keys from perform_mixed_anova_ca_stratified()
+        save_dir: Optional directory to save all plots
+        show: Whether to display plots
+        
+    Returns:
+        Dictionary mapping plot names to Figure objects
+    """
+    figures = {}
+    
+    print("\n" + "="*80)
+    print("PLOTTING ALL SIGNIFICANT INTERACTIONS")
+    print("="*80)
+    
+    # 1. CA% × Sex interaction (between-subjects)
+    if between_results is not None:
+        print("\n[DEBUG] Checking CA% × Sex interaction...")
+        measure = between_results.get('measure', 'measure')
+        analysis_type = between_results.get('analysis_type', 'analysis')
+        
+        save_path = None
+        if save_dir is not None:
+            save_path = Path(save_dir) / f"interaction_CA_Sex_{measure}_{analysis_type}.png"
+        
+        fig = plot_interaction_ca_sex(between_results, save_path=save_path, show=show)
+        if fig is not None:
+            figures['CA_Sex'] = fig
+            print(f"  ✓ CA% × Sex plot created")
+        else:
+            print(f"  ✗ CA% × Sex interaction not significant or missing data")
+    
+    # 2. Three-way interaction (full mixed ANOVA)
+    if mixed_results is not None:
+        print("\n[DEBUG] Checking three-way interaction...")
+        measure = mixed_results.get('measure', 'measure')
+        
+        save_path = None
+        if save_dir is not None:
+            save_path = Path(save_dir) / f"interaction_Time_CA_Sex_{measure}.png"
+        
+        fig = plot_three_way_interaction(mixed_results, save_path=save_path, show=show)
+        if fig is not None:
+            figures['Time_CA_Sex'] = fig
+            print(f"  ✓ Three-way interaction plot created")
+        else:
+            print(f"  ✗ Three-way interaction not significant or missing data")
+    
+    # 3. Time × CA% interactions (sex-stratified)
+    if sex_stratified_results is not None:
+        print("\n[DEBUG] Checking sex-stratified Time × CA% interactions...")
+        for sex_key in ['males', 'females']:
+            sex_results = sex_stratified_results.get(sex_key)
+            if sex_results is not None:
+                measure = sex_results.get('measure', 'measure')
+                sex = sex_results.get('sex', sex_key[0].upper())
+                sex_label = 'Males' if sex == 'M' else 'Females'
+                
+                print(f"  Checking {sex_label}...")
+                save_path = None
+                if save_dir is not None:
+                    save_path = Path(save_dir) / f"interaction_Time_CA_{sex_label}_{measure}.png"
+                
+                fig = plot_interaction_time_ca(sex_results, save_path=save_path, show=show)
+                if fig is not None:
+                    figures[f'Time_CA_{sex_label}'] = fig
+                    print(f"    ✓ Time × CA% ({sex_label}) plot created")
+                else:
+                    print(f"    ✗ Time × CA% ({sex_label}) interaction not significant or missing data")
+            else:
+                print(f"  ✗ {sex_key} results are None")
+    
+    # 4. Time × Sex interactions (CA%-stratified)
+    if ca_stratified_results is not None:
+        print("\n[DEBUG] Checking CA%-stratified Time × Sex interactions...")
+        for ca_key, ca_results in ca_stratified_results.items():
+            if isinstance(ca_results, dict):
+                measure = ca_results.get('measure', 'measure')
+                ca_percent = ca_results.get('ca_percent', ca_key)
+                
+                print(f"  Checking CA {ca_percent}%...")
+                save_path = None
+                if save_dir is not None:
+                    save_path = Path(save_dir) / f"interaction_Time_Sex_CA{ca_percent}_{measure}.png"
+                
+                fig = plot_interaction_time_sex(ca_results, save_path=save_path, show=show)
+                if fig is not None:
+                    figures[f'Time_Sex_CA{ca_percent}'] = fig
+                    print(f"    ✓ Time × Sex (CA {ca_percent}%) plot created")
+                else:
+                    print(f"    ✗ Time × Sex (CA {ca_percent}%) interaction not significant or missing data")
+            else:
+                print(f"  ✗ Results for CA {ca_key}% are not a dict: {type(ca_results)}")
+    
+    # Summary
+    print("\n" + "="*80)
+    print(f"INTERACTION PLOT SUMMARY: Created {len(figures)} plot(s)")
+    print("="*80)
+    
+    if len(figures) > 0:
+        for plot_name in figures.keys():
+            print(f"  ✓ {plot_name}")
+    else:
+        print("  No significant interactions found to plot")
+    
+    return figures
 
 
 # =============================================================================
@@ -2682,6 +3469,16 @@ def generate_cross_cohort_report(
         report_lines.append("")
     
     # Sex-stratified mixed ANOVA results
+    # Bonferroni note: two tests in the sex-stratified family (k=2)
+    if results_males or results_females:
+        report_lines.append("=" * 80)
+        report_lines.append("SEX-STRATIFIED MIXED ANOVA: NOTE ON MULTIPLE COMPARISONS")
+        report_lines.append("=" * 80)
+        report_lines.append("")
+        report_lines.append("Two sex-stratified tests are run (males and females), forming a family of k=2.")
+        report_lines.append("Bonferroni correction is applied: adjusted alpha = 0.05 / 2 = 0.025.")
+        report_lines.append("Both raw and Bonferroni-corrected p-values are reported for the key interaction.")
+        report_lines.append("")
     if results_males:
         report_lines.append("=" * 80)
         report_lines.append("SEX-STRATIFIED MIXED ANOVA: TIME × CA% (MALES ONLY)")
@@ -2737,11 +3534,15 @@ def generate_cross_cohort_report(
                 int_p = int_row[p_col]
                 int_F = int_row['F']
                 
+                int_p_adj = min(1.0, int_p * 2)
                 sig_str = "SIGNIFICANT" if int_p < 0.05 else "NOT SIGNIFICANT"
-                report_lines.append(f"\n3. Time × CA% Interaction (Males): {sig_str}")
-                report_lines.append(f"   F = {int_F:.3f}, p = {int_p:.4f}")
-                if int_p < 0.05:
-                    report_lines.append(f"   → The time course differs between CA% levels in males")
+                sig_str_adj = "SIGNIFICANT" if int_p_adj < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\n3. Time × CA% Interaction (Males): {sig_str} (raw) / {sig_str_adj} (Bonferroni)")
+                report_lines.append(f"   F = {int_F:.3f}, p (raw) = {int_p:.4f},  p (Bonf, k=2) = {int_p_adj:.4f}")
+                if int_p_adj < 0.05:
+                    report_lines.append(f"   → The time course significantly differs between CA% levels in males (survives correction)")
+                elif int_p < 0.05:
+                    report_lines.append(f"   → Nominally significant but does NOT survive Bonferroni correction")
                 else:
                     report_lines.append(f"   → Similar time course across CA% levels in males")
         
@@ -2813,11 +3614,15 @@ def generate_cross_cohort_report(
                 int_p = int_row[p_col]
                 int_F = int_row['F']
                 
+                int_p_adj = min(1.0, int_p * 2)
                 sig_str = "SIGNIFICANT" if int_p < 0.05 else "NOT SIGNIFICANT"
-                report_lines.append(f"\n3. Time × CA% Interaction (Females): {sig_str}")
-                report_lines.append(f"   F = {int_F:.3f}, p = {int_p:.4f}")
-                if int_p < 0.05:
-                    report_lines.append(f"   → The time course differs between CA% levels in females")
+                sig_str_adj = "SIGNIFICANT" if int_p_adj < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\n3. Time × CA% Interaction (Females): {sig_str} (raw) / {sig_str_adj} (Bonferroni)")
+                report_lines.append(f"   F = {int_F:.3f}, p (raw) = {int_p:.4f},  p (Bonf, k=2) = {int_p_adj:.4f}")
+                if int_p_adj < 0.05:
+                    report_lines.append(f"   → The time course significantly differs between CA% levels in females (survives correction)")
+                elif int_p < 0.05:
+                    report_lines.append(f"   → Nominally significant but does NOT survive Bonferroni correction")
                 else:
                     report_lines.append(f"   → Similar time course across CA% levels in females")
         
@@ -2853,36 +3658,57 @@ def generate_cross_cohort_report(
             
             # Males interaction
             males_int_p = None
+            males_int_p_adj = None
             if 'CA (%) * Day' in males_aov['Source'].values:
                 males_int_p = males_aov[males_aov['Source'] == 'CA (%) * Day'].iloc[0][p_col]
-                males_int_sig = "SIGNIFICANT" if males_int_p < 0.05 else "NOT SIGNIFICANT"
-                report_lines.append(f"\nMales Time × CA% interaction: {males_int_sig} (p = {males_int_p:.4f})")
+                males_int_p_adj = min(1.0, males_int_p * 2)
+                males_int_sig = "SIGNIFICANT" if males_int_p < 0.05 else "NOT significant"
+                males_int_sig_adj = "SIGNIFICANT" if males_int_p_adj < 0.05 else "NOT significant"
+                report_lines.append(f"\nMales Time \u00d7 CA% interaction:")
+                report_lines.append(f"  p (raw) = {males_int_p:.4f} [{males_int_sig}]  |  p (Bonf, k=2) = {males_int_p_adj:.4f} [{males_int_sig_adj}]")
             
             # Females interaction
             females_int_p = None
+            females_int_p_adj = None
             if 'CA (%) * Day' in females_aov['Source'].values:
                 females_int_p = females_aov[females_aov['Source'] == 'CA (%) * Day'].iloc[0][p_col]
-                females_int_sig = "SIGNIFICANT" if females_int_p < 0.05 else "NOT SIGNIFICANT"
-                report_lines.append(f"Females Time × CA% interaction: {females_int_sig} (p = {females_int_p:.4f})")
+                females_int_p_adj = min(1.0, females_int_p * 2)
+                females_int_sig = "SIGNIFICANT" if females_int_p < 0.05 else "NOT significant"
+                females_int_sig_adj = "SIGNIFICANT" if females_int_p_adj < 0.05 else "NOT significant"
+                report_lines.append(f"Females Time \u00d7 CA% interaction:")
+                report_lines.append(f"  p (raw) = {females_int_p:.4f} [{females_int_sig}]  |  p (Bonf, k=2) = {females_int_p_adj:.4f} [{females_int_sig_adj}]")
             
-            # Interpretation
+            # Interpretation using Bonferroni-corrected p
             if males_int_p is not None and females_int_p is not None:
                 report_lines.append("")
-                if males_int_p < 0.05 and females_int_p < 0.05:
-                    report_lines.append("→ Both sexes show significant Time × CA% interaction")
-                    report_lines.append("→ CA% effects on weight trajectory differ by sex")
-                elif males_int_p < 0.05 and females_int_p >= 0.05:
-                    report_lines.append("→ Time × CA% interaction is SIGNIFICANT in males but NOT in females")
-                    report_lines.append("→ CA% effects on weight trajectory are sex-specific")
-                elif males_int_p >= 0.05 and females_int_p < 0.05:
-                    report_lines.append("→ Time × CA% interaction is SIGNIFICANT in females but NOT in males")
-                    report_lines.append("→ CA% effects on weight trajectory are sex-specific")
+                report_lines.append("Interpretation (Bonferroni-corrected, alpha = 0.025):")
+                males_sig = males_int_p_adj < 0.05
+                females_sig = females_int_p_adj < 0.05
+                if males_sig and females_sig:
+                    report_lines.append("\u2192 Both sexes show significant Time \u00d7 CA% interaction (after correction)")
+                    report_lines.append("\u2192 CA% effects on weight trajectory differ by sex")
+                elif males_sig and not females_sig:
+                    report_lines.append("\u2192 Time \u00d7 CA% interaction survives correction for MALES only")
+                    report_lines.append("\u2192 CA% effects on weight trajectory may be sex-specific")
+                elif not males_sig and females_sig:
+                    report_lines.append("\u2192 Time \u00d7 CA% interaction survives correction for FEMALES only")
+                    report_lines.append("\u2192 CA% effects on weight trajectory may be sex-specific")
                 else:
-                    report_lines.append("→ Neither sex shows significant Time × CA% interaction")
+                    report_lines.append("\u2192 Neither sex shows significant Time \u00d7 CA% interaction after correction")
         
         report_lines.append("")
     
     # CA%-stratified mixed ANOVA results
+    # Bonferroni note: two tests in the CA%-stratified family (k=2)
+    if results_ca0 or results_ca2:
+        report_lines.append("=" * 80)
+        report_lines.append("CA%-STRATIFIED MIXED ANOVA: NOTE ON MULTIPLE COMPARISONS")
+        report_lines.append("=" * 80)
+        report_lines.append("")
+        report_lines.append("Two CA%-stratified tests are run (0% CA and 2% CA), forming a family of k=2.")
+        report_lines.append("Bonferroni correction is applied: adjusted alpha = 0.05 / 2 = 0.025.")
+        report_lines.append("Both raw and Bonferroni-corrected p-values are reported for the key interaction.")
+        report_lines.append("")
     if results_ca0:
         report_lines.append("=" * 80)
         report_lines.append("CA%-STRATIFIED MIXED ANOVA: TIME × SEX (0% CA ONLY)")
@@ -2946,11 +3772,15 @@ def generate_cross_cohort_report(
                 int_F = int_row['F']
             
             if int_p is not None:
+                int_p_adj = min(1.0, int_p * 2)
                 sig_str = "SIGNIFICANT" if int_p < 0.05 else "NOT SIGNIFICANT"
-                report_lines.append(f"\n3. Time × Sex Interaction (0% CA): {sig_str}")
-                report_lines.append(f"   F = {int_F:.3f}, p = {int_p:.4f}")
-                if int_p < 0.05:
-                    report_lines.append(f"   → The time course differs between sexes at 0% CA")
+                sig_str_adj = "SIGNIFICANT" if int_p_adj < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\n3. Time × Sex Interaction (0% CA): {sig_str} (raw) / {sig_str_adj} (Bonferroni)")
+                report_lines.append(f"   F = {int_F:.3f}, p (raw) = {int_p:.4f},  p (Bonf, k=2) = {int_p_adj:.4f}")
+                if int_p_adj < 0.05:
+                    report_lines.append(f"   → The time course significantly differs between sexes at 0% CA (survives correction)")
+                elif int_p < 0.05:
+                    report_lines.append(f"   → Nominally significant but does NOT survive Bonferroni correction")
                 else:
                     report_lines.append(f"   → Similar time course for both sexes at 0% CA")
         
@@ -3030,11 +3860,15 @@ def generate_cross_cohort_report(
                 int_F = int_row['F']
             
             if int_p is not None:
+                int_p_adj = min(1.0, int_p * 2)
                 sig_str = "SIGNIFICANT" if int_p < 0.05 else "NOT SIGNIFICANT"
-                report_lines.append(f"\n3. Time × Sex Interaction (2% CA): {sig_str}")
-                report_lines.append(f"   F = {int_F:.3f}, p = {int_p:.4f}")
-                if int_p < 0.05:
-                    report_lines.append(f"   → The time course differs between sexes at 2% CA")
+                sig_str_adj = "SIGNIFICANT" if int_p_adj < 0.05 else "NOT SIGNIFICANT"
+                report_lines.append(f"\n3. Time × Sex Interaction (2% CA): {sig_str} (raw) / {sig_str_adj} (Bonferroni)")
+                report_lines.append(f"   F = {int_F:.3f}, p (raw) = {int_p:.4f},  p (Bonf, k=2) = {int_p_adj:.4f}")
+                if int_p_adj < 0.05:
+                    report_lines.append(f"   → The time course significantly differs between sexes at 2% CA (survives correction)")
+                elif int_p < 0.05:
+                    report_lines.append(f"   → Nominally significant but does NOT survive Bonferroni correction")
                 else:
                     report_lines.append(f"   → Similar time course for both sexes at 2% CA")
         
@@ -3076,34 +3910,46 @@ def generate_cross_cohort_report(
                 ca0_int_p = ca0_aov[ca0_aov['Source'] == 'Day * Sex'].iloc[0][p_col]
             
             if ca0_int_p is not None:
-                ca0_int_sig = "SIGNIFICANT" if ca0_int_p < 0.05 else "NOT SIGNIFICANT"
-                report_lines.append(f"\n0% CA Time × Sex interaction: {ca0_int_sig} (p = {ca0_int_p:.4f})")
+                ca0_int_p_adj = min(1.0, ca0_int_p * 2)
+                ca0_int_sig = "SIGNIFICANT" if ca0_int_p < 0.05 else "NOT significant"
+                ca0_int_sig_adj = "SIGNIFICANT" if ca0_int_p_adj < 0.05 else "NOT significant"
+                report_lines.append(f"\n0% CA Time × Sex interaction:")
+                report_lines.append(f"  p (raw) = {ca0_int_p:.4f} [{ca0_int_sig}]  |  p (Bonf, k=2) = {ca0_int_p_adj:.4f} [{ca0_int_sig_adj}]")
+            else:
+                ca0_int_p_adj = None
             
             # 2% CA interaction
             ca2_int_p = None
+            ca2_int_p_adj = None
             if 'Sex * Day' in ca2_aov['Source'].values:
                 ca2_int_p = ca2_aov[ca2_aov['Source'] == 'Sex * Day'].iloc[0][p_col]
             elif 'Day * Sex' in ca2_aov['Source'].values:
                 ca2_int_p = ca2_aov[ca2_aov['Source'] == 'Day * Sex'].iloc[0][p_col]
             
             if ca2_int_p is not None:
-                ca2_int_sig = "SIGNIFICANT" if ca2_int_p < 0.05 else "NOT SIGNIFICANT"
-                report_lines.append(f"2% CA Time × Sex interaction: {ca2_int_sig} (p = {ca2_int_p:.4f})")
+                ca2_int_p_adj = min(1.0, ca2_int_p * 2)
+                ca2_int_sig = "SIGNIFICANT" if ca2_int_p < 0.05 else "NOT significant"
+                ca2_int_sig_adj = "SIGNIFICANT" if ca2_int_p_adj < 0.05 else "NOT significant"
+                report_lines.append(f"2% CA Time × Sex interaction:")
+                report_lines.append(f"  p (raw) = {ca2_int_p:.4f} [{ca2_int_sig}]  |  p (Bonf, k=2) = {ca2_int_p_adj:.4f} [{ca2_int_sig_adj}]")
             
-            # Interpretation
+            # Interpretation using Bonferroni-corrected p
             if ca0_int_p is not None and ca2_int_p is not None:
                 report_lines.append("")
-                if ca0_int_p < 0.05 and ca2_int_p < 0.05:
-                    report_lines.append("→ Both CA% levels show significant Time × Sex interaction")
+                report_lines.append("Interpretation (Bonferroni-corrected, alpha = 0.025):")
+                ca0_sig = (ca0_int_p_adj < 0.05) if ca0_int_p_adj is not None else False
+                ca2_sig = (ca2_int_p_adj < 0.05) if ca2_int_p_adj is not None else False
+                if ca0_sig and ca2_sig:
+                    report_lines.append("→ Both CA% levels show significant Time × Sex interaction (after correction)")
                     report_lines.append("→ Sex differences in weight trajectory are consistent across CA% levels")
-                elif ca0_int_p < 0.05 and ca2_int_p >= 0.05:
-                    report_lines.append("→ Time × Sex interaction is SIGNIFICANT at 0% CA but NOT at 2% CA")
-                    report_lines.append("→ CA% modulates sex differences in weight trajectory")
-                elif ca0_int_p >= 0.05 and ca2_int_p < 0.05:
-                    report_lines.append("→ Time × Sex interaction is SIGNIFICANT at 2% CA but NOT at 0% CA")
-                    report_lines.append("→ CA% modulates sex differences in weight trajectory")
+                elif ca0_sig and not ca2_sig:
+                    report_lines.append("→ Time × Sex interaction survives correction at 0% CA but NOT at 2% CA")
+                    report_lines.append("→ CA% may modulate sex differences in weight trajectory")
+                elif not ca0_sig and ca2_sig:
+                    report_lines.append("→ Time × Sex interaction survives correction at 2% CA but NOT at 0% CA")
+                    report_lines.append("→ CA% may modulate sex differences in weight trajectory")
                 else:
-                    report_lines.append("→ Neither CA% level shows significant Time × Sex interaction")
+                    report_lines.append("→ Neither CA% level shows significant Time × Sex interaction after correction")
         
         report_lines.append("")
     
@@ -3204,6 +4050,847 @@ def generate_cross_cohort_report(
     report_lines.append("=" * 80)
     
     return "\n".join(report_lines)
+
+
+# =============================================================================
+# WEEK-LEVEL MIXED ANOVA FUNCTIONS (CONSERVATIVE, BONFERRONI-CORRECTED)
+# =============================================================================
+
+def _add_week_column_across_cohorts(combined_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add a 'Week' column (1-indexed) derived from 'Day'.
+    Week 1 = Days 0–6, Week 2 = Days 7–13, etc.
+    Requires 'Day' column (calls add_day_column_across_cohorts if absent).
+    """
+    df = combined_df.copy()
+    if 'Day' not in df.columns:
+        df = add_day_column_across_cohorts(df)
+    df['Week'] = (df['Day'] // 7) + 1
+    return df
+
+
+def _filter_complete_subjects_weekly(df: pd.DataFrame, subject_col: str, time_col: str) -> pd.DataFrame:
+    """
+    Keep only subjects that have at least one observation in every level of time_col.
+    Prints a summary of how many subjects were dropped.
+    """
+    counts = df.groupby(subject_col)[time_col].nunique()
+    total = df[time_col].nunique()
+    complete_ids = counts[counts == total].index
+    n_before = df[subject_col].nunique()
+    n_dropped = n_before - len(complete_ids)
+    if n_dropped > 0:
+        print(f"  [NOTE] Excluded {n_dropped} subject(s) with incomplete records; "
+              f"{len(complete_ids)} of {n_before} subjects retained")
+    else:
+        print(f"  [OK] All {n_before} subjects have complete records across all weeks")
+    return df[df[subject_col].isin(complete_ids)].copy()
+
+
+def perform_cross_cohort_mixed_anova_weekly(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    measure: str = "Total Change",
+    weeks: Optional[List[int]] = None,
+) -> Dict:
+    """
+    Week-level Mixed ANOVA: Week (within-subjects) × Group (between-subjects).
+
+    This is the week-level equivalent of perform_cross_cohort_mixed_anova().
+    'Group' is a combined CA%/Sex label (e.g. '0% / M', '2% / F').
+    Using Week (1–5) instead of Day is more conservative: it averages out
+    day-to-day noise, reduces the within-subjects degrees of freedom, and
+    exactly mirrors the design used in non_ramp_analysis.py.
+
+    Only subjects with a complete record across ALL retained weeks are included.
+
+    Parameters:
+        cohort_dfs: Dictionary mapping cohort labels to DataFrames
+        measure: Weight measure to analyze ('Total Change', 'Daily Change', 'Weight')
+        weeks: Optional list of week numbers to include (default: all)
+
+    Returns:
+        Dictionary with ANOVA results, descriptive stats, and the analysis DataFrame
+    """
+    print("\n" + "="*80)
+    print("WEEK-LEVEL MIXED ANOVA: Week (WITHIN) × Group/CA%+Sex (BETWEEN)")
+    print("="*80)
+
+    if not HAS_PINGOUIN:
+        print("[ERROR] pingouin is required for mixed ANOVA")
+        return {}
+
+    combined_df = combine_cohorts_for_analysis(cohort_dfs)
+    combined_df = clean_cohort(combined_df)
+    if 'Day' not in combined_df.columns:
+        combined_df = add_day_column_across_cohorts(combined_df)
+    combined_df = _add_week_column_across_cohorts(combined_df)
+    combined_df = combined_df[combined_df['Day'] >= 0]
+
+    required_cols = ['ID', 'Week', 'Sex', 'CA (%)', measure]
+    missing = [c for c in required_cols if c not in combined_df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    analysis_df = combined_df[required_cols].dropna().copy()
+
+    if weeks is not None:
+        analysis_df = analysis_df[analysis_df['Week'].isin(weeks)]
+        print(f"  Filtered to weeks: {sorted(weeks)}")
+
+    # Average within Week per animal (one value per ID × Week)
+    analysis_df = (
+        analysis_df.groupby(['ID', 'Week', 'Sex', 'CA (%)'])[measure]
+        .mean()
+        .reset_index()
+    )
+
+    # Create combined Group label
+    analysis_df['Group'] = analysis_df['CA (%)'].astype(str) + '% / ' + analysis_df['Sex']
+
+    print(f"\n  Measure: {measure}")
+    print(f"  Animals before completeness filter: {analysis_df['ID'].nunique()}")
+    print(f"  Weeks present: {sorted(analysis_df['Week'].unique())}")
+
+    analysis_df = _filter_complete_subjects_weekly(analysis_df, 'ID', 'Week')
+
+    print(f"  Total observations: {len(analysis_df)}")
+    print(f"  Groups: {sorted(analysis_df['Group'].unique())}")
+
+    def _desc(group):
+        n = len(group)
+        mean = group.mean()
+        std = group.std(ddof=1) if n > 1 else np.nan
+        sem = std / np.sqrt(n) if (n > 0 and np.isfinite(std)) else np.nan
+        return pd.Series({
+            'count': n, 'mean': mean, 'median': group.median(),
+            'std': std, 'sem': sem,
+            'ci_lower': mean - 1.96 * sem if np.isfinite(sem) else np.nan,
+            'ci_upper': mean + 1.96 * sem if np.isfinite(sem) else np.nan,
+            'min': group.min(), 'max': group.max(),
+        })
+
+    stats_data = []
+    for (ca_val, sex_val), grp in analysis_df.groupby(['CA (%)', 'Sex'])[measure]:
+        s = _desc(grp)
+        s['CA (%)'] = ca_val
+        s['Sex'] = sex_val
+        stats_data.append(s)
+    group_stats = pd.DataFrame(stats_data)
+
+    print("\nDescriptive Statistics:")
+    for _, row in group_stats.iterrows():
+        print(f"  CA%={row['CA (%)']}, Sex={row['Sex']}: "
+              f"n={int(row['count'])}, M={row['mean']:.3f}, SD={row['std']:.3f}, SEM={row['sem']:.3f}")
+
+    print("\nRunning mixed ANOVA (Week within × Group between)...")
+    try:
+        aov = pg.mixed_anova(
+            data=analysis_df,
+            dv=measure,
+            within='Week',
+            subject='ID',
+            between='Group',
+            correction='auto',
+        )
+        aov['Source'] = aov['Source'].replace({'Interaction': 'Week * Group'})
+
+        print("\nMixed ANOVA Results:")
+        print(aov.to_string())
+
+        p_col = 'p-unc' if 'p-unc' in aov.columns else 'p_unc'
+        print("\nFormatted Results:")
+        for _, row in aov.iterrows():
+            p = row[p_col]
+            sig = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
+            print(f"  {row['Source']}: F = {row['F']:.3f}, p = {p:.4f} {sig}")
+
+        return {
+            'measure': measure,
+            'type': 'mixed_anova_weekly',
+            'n_subjects': analysis_df['ID'].nunique(),
+            'n_weeks': analysis_df['Week'].nunique(),
+            'n_observations': len(analysis_df),
+            'weeks': sorted(analysis_df['Week'].unique()),
+            'anova_table': aov,
+            'descriptive_stats': group_stats,
+            'data': analysis_df,
+        }
+    except Exception as e:
+        print(f"[ERROR] Mixed ANOVA failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {}
+
+
+def perform_mixed_anova_sex_stratified_weekly(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    sex: str,
+    measure: str = "Total Change",
+    weeks: Optional[List[int]] = None,
+) -> Dict:
+    """
+    Week-level Mixed ANOVA: Week (within-subjects) × CA% (between-subjects),
+    stratified by sex.
+
+    Week-level equivalent of perform_mixed_anova_sex_stratified().
+    Only subjects with a complete record across all retained weeks are included.
+
+    Parameters:
+        cohort_dfs: Dictionary mapping cohort labels to DataFrames
+        sex: Sex to analyze ('M' or 'F')
+        measure: Weight measure to analyze
+        weeks: Optional list of week numbers to include (default: all)
+
+    Returns:
+        Dictionary with ANOVA results
+    """
+    sex_label = 'MALES' if sex == 'M' else 'FEMALES'
+    print("\n" + "="*80)
+    print(f"WEEK-LEVEL SEX-STRATIFIED MIXED ANOVA ({sex_label}): Week (WITHIN) × CA% (BETWEEN)")
+    print("="*80)
+
+    if not HAS_PINGOUIN:
+        print("[ERROR] pingouin is required for mixed ANOVA")
+        return {}
+
+    if sex not in ["M", "F"]:
+        raise ValueError("sex must be 'M' or 'F'")
+
+    combined_df = combine_cohorts_for_analysis(cohort_dfs)
+    combined_df = clean_cohort(combined_df)
+    if 'Day' not in combined_df.columns:
+        combined_df = add_day_column_across_cohorts(combined_df)
+    combined_df = _add_week_column_across_cohorts(combined_df)
+    combined_df = combined_df[combined_df['Day'] >= 0]
+
+    required_cols = ['ID', 'Week', 'Sex', 'CA (%)', measure]
+    analysis_df = combined_df[combined_df['Sex'] == sex][required_cols].dropna().copy()
+
+    if len(analysis_df) == 0:
+        print(f"[ERROR] No data for sex={sex}")
+        return {}
+
+    if weeks is not None:
+        analysis_df = analysis_df[analysis_df['Week'].isin(weeks)]
+
+    # Average within Week per animal
+    analysis_df = (
+        analysis_df.groupby(['ID', 'Week', 'CA (%)'])[measure]
+        .mean()
+        .reset_index()
+    )
+
+    print(f"\n  Measure: {measure} ({'Males' if sex == 'M' else 'Females'})")
+    print(f"  Animals before completeness filter: {analysis_df['ID'].nunique()}")
+
+    analysis_df = _filter_complete_subjects_weekly(analysis_df, 'ID', 'Week')
+
+    print(f"  CA% levels: {sorted(analysis_df['CA (%)'].unique())}")
+    print(f"  Weeks: {sorted(analysis_df['Week'].unique())}")
+    print(f"  Total observations: {len(analysis_df)}")
+
+    def _desc(group):
+        n = len(group)
+        mean = group.mean()
+        std = group.std(ddof=1) if n > 1 else np.nan
+        sem = std / np.sqrt(n) if (n > 0 and np.isfinite(std)) else np.nan
+        return pd.Series({
+            'count': n, 'mean': mean, 'median': group.median(),
+            'std': std, 'sem': sem,
+            'ci_lower': mean - 1.96 * sem if np.isfinite(sem) else np.nan,
+            'ci_upper': mean + 1.96 * sem if np.isfinite(sem) else np.nan,
+            'min': group.min(), 'max': group.max(),
+        })
+
+    stats_data = []
+    for ca_val, grp in analysis_df.groupby('CA (%)')[measure]:
+        s = _desc(grp)
+        s['CA (%)'] = ca_val
+        stats_data.append(s)
+    group_stats = pd.DataFrame(stats_data)
+
+    print("\nDescriptive Statistics:")
+    for _, row in group_stats.iterrows():
+        print(f"  CA%={row['CA (%)']}: "
+              f"n={int(row['count'])}, M={row['mean']:.3f}, SD={row['std']:.3f}, SEM={row['sem']:.3f}")
+
+    print(f"\nRunning mixed ANOVA (Week within × CA% between)...")
+    try:
+        aov = pg.mixed_anova(
+            data=analysis_df,
+            dv=measure,
+            within='Week',
+            subject='ID',
+            between='CA (%)',
+            correction='auto',
+        )
+        aov['Source'] = aov['Source'].replace({'Interaction': 'CA (%) * Week'})
+
+        print("\nMixed ANOVA Results:")
+        print(aov.to_string())
+
+        p_col = 'p-unc' if 'p-unc' in aov.columns else 'p_unc'
+        print("\nFormatted Results:")
+        for _, row in aov.iterrows():
+            p = row[p_col]
+            sig = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
+            print(f"  {row['Source']}: F = {row['F']:.3f}, p = {p:.4f} {sig}")
+
+        return {
+            'measure': measure,
+            'sex': sex,
+            'type': 'mixed_anova_sex_stratified_weekly',
+            'n_subjects': analysis_df['ID'].nunique(),
+            'n_weeks': analysis_df['Week'].nunique(),
+            'n_observations': len(analysis_df),
+            'weeks': sorted(analysis_df['Week'].unique()),
+            'anova_table': aov,
+            'descriptive_stats': group_stats,
+            'data': analysis_df,
+        }
+    except Exception as e:
+        print(f"[ERROR] Mixed ANOVA failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {}
+
+
+def perform_mixed_anova_ca_stratified_weekly(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    ca_percent: float,
+    measure: str = "Total Change",
+    weeks: Optional[List[int]] = None,
+) -> Dict:
+    """
+    Week-level Mixed ANOVA: Week (within-subjects) × Sex (between-subjects),
+    stratified by CA%.
+
+    Week-level equivalent of perform_mixed_anova_ca_stratified().
+    Only subjects with a complete record across all retained weeks are included.
+
+    Parameters:
+        cohort_dfs: Dictionary mapping cohort labels to DataFrames
+        ca_percent: CA% level to analyze (e.g., 0 or 2)
+        measure: Weight measure to analyze
+        weeks: Optional list of week numbers to include (default: all)
+
+    Returns:
+        Dictionary with ANOVA results
+    """
+    print("\n" + "="*80)
+    print(f"WEEK-LEVEL CA%-STRATIFIED MIXED ANOVA ({ca_percent}% CA): Week (WITHIN) × Sex (BETWEEN)")
+    print("="*80)
+
+    if not HAS_PINGOUIN:
+        print("[ERROR] pingouin is required for mixed ANOVA")
+        return {}
+
+    combined_df = combine_cohorts_for_analysis(cohort_dfs)
+    combined_df = clean_cohort(combined_df)
+    if 'Day' not in combined_df.columns:
+        combined_df = add_day_column_across_cohorts(combined_df)
+    combined_df = _add_week_column_across_cohorts(combined_df)
+    combined_df = combined_df[combined_df['Day'] >= 0]
+
+    required_cols = ['ID', 'Week', 'Sex', 'CA (%)', measure]
+    analysis_df = combined_df[combined_df['CA (%)'] == ca_percent][required_cols].dropna().copy()
+
+    if len(analysis_df) == 0:
+        print(f"[ERROR] No data for CA%={ca_percent}")
+        return {}
+
+    if weeks is not None:
+        analysis_df = analysis_df[analysis_df['Week'].isin(weeks)]
+
+    # Average within Week per animal
+    analysis_df = (
+        analysis_df.groupby(['ID', 'Week', 'Sex'])[measure]
+        .mean()
+        .reset_index()
+    )
+
+    print(f"\n  Measure: {measure} ({ca_percent}% CA)")
+    print(f"  Animals before completeness filter: {analysis_df['ID'].nunique()}")
+
+    analysis_df = _filter_complete_subjects_weekly(analysis_df, 'ID', 'Week')
+
+    print(f"  Sex groups: {sorted(analysis_df['Sex'].unique())}")
+    print(f"  Weeks: {sorted(analysis_df['Week'].unique())}")
+    print(f"  Total observations: {len(analysis_df)}")
+
+    def _desc(group):
+        n = len(group)
+        mean = group.mean()
+        std = group.std(ddof=1) if n > 1 else np.nan
+        sem = std / np.sqrt(n) if (n > 0 and np.isfinite(std)) else np.nan
+        return pd.Series({
+            'count': n, 'mean': mean, 'median': group.median(),
+            'std': std, 'sem': sem,
+            'ci_lower': mean - 1.96 * sem if np.isfinite(sem) else np.nan,
+            'ci_upper': mean + 1.96 * sem if np.isfinite(sem) else np.nan,
+            'min': group.min(), 'max': group.max(),
+        })
+
+    stats_data = []
+    for sex_val, grp in analysis_df.groupby('Sex')[measure]:
+        s = _desc(grp)
+        s['Sex'] = sex_val
+        stats_data.append(s)
+    group_stats = pd.DataFrame(stats_data)
+
+    print("\nDescriptive Statistics:")
+    for _, row in group_stats.iterrows():
+        print(f"  Sex={row['Sex']}: "
+              f"n={int(row['count'])}, M={row['mean']:.3f}, SD={row['std']:.3f}, SEM={row['sem']:.3f}")
+
+    print(f"\nRunning mixed ANOVA (Week within × Sex between)...")
+    try:
+        aov = pg.mixed_anova(
+            data=analysis_df,
+            dv=measure,
+            within='Week',
+            subject='ID',
+            between='Sex',
+            correction='auto',
+        )
+        aov['Source'] = aov['Source'].replace({'Interaction': 'Sex * Week'})
+
+        print("\nMixed ANOVA Results:")
+        print(aov.to_string())
+
+        p_col = 'p-unc' if 'p-unc' in aov.columns else 'p_unc'
+        print("\nFormatted Results:")
+        for _, row in aov.iterrows():
+            p = row[p_col]
+            sig = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
+            print(f"  {row['Source']}: F = {row['F']:.3f}, p = {p:.4f} {sig}")
+
+        return {
+            'measure': measure,
+            'ca_percent': ca_percent,
+            'type': 'mixed_anova_ca_stratified_weekly',
+            'n_subjects': analysis_df['ID'].nunique(),
+            'n_weeks': analysis_df['Week'].nunique(),
+            'n_observations': len(analysis_df),
+            'weeks': sorted(analysis_df['Week'].unique()),
+            'anova_table': aov,
+            'descriptive_stats': group_stats,
+            'data': analysis_df,
+        }
+    except Exception as e:
+        print(f"[ERROR] Mixed ANOVA failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {}
+
+
+def generate_cross_cohort_report_weekly(
+    mixed_results: Optional[Dict] = None,
+    results_males: Optional[Dict] = None,
+    results_females: Optional[Dict] = None,
+    results_ca0: Optional[Dict] = None,
+    results_ca2: Optional[Dict] = None,
+    cohort_dfs: Optional[Dict[str, pd.DataFrame]] = None,
+    include_preamble: bool = True,
+    include_footer: bool = True,
+) -> str:
+    """
+    Generate a report for week-level cross-cohort analyses with Bonferroni corrections.
+
+    Uses Week (1–5) as the within-subjects factor rather than individual days.
+    This matches the design in non_ramp_analysis.py and is more conservative:
+    - Daily autocorrelation is averaged out within each animal-week
+    - Within-subjects degrees of freedom are greatly reduced (4 vs ~34)
+    - Only complete-record subjects are included
+
+    Bonferroni corrections applied across stratified test families:
+      - Sex-stratified (males + females, k=2): α_adj = 0.025
+        Corrects the Week × CA% interaction p-values
+      - CA%-stratified (0% + 2% CA, k=2): α_adj = 0.025
+        Corrects the Week × Sex interaction p-values
+
+    Parameters:
+        mixed_results: Results from perform_cross_cohort_mixed_anova_weekly()
+        results_males: Results from perform_mixed_anova_sex_stratified_weekly() for males
+        results_females: Results from perform_mixed_anova_sex_stratified_weekly() for females
+        results_ca0: Results from perform_mixed_anova_ca_stratified_weekly() for 0% CA
+        results_ca2: Results from perform_mixed_anova_ca_stratified_weekly() for 2% CA
+        cohort_dfs: Original cohort DataFrames for context
+
+    Returns:
+        Formatted string report
+    """
+    lines = []
+
+    # Determine the measure label for the per-measure section banner
+    _measure_label = "Unknown"
+    for _r in (mixed_results, results_males, results_females, results_ca0, results_ca2):
+        if _r and _r.get('measure'):
+            _measure_label = _r['measure']
+            break
+
+    def h1(text):
+        lines.append("=" * 80)
+        lines.append(text)
+        lines.append("=" * 80)
+
+    def h2(text):
+        lines.append(text)
+        lines.append("-" * 80)
+
+    def sig_stars(p):
+        if p < 0.001:
+            return "***"
+        if p < 0.01:
+            return "**"
+        if p < 0.05:
+            return "*"
+        return "ns"
+
+    def bonferroni(p, k):
+        return min(1.0, p * k)
+
+    # =========================================================================
+    # Preamble (title, methodology, study design) — printed once per report
+    # =========================================================================
+    if include_preamble:
+        h1("CROSS-COHORT STATISTICAL ANALYSIS REPORT — WEEK-LEVEL (CONSERVATIVE)")
+        lines.append("")
+    else:
+        # Inter-measure separator when preamble is suppressed
+        lines.append("\n" + "#" * 80)
+        lines.append("# NEW MEASURE SECTION (continued in same report)")
+        lines.append("#" * 80 + "\n")
+
+    # Per-measure banner (always shown)
+    lines.append("=" * 80)
+    lines.append(f"MEASURE: {_measure_label}")
+    lines.append("=" * 80)
+    lines.append("")
+
+    if include_preamble:
+        lines.append("METHODOLOGICAL NOTES")
+        lines.append("-" * 80)
+        lines.append("")
+        lines.append("This report uses a WEEK-LEVEL design to address two limitations of the")
+        lines.append("day-level (daily) analyses:")
+        lines.append("")
+        lines.append("  1. Inflated power from day-level resolution: With ~35 daily measurements")
+        lines.append("     as the within-subjects factor, the F-test for Time × Sex or Time × CA%")
+        lines.append("     interactions has very high degrees of freedom, detecting even transient")
+        lines.append("     day-to-day noise as 'significant'. Using Week (5 levels) drastically")
+        lines.append("     reduces within-subjects df and averages out day-to-day variability,")
+        lines.append("     mirroring the approach in non_ramp_analysis.py.")
+        lines.append("")
+        lines.append("  2. Multiple testing across stratified models: Running separate ANOVAs for")
+        lines.append("     each sex (k=2) and each CA% level (k=2) inflates the family-wise error")
+        lines.append("     rate. Bonferroni corrections are applied within each family:")
+        lines.append("       \u2022 Sex-stratified family (Males + Females, k=2): \u03b1_adj = 0.025")
+        lines.append("         Corrected p = min(1.0, raw_p \u00d7 2)")
+        lines.append("       \u2022 CA%-stratified family (0% + 2% CA, k=2): \u03b1_adj = 0.025")
+        lines.append("         Corrected p = min(1.0, raw_p \u00d7 2)")
+        lines.append("")
+        lines.append("  3. Complete-subject design: Animals missing data in any week are excluded,")
+        lines.append("     ensuring a balanced repeated-measures design.")
+        lines.append("")
+
+    # -------------------------------------------------------------------------
+    # Study design summary (only with preamble)
+    if include_preamble and cohort_dfs is not None:
+        h1("STUDY DESIGN")
+        lines.append("")
+        total_animals = 0
+        for label, df in cohort_dfs.items():
+            n = df['ID'].nunique() if 'ID' in df.columns else 0
+            total_animals += n
+            lines.append(f"  {label}: {n} animals")
+        lines.append(f"\n  Total animals: {total_animals}")
+
+        try:
+            combined = combine_cohorts_for_analysis(cohort_dfs)
+            combined = clean_cohort(combined)
+            if 'Sex' in combined.columns:
+                sex_counts = combined.groupby('Sex')['ID'].nunique()
+                lines.append("\n  Sex distribution:")
+                for sex, count in sex_counts.items():
+                    lines.append(f"    {sex}: {count} animals")
+            if 'CA (%)' in combined.columns:
+                ca_counts = combined.groupby('CA (%)')['ID'].nunique()
+                lines.append("\n  CA% distribution:")
+                for ca, count in ca_counts.items():
+                    lines.append(f"    {ca}%: {count} animals")
+        except Exception:
+            pass
+
+        lines.append("\n  Time factor: Week (1–5; one averaged value per animal per week)")
+        lines.append("  Between-subjects factors: CA% and Sex")
+        lines.append("  Incomplete subjects excluded (complete-subject design)")
+        lines.append("")
+
+    # -------------------------------------------------------------------------
+    # Omnibus mixed ANOVA
+    if mixed_results is not None:
+        h1("OMNIBUS WEEK-LEVEL MIXED ANOVA: Week (WITHIN) × Group (BETWEEN)")
+        lines.append("")
+        lines.append(f"  Measure         : {mixed_results.get('measure', 'Unknown')}")
+        lines.append(f"  Subjects        : {mixed_results.get('n_subjects', 'Unknown')}")
+        lines.append(f"  Weeks included  : {mixed_results.get('weeks', 'Unknown')}")
+        lines.append(f"  Observations    : {mixed_results.get('n_observations', 'Unknown')}")
+        lines.append(f"  Note: Group = CA% × Sex combined label")
+        lines.append("")
+
+        aov = mixed_results.get('anova_table')
+        if aov is not None:
+            h2("ANOVA Table")
+            lines.append(aov.to_string())
+            lines.append("")
+
+            p_col = 'p-unc' if 'p-unc' in aov.columns else 'p_unc'
+            h2("Interpretation")
+            lines.append("")
+            for i, (_, row) in enumerate(aov.iterrows(), start=1):
+                p = row[p_col]
+                sig = sig_stars(p)
+                sig_str = "SIGNIFICANT" if p < 0.05 else "NOT SIGNIFICANT"
+                lines.append(f"  {i}. {row['Source']}: {sig_str}")
+                lines.append(f"     F = {row['F']:.3f}, p = {p:.4f} {sig}")
+                if row['Source'] == 'Week':
+                    lines.append("     → Weight measure changes significantly across weeks" if p < 0.05
+                                 else "     → No significant week-to-week change overall")
+                elif row['Source'] == 'Group':
+                    lines.append("     → Groups (CA%/Sex combinations) differ overall" if p < 0.05
+                                 else "     → No significant difference between groups overall")
+                elif 'Week' in row['Source'] and 'Group' in row['Source']:
+                    lines.append("     → Trajectories differ between groups (different week-to-week patterns)" if p < 0.05
+                                 else "     → All groups follow similar week-to-week patterns")
+                lines.append("")
+
+        # Descriptive stats
+        desc = mixed_results.get('descriptive_stats')
+        if desc is not None and len(desc) > 0:
+            h2("Descriptive Statistics by Group")
+            for _, row in desc.iterrows():
+                lines.append(f"  CA%={row['CA (%)']}, Sex={row['Sex']}: "
+                             f"n={int(row['count'])}, M={row['mean']:.3f}, "
+                             f"SD={row['std']:.3f}, SEM={row['sem']:.3f}, "
+                             f"95% CI [{row['ci_lower']:.3f}, {row['ci_upper']:.3f}]")
+            lines.append("")
+
+    # -------------------------------------------------------------------------
+    # Helper: format a single stratified result block
+    def _format_stratified_result(result_dict, stratum_label, within_label,
+                                  between_label, interaction_source,
+                                  bonferroni_k, bonferroni_family_label):
+        if not result_dict:
+            lines.append(f"  [No results available for {stratum_label}]")
+            lines.append("")
+            return None  # return interaction p for summary table
+
+        aov = result_dict.get('anova_table')
+        lines.append(f"  Measure         : {result_dict.get('measure', 'Unknown')}")
+        lines.append(f"  Subjects        : {result_dict.get('n_subjects', 'Unknown')}")
+        lines.append(f"  Weeks included  : {result_dict.get('weeks', 'Unknown')}")
+        lines.append(f"  Observations    : {result_dict.get('n_observations', 'Unknown')}")
+        lines.append("")
+
+        if aov is not None:
+            h2("ANOVA Table")
+            lines.append(aov.to_string())
+            lines.append("")
+
+            p_col = 'p-unc' if 'p-unc' in aov.columns else 'p_unc'
+            h2("Interpretation (with Bonferroni correction)")
+            lines.append(f"  Bonferroni family: {bonferroni_family_label} (k={bonferroni_k}, α_adj = {0.05/bonferroni_k:.3f})")
+            lines.append("")
+
+            int_p_raw = None
+            for i, (_, row) in enumerate(aov.iterrows(), start=1):
+                p_raw = row[p_col]
+                sig_raw = sig_stars(p_raw)
+                src = row['Source']
+
+                # Apply Bonferroni only to the interaction term
+                if src == interaction_source:
+                    p_adj = bonferroni(p_raw, bonferroni_k)
+                    int_p_raw = p_raw
+                    sig_adj = sig_stars(p_adj)
+                    sig_str_adj = "SIGNIFICANT" if p_adj < 0.05 else "NOT SIGNIFICANT"
+                    lines.append(f"  {i}. {src}:")
+                    lines.append(f"     Raw p = {p_raw:.4f} ({sig_raw})")
+                    lines.append(f"     Bonferroni-corrected p = {p_adj:.4f} ({sig_adj})  ← USE THIS")
+                    lines.append(f"     Decision: {sig_str_adj} after correction")
+                    if src.startswith('CA') and 'Week' in src:
+                        lines.append("     → CA% levels follow different weekly trajectories" if p_adj < 0.05
+                                     else "     → Similar weekly trajectories across CA% levels")
+                    elif src.startswith('Sex') and 'Week' in src:
+                        lines.append("     → Males and females follow different weekly trajectories" if p_adj < 0.05
+                                     else "     → Similar weekly trajectories for both sexes")
+                else:
+                    sig_str = "SIGNIFICANT" if p_raw < 0.05 else "NOT SIGNIFICANT"
+                    lines.append(f"  {i}. {src}: {sig_str}")
+                    lines.append(f"     F = {row['F']:.3f}, p = {p_raw:.4f} {sig_raw}")
+                    if src == 'Week':
+                        lines.append("     → Weight changes significantly across weeks" if p_raw < 0.05
+                                     else "     → No significant week-to-week change")
+                    elif src in ('Sex', 'CA (%)'):
+                        lines.append("     → Groups differ overall (averaged across weeks)" if p_raw < 0.05
+                                     else "     → No significant group difference overall")
+                lines.append("")
+
+        # Descriptive stats
+        desc = result_dict.get('descriptive_stats')
+        if desc is not None and len(desc) > 0:
+            h2("Descriptive Statistics")
+            for _, row in desc.iterrows():
+                grp_cols = [c for c in ['CA (%)', 'Sex'] if c in row.index]
+                grp_str = ', '.join(f"{c}={row[c]}" for c in grp_cols)
+                lines.append(f"  {grp_str}: "
+                             f"n={int(row['count'])}, M={row['mean']:.3f}, "
+                             f"SD={row['std']:.3f}, SEM={row['sem']:.3f}, "
+                             f"95% CI [{row['ci_lower']:.3f}, {row['ci_upper']:.3f}]")
+            lines.append("")
+
+        return int_p_raw
+
+    # -------------------------------------------------------------------------
+    # Sex-stratified results (k=2 family)
+    h1("SEX-STRATIFIED WEEK-LEVEL MIXED ANOVA: Week (WITHIN) × CA% (BETWEEN)")
+    lines.append("")
+    lines.append("These two models form a Bonferroni family (k=2).")
+    lines.append("The Week × CA% interaction p-values are multiplied by 2 before")
+    lines.append("comparing to α = 0.05 (equivalent to requiring p_raw < 0.025).")
+    lines.append("")
+
+    lines.append("━" * 80)
+    lines.append("Males Only")
+    lines.append("━" * 80)
+    lines.append("")
+    males_int_p_raw = _format_stratified_result(
+        results_males, "Males", "Week", "CA (%)", "CA (%) * Week",
+        bonferroni_k=2, bonferroni_family_label="Males + Females"
+    )
+
+    lines.append("━" * 80)
+    lines.append("Females Only")
+    lines.append("━" * 80)
+    lines.append("")
+    females_int_p_raw = _format_stratified_result(
+        results_females, "Females", "Week", "CA (%)", "CA (%) * Week",
+        bonferroni_k=2, bonferroni_family_label="Males + Females"
+    )
+
+    # Sex-stratified comparison summary
+    if males_int_p_raw is not None and females_int_p_raw is not None:
+        h2("Sex-Stratified Comparison Summary (Week × CA% Interaction)")
+        lines.append("")
+        m_adj = bonferroni(males_int_p_raw, 2)
+        f_adj = bonferroni(females_int_p_raw, 2)
+        lines.append(f"  Males   : raw p = {males_int_p_raw:.4f},  Bonferroni p = {m_adj:.4f}"
+                     f"  {'← SIGNIFICANT' if m_adj < 0.05 else '← not significant'}")
+        lines.append(f"  Females : raw p = {females_int_p_raw:.4f},  Bonferroni p = {f_adj:.4f}"
+                     f"  {'← SIGNIFICANT' if f_adj < 0.05 else '← not significant'}")
+        lines.append("")
+        m_sig = m_adj < 0.05
+        f_sig = f_adj < 0.05
+        if m_sig and f_sig:
+            lines.append("  → BOTH sexes: week × CA% interaction significant after correction")
+            lines.append("    CA% shapes the weekly weight trajectory in both males and females")
+        elif m_sig and not f_sig:
+            lines.append("  → MALES ONLY: week × CA% interaction significant after correction")
+            lines.append("    CA% shapes the weekly weight trajectory in males but not females")
+        elif not m_sig and f_sig:
+            lines.append("  → FEMALES ONLY: week × CA% interaction significant after correction")
+            lines.append("    CA% shapes the weekly weight trajectory in females but not males")
+        else:
+            lines.append("  → NEITHER sex: week × CA% interaction significant after correction")
+            lines.append("    No differential CA% effect on weekly trajectories in either sex")
+        lines.append("")
+
+    # -------------------------------------------------------------------------
+    # CA%-stratified results (k=2 family)
+    h1("CA%-STRATIFIED WEEK-LEVEL MIXED ANOVA: Week (WITHIN) × Sex (BETWEEN)")
+    lines.append("")
+    lines.append("These two models form a Bonferroni family (k=2).")
+    lines.append("The Week × Sex interaction p-values are multiplied by 2 before")
+    lines.append("comparing to α = 0.05 (equivalent to requiring p_raw < 0.025).")
+    lines.append("")
+
+    lines.append("━" * 80)
+    lines.append("0% CA Only")
+    lines.append("━" * 80)
+    lines.append("")
+    ca0_int_p_raw = _format_stratified_result(
+        results_ca0, "0% CA", "Week", "Sex", "Sex * Week",
+        bonferroni_k=2, bonferroni_family_label="0% CA + 2% CA"
+    )
+
+    lines.append("━" * 80)
+    lines.append("2% CA Only")
+    lines.append("━" * 80)
+    lines.append("")
+    ca2_int_p_raw = _format_stratified_result(
+        results_ca2, "2% CA", "Week", "Sex", "Sex * Week",
+        bonferroni_k=2, bonferroni_family_label="0% CA + 2% CA"
+    )
+
+    # CA%-stratified comparison summary
+    if ca0_int_p_raw is not None and ca2_int_p_raw is not None:
+        h2("CA%-Stratified Comparison Summary (Week × Sex Interaction)")
+        lines.append("")
+        c0_adj = bonferroni(ca0_int_p_raw, 2)
+        c2_adj = bonferroni(ca2_int_p_raw, 2)
+        lines.append(f"  0% CA : raw p = {ca0_int_p_raw:.4f},  Bonferroni p = {c0_adj:.4f}"
+                     f"  {'← SIGNIFICANT' if c0_adj < 0.05 else '← not significant'}")
+        lines.append(f"  2% CA : raw p = {ca2_int_p_raw:.4f},  Bonferroni p = {c2_adj:.4f}"
+                     f"  {'← SIGNIFICANT' if c2_adj < 0.05 else '← not significant'}")
+        lines.append("")
+        c0_sig = c0_adj < 0.05
+        c2_sig = c2_adj < 0.05
+        if c0_sig and c2_sig:
+            lines.append("  → BOTH CA% levels: week × sex interaction significant after correction")
+            lines.append("    Males and females follow different weekly trajectories at both CA% levels")
+        elif c0_sig and not c2_sig:
+            lines.append("  → 0% CA ONLY: week × sex interaction significant after correction")
+            lines.append("    Sex differences in weekly trajectory exist only in 0% CA animals")
+        elif not c0_sig and c2_sig:
+            lines.append("  → 2% CA ONLY: week × sex interaction significant after correction")
+            lines.append("    Sex differences in weekly trajectory exist only in 2% CA animals")
+        else:
+            lines.append("  → NEITHER CA% level: week × sex interaction significant after correction")
+            lines.append("    The day-level significance in 0% CA does not survive at the week level")
+            lines.append("    after Bonferroni correction, suggesting it was driven by day-to-day noise")
+        lines.append("")
+
+    # -------------------------------------------------------------------------
+    # Master summary table
+    h1("SUMMARY TABLE — ALL KEY INTERACTION P-VALUES")
+    lines.append("")
+    lines.append("  All interaction terms from the stratified week-level models.")
+    lines.append("  Bonferroni k=2 within each family; * = significant at α=0.05 after correction.")
+    lines.append("")
+    lines.append(f"  {'Analysis':<45} {'Raw p':>9}  {'Bonf. p':>9}  {'Decision'}")
+    lines.append("  " + "-" * 76)
+
+    def _summary_row(label, p_raw, k):
+        if p_raw is None:
+            lines.append(f"  {label:<45} {'N/A':>9}  {'N/A':>9}  N/A")
+            return
+        p_adj = bonferroni(p_raw, k)
+        decision = "SIGNIFICANT *" if p_adj < 0.05 else "not significant"
+        lines.append(f"  {label:<45} {p_raw:>9.4f}  {p_adj:>9.4f}  {decision}")
+
+    _summary_row("Week × CA% (Males)",      males_int_p_raw,   2)
+    _summary_row("Week × CA% (Females)",    females_int_p_raw, 2)
+    _summary_row("Week × Sex  (0% CA)",     ca0_int_p_raw,     2)
+    _summary_row("Week × Sex  (2% CA)",     ca2_int_p_raw,     2)
+    lines.append("")
+
+    # -------------------------------------------------------------------------
+    if include_footer:
+        h1("END OF WEEK-LEVEL REPORT")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # =============================================================================
@@ -3321,8 +5008,11 @@ if __name__ == "__main__":
         print("  5. All analyses + comprehensive report")
         print("  6. Generate weight plots (6 plots: Total/Daily Change by ID, Sex, CA%)")
         print("  7. All analyses + report + plots")
+        print("  8. Generate INTERACTION PLOTS for significant interactions")
+        print("  9. All analyses + report + all plots (weight + interactions)")
+        print(" 10. Week-level conservative analyses + auto-save reports (all measures, Bonferroni-corrected)")
         
-        user_input = input("\nSelect option (1-7) or 'n' to skip: ")
+        user_input = input("\nSelect option (1-10) or 'n' to skip: ")
         
         mixed_results = None
         between_final_results = None
@@ -3333,8 +5023,9 @@ if __name__ == "__main__":
         results_ca0 = None
         results_ca2 = None
         plot_figures = {}
+        interaction_figures = {}
         
-        if user_input == '1' or user_input == '5' or user_input == '7':
+        if user_input == '1' or user_input == '5' or user_input == '7' or user_input == '8' or user_input == '9':
             # Run mixed ANOVA
             mixed_results = perform_cross_cohort_mixed_anova(
                 cohorts,
@@ -3356,7 +5047,7 @@ if __name__ == "__main__":
             except ValueError:
                 print("Invalid day number, skipping...")
         
-        if user_input == '3' or user_input == '5' or user_input == '7':
+        if user_input == '3' or user_input == '5' or user_input == '7' or user_input == '8' or user_input == '9':
             # Run between-subjects ANOVA averaged across days
             between_avg_results = perform_between_subjects_anova(
                 cohorts,
@@ -3365,7 +5056,7 @@ if __name__ == "__main__":
                 ss_type=3
             )
         
-        if user_input == '4' or user_input == '5' or user_input == '7':
+        if user_input == '4' or user_input == '5' or user_input == '7' or user_input == '9':
             # Run daily between-subjects ANOVA
             daily_results = perform_daily_between_subjects_anova(
                 cohorts,
@@ -3374,7 +5065,13 @@ if __name__ == "__main__":
             )
         
         # Run stratified mixed ANOVAs for comprehensive analysis
-        if user_input == '5' or user_input == '7':
+        if user_input == '5' or user_input == '7' or user_input == '8' or user_input == '9':
+            # Initialize results variables
+            results_males = None
+            results_females = None
+            results_ca0 = None
+            results_ca2 = None
+            
             # Sex-stratified analyses
             print("\n" + "="*80)
             print("RUNNING SEX-STRATIFIED ANALYSES")
@@ -3416,8 +5113,49 @@ if __name__ == "__main__":
                     measure="Total Change"
                 )
         
-        # Generate plots
-        if user_input == '6' or user_input == '7':
+        # Generate interaction plots for significant interactions
+        if user_input == '8' or user_input == '9':
+            if not HAS_MATPLOTLIB:
+                print("\n[WARNING] matplotlib not available - cannot generate interaction plots")
+            else:
+                print("\n" + "="*80)
+                print("GENERATING INTERACTION PLOTS")
+                print("="*80)
+                
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                plot_dir = Path(f"interaction_plots_{timestamp}")
+                plot_dir.mkdir(exist_ok=True)
+                
+                # Automatically generate all significant interaction plots
+                interaction_figures = plot_all_significant_interactions(
+                    between_results=between_avg_results,
+                    mixed_results=mixed_results,
+                    sex_stratified_results={'males': results_males, 'females': results_females},
+                    ca_stratified_results={0.0: results_ca0, 2.0: results_ca2},
+                    save_dir=plot_dir,
+                    show=False  # Don't show immediately, will prompt later
+                )
+                
+                if len(interaction_figures) > 0:
+                    print(f"\n[OK] Generated {len(interaction_figures)} interaction plot(s)")
+                    print(f"[OK] Plots saved to: {plot_dir}")
+                    
+                    # Show plots if user wants
+                    show_plots = input("\nDisplay interaction plots now? (y/n): ")
+                    if show_plots.lower() == 'y':
+                        plt.show()  # Show all open figures
+                    else:
+                        # Close all figures
+                        plt.close('all')
+                else:
+                    print("\n[INFO] No significant interactions found to plot")
+                    # Only remove directory if it's empty
+                    if plot_dir.exists() and not any(plot_dir.iterdir()):
+                        plot_dir.rmdir()
+        
+        # Generate weight plots
+        if user_input == '6' or user_input == '7' or user_input == '9':
             if not HAS_MATPLOTLIB:
                 print("\n[WARNING] matplotlib not available - cannot generate plots")
             else:
@@ -3489,7 +5227,7 @@ if __name__ == "__main__":
                         plt.close(fig)
         
         # Generate comprehensive report if any results exist
-        if user_input == '5' or user_input == '7':
+        if user_input == '5' or user_input == '7' or user_input == '9':
             if mixed_results or between_avg_results or daily_results:
                 print("\n" + "="*80)
                 print("GENERATING COMPREHENSIVE REPORT")
@@ -3519,8 +5257,90 @@ if __name__ == "__main__":
             else:
                 print("\n[WARNING] No analysis results to include in report")
         
+        # --- Option 10: Week-level conservative analyses (all measures, Bonferroni-corrected) ---
+        if user_input == '10':
+            print("\n" + "="*80)
+            print("RUNNING WEEK-LEVEL ANALYSES (ALL MEASURES, BONFERRONI-CORRECTED)")
+            print("="*80)
+            
+            measures_to_run = ["Total Change", "Daily Change"]
+            
+            # Check which measures are available in the data
+            combined_temp = combine_cohorts_for_analysis(cohorts)
+            available_measures = [m for m in measures_to_run if m in combined_temp.columns]
+            print(f"\n  Available measures: {available_measures}")
+            
+            ca_levels_avail = sorted(combined_temp['CA (%)'].dropna().unique())
+            print(f"  Available CA% levels: {ca_levels_avail}")
+            
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            all_measure_sections = []
+            for i, measure in enumerate(available_measures):
+                is_first = (i == 0)
+                is_last  = (i == len(available_measures) - 1)
+
+                print(f"\n{'='*80}")
+                print(f"MEASURE: {measure}")
+                print(f"{'='*80}")
+                
+                w_mixed = None
+                w_males = None
+                w_females = None
+                w_ca0 = None
+                w_ca2 = None
+                
+                try:
+                    w_mixed = perform_cross_cohort_mixed_anova_weekly(cohorts, measure=measure)
+                except Exception as e:
+                    print(f"  [WARNING] Omnibus week-level ANOVA failed for {measure}: {e}")
+                
+                try:
+                    w_males = perform_mixed_anova_sex_stratified_weekly(cohorts, sex="M", measure=measure)
+                except Exception as e:
+                    print(f"  [WARNING] Sex-stratified (Males) week ANOVA failed for {measure}: {e}")
+                
+                try:
+                    w_females = perform_mixed_anova_sex_stratified_weekly(cohorts, sex="F", measure=measure)
+                except Exception as e:
+                    print(f"  [WARNING] Sex-stratified (Females) week ANOVA failed for {measure}: {e}")
+                
+                if 0.0 in ca_levels_avail or 0 in ca_levels_avail:
+                    try:
+                        w_ca0 = perform_mixed_anova_ca_stratified_weekly(cohorts, ca_percent=0, measure=measure)
+                    except Exception as e:
+                        print(f"  [WARNING] CA%-stratified (0%) week ANOVA failed for {measure}: {e}")
+                
+                if 2.0 in ca_levels_avail or 2 in ca_levels_avail:
+                    try:
+                        w_ca2 = perform_mixed_anova_ca_stratified_weekly(cohorts, ca_percent=2, measure=measure)
+                    except Exception as e:
+                        print(f"  [WARNING] CA%-stratified (2%) week ANOVA failed for {measure}: {e}")
+                
+                section = generate_cross_cohort_report_weekly(
+                    mixed_results=w_mixed,
+                    results_males=w_males,
+                    results_females=w_females,
+                    results_ca0=w_ca0,
+                    results_ca2=w_ca2,
+                    cohort_dfs=cohorts if is_first else None,
+                    include_preamble=is_first,
+                    include_footer=is_last,
+                )
+                all_measure_sections.append(section)
+                print("\n" + section)
+            
+            # Combine all measures into one report and save a single file
+            combined_report = "\n\n".join(all_measure_sections)
+            report_file = Path(f"cross_cohort_WEEKLY_all_measures_{timestamp}.txt")
+            report_file.write_text(combined_report, encoding='utf-8')
+            print(f"\n{'='*80}")
+            print(f"[OK] Combined weekly report saved to: {report_file}")
+            print(f"{'='*80}")
+        
         # Summary of what was run
-        if mixed_results or between_final_results or between_avg_results or daily_results or results_males or results_females or results_ca0 or results_ca2 or plot_figures:
+        if mixed_results or between_final_results or between_avg_results or daily_results or results_males or results_females or results_ca0 or results_ca2 or plot_figures or interaction_figures:
             print("\n" + "="*80)
             print("ANALYSIS COMPLETE!")
             print("="*80)
@@ -3567,6 +5387,11 @@ if __name__ == "__main__":
                 print(f"\n[✓] Weight Plots Generated")
                 print(f"    Number of plots: {len(plot_figures)}")
                 print(f"    Plots: {', '.join(plot_figures.keys())}")
+            
+            if interaction_figures:
+                print(f"\n[✓] Interaction Plots Generated")
+                print(f"    Number of plots: {len(interaction_figures)}")
+                print(f"    Plots: {', '.join(interaction_figures.keys())}")
         
         print("\n" + "="*80)
         print("NEXT STEPS")
@@ -3587,7 +5412,13 @@ if __name__ == "__main__":
         print("\n  6. CA%-Stratified Mixed ANOVA (Time × Sex, holding CA% constant):")
         print("     results_ca0 = perform_mixed_anova_ca_stratified(cohorts, ca_percent=0, measure='Total Change')")
         print("     results_ca2 = perform_mixed_anova_ca_stratified(cohorts, ca_percent=2, measure='Total Change')")
-        print("\n  7. Generate comprehensive report:")
+        print("\n  7. Generate INTERACTION PLOTS automatically:")
+        print("     interaction_figs = plot_all_significant_interactions(")
+        print("         between_results=results_avg, mixed_results=results_mixed,")
+        print("         sex_stratified_results={'males': results_males, 'females': results_females},")
+        print("         ca_stratified_results={0.0: results_ca0, 2.0: results_ca2},")
+        print("         save_dir=Path('interaction_plots'), show=True)")
+        print("\n  8. Generate comprehensive report:")
         print("     report = generate_cross_cohort_report(")
         print("         between_results=results_avg, mixed_results=results_mixed,")
         print("         daily_results=results_daily,")
@@ -3595,7 +5426,7 @@ if __name__ == "__main__":
         print("         results_ca0=results_ca0, results_ca2=results_ca2,")
         print("         cohort_dfs=cohorts)")
         print("     print(report)")
-        print("\n  8. Generate weight plots:")
+        print("\n  9. Generate weight plots:")
         print("     # First combine cohorts")
         print("     combined = combine_cohorts_for_analysis(cohorts)")
         print("     combined = clean_cohort(combined)")
@@ -3608,4 +5439,15 @@ if __name__ == "__main__":
         print("     fig4 = plot_daily_change_by_sex(combined)")
         print("     fig5 = plot_total_change_by_ca(combined)")
         print("     fig6 = plot_daily_change_by_ca(combined)")
+        print("\n 10. Week-level conservative analyses (all measures, Bonferroni-corrected):")
+        print("     # Runs for each of: Total Change, Daily Change, Weight")
+        print("     # Two separate report files: cross_cohort_WEEKLY_<measure>_<timestamp>.txt")
+        print("     w_males   = perform_mixed_anova_sex_stratified_weekly(cohorts, sex='M', measure='Total Change')")
+        print("     w_females = perform_mixed_anova_sex_stratified_weekly(cohorts, sex='F', measure='Total Change')")
+        print("     w_ca0     = perform_mixed_anova_ca_stratified_weekly(cohorts, ca_percent=0, measure='Total Change')")
+        print("     w_ca2     = perform_mixed_anova_ca_stratified_weekly(cohorts, ca_percent=2, measure='Total Change')")
+        print("     report_w  = generate_cross_cohort_report_weekly(")
+        print("         mixed_results=perform_cross_cohort_mixed_anova_weekly(cohorts),")
+        print("         results_males=w_males, results_females=w_females,")
+        print("         results_ca0=w_ca0, results_ca2=w_ca2, cohort_dfs=cohorts)")
         print("="*80)
