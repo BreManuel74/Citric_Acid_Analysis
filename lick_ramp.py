@@ -1976,6 +1976,7 @@ def perform_frontloading_anova(weekly_averages: Dict) -> Dict:
     """
     Perform ONE-WAY REPEATED MEASURES ANOVA for front-loading measures:
     - % of licks in first 5 minutes
+    - % of bouts in first 5 minutes
     - Time to 50% of total licks (minutes)
     
     Within-subjects factor: CA% (repeated measures across concentrations)
@@ -2017,11 +2018,13 @@ def perform_frontloading_anova(weekly_averages: Dict) -> Dict:
             animal_ids = [f"Animal_{i+1}" for i in range(len(data.get('first_5min_lick_pcts_per_animal', [])))]
         
         first_5min_pcts = data.get('first_5min_lick_pcts_per_animal', [])
+        first_5min_bout_pcts = data.get('first_5min_bout_pcts_per_animal', [])
         time_to_50pct = data.get('time_to_50pct_licks_per_animal', [])
         
         for i, animal_id in enumerate(animal_ids):
             # Get front-loading metrics
             first_5min_val = first_5min_pcts[i] if i < len(first_5min_pcts) else np.nan
+            first_5min_bout_val = first_5min_bout_pcts[i] if i < len(first_5min_bout_pcts) else np.nan
             time_50pct_val = time_to_50pct[i] if i < len(time_to_50pct) else np.nan
             
             long_data.append({
@@ -2029,6 +2032,7 @@ def perform_frontloading_anova(weekly_averages: Dict) -> Dict:
                 'CA_Percent': ca_percent,
                 'Date': date,
                 'first_5min_lick_pct': first_5min_val,
+                'first_5min_bout_pct': first_5min_bout_val,
                 'time_to_50pct': time_50pct_val
             })
     
@@ -2040,9 +2044,10 @@ def perform_frontloading_anova(weekly_averages: Dict) -> Dict:
     
     # Perform repeated measures ANOVA for each front-loading measure
     anova_results = {}
-    measures = ['first_5min_lick_pct', 'time_to_50pct']
+    measures = ['first_5min_lick_pct', 'first_5min_bout_pct', 'time_to_50pct']
     measure_names = {
         'first_5min_lick_pct': '% Licks in First 5 Minutes',
+        'first_5min_bout_pct': '% Bouts in First 5 Minutes',
         'time_to_50pct': 'Time to 50% of Total Licks (min)'
     }
     
@@ -2218,6 +2223,7 @@ def perform_frontloading_tukey_hsd(anova_results: Dict, weekly_averages: Dict) -
     For repeated measures ANOVA with significant CA% effects, performs pairwise
     comparisons across CA% levels for:
     - % of licks in first 5 minutes
+    - % of bouts in first 5 minutes
     - Time to 50% of total licks (minutes)
     
     Note: For repeated measures data, this is an approximation. Proper RM post-hoc
@@ -2249,6 +2255,7 @@ def perform_frontloading_tukey_hsd(anova_results: Dict, weekly_averages: Dict) -
             # Map measure name to data key in weekly_averages
             measure_to_key = {
                 'first_5min_lick_pct': 'first_5min_lick_pcts_per_animal',
+                'first_5min_bout_pct': 'first_5min_bout_pcts_per_animal',
                 'time_to_50pct': 'time_to_50pct_licks_per_animal'
             }
             
@@ -2427,9 +2434,10 @@ def save_frontloading_analysis_to_file(weekly_averages: Dict, anova_output: str,
         f.write("=" * 80 + "\n")
         f.write(f"Generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write("\n")
-        f.write("This report analyzes front-loading behavior using two metrics:\n")
+        f.write("This report analyzes front-loading behavior using three metrics:\n")
         f.write("1. % of Licks in First 5 Minutes\n")
-        f.write("2. Time to Reach 50% of Total Licks (minutes)\n")
+        f.write("2. % of Bouts in First 5 Minutes\n")
+        f.write("3. Time to Reach 50% of Total Licks (minutes)\n")
         f.write("\n")
         f.write("=" * 80 + "\n")
         f.write("\n")
@@ -2456,6 +2464,23 @@ def save_frontloading_analysis_to_file(weekly_averages: Dict, anova_output: str,
             ca_pct = data['ca_percent']
             
             f.write(f"{i:<8} {date:<12} {ca_pct:<8.1f} {mean_pct:<12.2f} {std_pct:<12.2f} {sem_pct:<12.2f} {min_pct:<12.2f} {max_pct:<12.2f}\n")
+        
+        f.write("\n\n")
+        f.write("% OF BOUTS IN FIRST 5 MINUTES:\n")
+        f.write(f"{'Week':<8} {'Date':<12} {'CA%':<8} {'Mean':<12} {'Std':<12} {'SEM':<12} {'Min':<12} {'Max':<12}\n")
+        f.write("-" * 80 + "\n")
+        
+        for i, date in enumerate(sorted_dates, 1):
+            data = weekly_averages[date]
+            bout_pcts = data.get('first_5min_bout_pcts_per_animal', np.array([]))
+            mean_bout_pct = data.get('avg_first_5min_bout_pct', np.nan)
+            std_bout_pct = data.get('std_first_5min_bout_pct', np.nan)
+            sem_bout_pct = data.get('sem_first_5min_bout_pct', np.nan)
+            min_bout_pct = np.min(bout_pcts) if len(bout_pcts) > 0 else np.nan
+            max_bout_pct = np.max(bout_pcts) if len(bout_pcts) > 0 else np.nan
+            ca_pct = data['ca_percent']
+            
+            f.write(f"{i:<8} {date:<12} {ca_pct:<8.1f} {mean_bout_pct:<12.2f} {std_bout_pct:<12.2f} {sem_bout_pct:<12.2f} {min_bout_pct:<12.2f} {max_bout_pct:<12.2f}\n")
         
         f.write("\n\n")
         f.write("TIME TO 50% OF TOTAL LICKS (MINUTES):\n")
@@ -3092,6 +3117,299 @@ def plot_first_5min_by_week_with_lines(
     for i, (bar, ca_pct) in enumerate(zip(bars, ca_percents)):
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height + sem_pcts[i] + 1,
+               f'{ca_pct}% CA',
+               ha='center', va='bottom', fontsize=9, weight='bold')
+    
+    # Add sample size annotation
+    n_animals = len(animal_trajectories)
+    ax.text(0.98, 0.02, f'n={n_animals} mice tracked across weeks', transform=ax.transAxes,
+           ha='right', va='bottom', fontsize=10, style='italic',
+           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+    
+    plt.tight_layout()
+    
+    print(f"\nPlot created with {n_weeks} weeks and {n_animals} individual mouse trajectories")
+    print("=" * 80 + "\n")
+    
+    # Save if requested
+    if save_path:
+        fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+        print(f"Figure saved to: {save_path}")
+    
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    
+    return fig
+
+
+def plot_first_5min_bouts_by_week(
+    weekly_averages: Dict,
+    save_path: Optional[Path] = None,
+    show: bool = True
+) -> plt.Figure:
+    """Create bar plot showing percentage of bouts in first 5 minutes for each week.
+    
+    In the ramp design, all mice experience the same CA% in each week, with concentration
+    increasing across weeks. This creates a single plot with one bar per week showing
+    average percentage with individual mouse data points overlaid and SEM error bars.
+    
+    Parameters:
+        weekly_averages: Dictionary from compute_weekly_averages
+        save_path: Optional path to save the figure
+        show: Whether to display the plot
+        
+    Returns:
+        The matplotlib figure object
+    """
+    print("\n" + "=" * 80)
+    print("PLOTTING: First 5-Minute Bout Percentage by Week")
+    print("=" * 80)
+    
+    # Sort dates chronologically to get proper week order
+    sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+    n_weeks = len(sorted_dates)
+    
+    if n_weeks == 0:
+        print("ERROR: No data found in weekly_averages.")
+        return None
+    
+    print(f"Found {n_weeks} weeks of data")
+    
+    # Extract data for each week
+    week_labels = []
+    ca_percents = []
+    avg_bout_pcts = []
+    sem_bout_pcts = []
+    individual_data = []
+    
+    for i, date in enumerate(sorted_dates):
+        data = weekly_averages[date]
+        week_labels.append(f"Week {i+1}")
+        ca_percents.append(data['ca_percent'])
+        avg_bout_pcts.append(data['avg_first_5min_bout_pct'])
+        
+        # Calculate SEM
+        individual_bout_pcts = data['first_5min_bout_pcts_per_animal']
+        individual_data.append(individual_bout_pcts)
+        n = len(individual_bout_pcts)
+        sem = data['std_first_5min_bout_pct'] / np.sqrt(n) if n > 0 else 0
+        sem_bout_pcts.append(sem)
+        
+        print(f"  Week {i+1} ({data['ca_percent']}% CA): avg={avg_bout_pcts[-1]:.2f}%, SEM={sem:.2f}%, n={n}")
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Define colors based on CA% - gradient from green shades
+    ca_colors = []
+    for ca in ca_percents:
+        if ca == 0:
+            ca_colors.append('seagreen')
+        elif ca <= 1.0:
+            ca_colors.append('mediumseagreen')
+        elif ca <= 2.0:
+            ca_colors.append('lightseagreen')
+        elif ca <= 3.0:
+            ca_colors.append('darkseagreen')
+        else:
+            ca_colors.append('palegreen')
+    
+    x_positions = np.arange(n_weeks)
+    bar_width = 0.6
+    
+    # Plot bars
+    bars = ax.bar(x_positions, avg_bout_pcts, bar_width,
+                 color=ca_colors, alpha=0.7, edgecolor='black', linewidth=1.5)
+    
+    # Add error bars
+    ax.errorbar(x_positions, avg_bout_pcts, yerr=sem_bout_pcts,
+               fmt='none', ecolor='black', capsize=5, linewidth=2, capthick=2)
+    
+    # Overlay individual mouse data points
+    jitter_amount = 0.15
+    np.random.seed(42)  # For reproducibility
+    
+    for i, individual_bout_pcts in enumerate(individual_data):
+        jitter = np.random.uniform(-jitter_amount, jitter_amount, len(individual_bout_pcts))
+        ax.scatter([x_positions[i]] * len(individual_bout_pcts) + jitter, individual_bout_pcts,
+                  color='black', s=40, alpha=0.7, edgecolors='black', linewidths=0.5, zorder=10)
+    
+    # Formatting
+    ax.set_xlabel('Week', fontsize=12, weight='bold')
+    ax.set_ylabel('% of Bouts in First 5 Minutes', fontsize=12, weight='bold')
+    ax.set_title('Percentage of Bouts in First 5 Minutes Across Weeks\n(CA% Ramp Design)',
+                fontsize=14, weight='bold')
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(week_labels)
+    ax.set_ylim(bottom=0)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # Add CA% labels on bars
+    for i, (bar, ca_pct) in enumerate(zip(bars, ca_percents)):
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height + sem_bout_pcts[i] + 1,
+               f'{ca_pct}% CA',
+               ha='center', va='bottom', fontsize=9, weight='bold')
+    
+    # Add sample size annotation
+    n_animals = len(individual_data[0]) if individual_data else 0
+    ax.text(0.98, 0.02, f'n={n_animals} mice per week', transform=ax.transAxes,
+           ha='right', va='bottom', fontsize=10, style='italic',
+           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+    
+    plt.tight_layout()
+    
+    print(f"\nPlot created with {n_weeks} weeks")
+    print("=" * 80 + "\n")
+    
+    # Save if requested
+    if save_path:
+        fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+        print(f"Figure saved to: {save_path}")
+    
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    
+    return fig
+
+
+def plot_first_5min_bouts_by_week_with_lines(
+    weekly_averages: Dict,
+    save_path: Optional[Path] = None,
+    show: bool = True
+) -> plt.Figure:
+    """Create bar plot with individual mouse trajectories for bout percentages connected by lines across weeks.
+    
+    Shows bars for weekly averages plus lines connecting each individual mouse's data
+    across weeks in the ramp design (increasing CA% concentrations).
+    
+    Parameters:
+        weekly_averages: Dictionary from compute_weekly_averages
+        save_path: Optional path to save the figure
+        show: Whether to display the plot
+        
+    Returns:
+        The matplotlib figure object
+    """
+    print("\n" + "=" * 80)
+    print("PLOTTING: First 5-Minute Bout Percentage by Week (with Individual Trajectories)")
+    print("=" * 80)
+    
+    # Sort dates chronologically to get proper week order
+    sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+    n_weeks = len(sorted_dates)
+    
+    if n_weeks == 0:
+        print("ERROR: No data found in weekly_averages.")
+        return None
+    
+    print(f"Found {n_weeks} weeks of data")
+    
+    # Extract data for each week and track individual animals
+    week_labels = []
+    ca_percents = []
+    avg_bout_pcts = []
+    sem_bout_pcts = []
+    animal_ids_by_week = []
+    individual_data_by_week = []
+    
+    for i, date in enumerate(sorted_dates):
+        data = weekly_averages[date]
+        week_labels.append(f"Week {i+1}")
+        ca_percents.append(data['ca_percent'])
+        avg_bout_pcts.append(data['avg_first_5min_bout_pct'])
+        
+        # Get individual animal data and IDs
+        individual_bout_pcts = data['first_5min_bout_pcts_per_animal']
+        animal_ids = data.get('animal_ids', [f"Animal_{j+1}" for j in range(len(individual_bout_pcts))])
+        
+        individual_data_by_week.append(individual_bout_pcts)
+        animal_ids_by_week.append(animal_ids)
+        
+        n = len(individual_bout_pcts)
+        sem = data['std_first_5min_bout_pct'] / np.sqrt(n) if n > 0 else 0
+        sem_bout_pcts.append(sem)
+        
+        print(f"  Week {i+1} ({data['ca_percent']}% CA): avg={avg_bout_pcts[-1]:.2f}%, SEM={sem:.2f}%, n={n}")
+    
+    # Build a mapping of animal ID to its trajectory across weeks
+    animal_trajectories = {}
+    
+    for week_idx, (animal_ids, individual_bout_pcts) in enumerate(zip(animal_ids_by_week, individual_data_by_week)):
+        for animal_id, bout_pct in zip(animal_ids, individual_bout_pcts):
+            if animal_id not in animal_trajectories:
+                animal_trajectories[animal_id] = []
+            animal_trajectories[animal_id].append((week_idx, bout_pct))
+    
+    print(f"\nTracking {len(animal_trajectories)} individual animals across {n_weeks} weeks")
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(12, 7))
+    
+    # Define colors based on CA% - gradient from green shades
+    ca_colors = []
+    for ca in ca_percents:
+        if ca == 0:
+            ca_colors.append('seagreen')
+        elif ca <= 1.0:
+            ca_colors.append('mediumseagreen')
+        elif ca <= 2.0:
+            ca_colors.append('lightseagreen')
+        elif ca <= 3.0:
+            ca_colors.append('darkseagreen')
+        else:
+            ca_colors.append('palegreen')
+    
+    x_positions = np.arange(n_weeks)
+    bar_width = 0.6
+    
+    # Plot bars
+    bars = ax.bar(x_positions, avg_bout_pcts, bar_width,
+                 color=ca_colors, alpha=0.7, edgecolor='black', linewidth=1.5, zorder=5)
+    
+    # Add error bars
+    ax.errorbar(x_positions, avg_bout_pcts, yerr=sem_bout_pcts,
+               fmt='none', ecolor='black', capsize=5, linewidth=2, capthick=2, zorder=6)
+    
+    # Plot individual animal trajectories with lines
+    cmap = plt.cm.tab20  # Colormap with 20 distinct colors
+    colors = [cmap(i % 20) for i in range(len(animal_trajectories))]
+    
+    for idx, (animal_id, trajectory) in enumerate(animal_trajectories.items()):
+        # Sort trajectory by week index
+        trajectory.sort(key=lambda x: x[0])
+        
+        if len(trajectory) > 1:  # Only draw lines if animal appears in multiple weeks
+            weeks = [t[0] for t in trajectory]
+            bout_pcts = [t[1] for t in trajectory]
+            
+            # Draw line connecting this animal's data points
+            ax.plot(weeks, bout_pcts, color=colors[idx], alpha=0.4, linewidth=1.5, zorder=3)
+            
+            # Draw markers for this animal's data points
+            ax.scatter(weeks, bout_pcts, color=colors[idx], s=50, alpha=0.7, 
+                      edgecolors='black', linewidths=0.8, zorder=9)
+    
+    # Formatting
+    ax.set_xlabel('Week', fontsize=12, weight='bold')
+    ax.set_ylabel('% of Bouts in First 5 Minutes', fontsize=12, weight='bold')
+    ax.set_title('Individual Mouse Trajectories of Bout Percentage Across Weeks\n(CA% Ramp Design)',
+                fontsize=14, weight='bold')
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(week_labels)
+    ax.set_ylim(bottom=0)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # Add CA% labels on bars
+    for i, (bar, ca_pct) in enumerate(zip(bars, ca_percents)):
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height + sem_bout_pcts[i] + 1,
                f'{ca_pct}% CA',
                ha='center', va='bottom', fontsize=9, weight='bold')
     
@@ -4046,6 +4364,14 @@ def main():
     print("\nPlotting percentage of licks in first 5 minutes by week (with mouse trajectories)...")
     plot_first_5min_by_week_with_lines(weekly_averages, show=True)
     
+    # Plot bout percentage in first 5 minutes by week
+    print("\nPlotting percentage of bouts in first 5 minutes by week...")
+    plot_first_5min_bouts_by_week(weekly_averages, show=True)
+    
+    # Plot bout percentage in first 5 minutes by week with individual mouse trajectories
+    print("\nPlotting percentage of bouts in first 5 minutes by week (with mouse trajectories)...")
+    plot_first_5min_bouts_by_week_with_lines(weekly_averages, show=True)
+    
     # Plot time to 50% of total licks by week
     print("\nPlotting time to 50% of total licks by week...")
     plot_time_to_50pct_by_week(weekly_averages, show=True)
@@ -4133,6 +4459,24 @@ def main():
         if fig_5min_lines:
             plt.close(fig_5min_lines)
             print(f"Saved first 5-minute percentage plot with trajectories to: {save_path_5min_lines}")
+    
+    # Optional: Save bout percentage in first 5 minutes plot
+    save_bout_5min = input("\nSave percentage of bouts in first 5 minutes plot as SVG? (y/n): ").strip().lower()
+    if save_bout_5min in ['y', 'yes']:
+        save_path_bout_5min = master_csv.parent / "first_5min_bout_percentage_by_week.svg"
+        fig_bout_5min = plot_first_5min_bouts_by_week(weekly_averages, save_path=save_path_bout_5min, show=False)
+        if fig_bout_5min:
+            plt.close(fig_bout_5min)
+            print(f"Saved bout percentage plot to: {save_path_bout_5min}")
+    
+    # Optional: Save bout percentage in first 5 minutes plot with trajectories
+    save_bout_5min_lines = input("\nSave percentage of bouts in first 5 minutes plot with mouse trajectories as SVG? (y/n): ").strip().lower()
+    if save_bout_5min_lines in ['y', 'yes']:
+        save_path_bout_5min_lines = master_csv.parent / "first_5min_bout_percentage_by_week_with_trajectories.svg"
+        fig_bout_5min_lines = plot_first_5min_bouts_by_week_with_lines(weekly_averages, save_path=save_path_bout_5min_lines, show=False)
+        if fig_bout_5min_lines:
+            plt.close(fig_bout_5min_lines)
+            print(f"Saved bout percentage plot with trajectories to: {save_path_bout_5min_lines}")
     
     # Optional: Save time to 50% plot
     save_time_50pct = input("\nSave time to 50% of total licks plot as SVG? (y/n): ").strip().lower()

@@ -263,6 +263,49 @@ def detect_events_above_threshold(df: pd.DataFrame, sensor_cols: List[str], thre
     return result
 
 
+def calculate_time_to_50_percent_licks(events_df: pd.DataFrame, sensor_col: str) -> float:
+    """Calculate the time (in minutes) when a sensor reaches 50% of its total licks.
+    
+    Parameters:
+        events_df: DataFrame with Time_sec and event columns
+        sensor_col: Sensor column name (e.g., 'Sensor_1')
+        
+    Returns:
+        Time in minutes when 50% of total licks is reached, or np.nan if no licks
+    """
+    event_col = f"{sensor_col}_event"
+    
+    if event_col not in events_df.columns:
+        return np.nan
+    
+    # Get all event times for this sensor
+    event_times = events_df[events_df[event_col]]['Time_sec'].values
+    
+    if len(event_times) == 0:
+        return np.nan
+    
+    # Sort times (should already be sorted, but just in case)
+    event_times = np.sort(event_times)
+    
+    # Calculate total licks and 50% threshold
+    total_licks = len(event_times)
+    licks_at_50_percent = total_licks / 2.0
+    
+    # Find the index where cumulative licks reaches 50%
+    # If total is 100, we want time at lick #50
+    idx_50_percent = int(np.ceil(licks_at_50_percent)) - 1  # -1 for 0-indexing
+    
+    # Ensure index is valid
+    if idx_50_percent >= len(event_times):
+        idx_50_percent = len(event_times) - 1
+    
+    # Get the time at 50% in seconds, then convert to minutes
+    time_at_50_percent_sec = event_times[idx_50_percent]
+    time_at_50_percent_min = time_at_50_percent_sec / 60.0
+    
+    return time_at_50_percent_min
+
+
 def compute_lick_bouts(events_df: pd.DataFrame, sensor_cols: List[str], ili_cutoff: float = 0.3) -> dict:
     """Compute lick bouts for each sensor."""
     bout_results = {}
@@ -372,6 +415,7 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
         total_weights = result['weight_losses']  # total weight change
         first_5min_lick_pcts = result.get('first_5min_lick_pcts', np.zeros(len(lick_counts)))  # NEW
         first_5min_bout_pcts = result.get('first_5min_bout_pcts', np.zeros(len(bout_counts)))  # NEW
+        time_to_50pct_licks = result.get('time_to_50pct_licks', np.full(len(lick_counts), np.nan))  # NEW: Time to 50% (minutes)
         
         print(f"\nNumber of animals: {len(lick_counts)}")
         print(f"Individual lick counts: {lick_counts}")
@@ -381,6 +425,7 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
         print(f"Individual total weights: {total_weights}")
         print(f"Individual first-5-min lick %: {first_5min_lick_pcts}")  # NEW
         print(f"Individual first-5-min bout %: {first_5min_bout_pcts}")  # NEW
+        print(f"Individual time to 50% licks (min): {time_to_50pct_licks}")  # NEW
         
         # Calculate averages and statistics for all metrics
         avg_licks = np.mean(lick_counts)
@@ -414,6 +459,11 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
         avg_first_5min_lick_pct = np.mean(first_5min_lick_pcts)
         avg_first_5min_bout_pct = np.mean(first_5min_bout_pcts)
         
+        # Calculate time to 50% statistics (excluding NaN values)
+        time_to_50pct_valid = time_to_50pct_licks[~np.isnan(time_to_50pct_licks)]
+        avg_time_to_50pct = np.mean(time_to_50pct_valid) if len(time_to_50pct_valid) > 0 else np.nan
+        std_time_to_50pct = np.std(time_to_50pct_valid) if len(time_to_50pct_valid) > 0 else np.nan
+        
         # Print detailed calculation breakdown for first-5-min percentages
         print(f"\n--- First 5-Minute Average Calculation Details ---")
         print(f"Individual animal lick percentages: {first_5min_lick_pcts}")
@@ -434,12 +484,14 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
         std_first_5min_bout_pct = np.std(first_5min_bout_pcts)
         
         n = len(lick_counts)
+        n_time_to_50pct = len(time_to_50pct_valid)
         sem_licks = std_licks / np.sqrt(n) if n > 0 else 0
         sem_bouts = std_bouts / np.sqrt(n) if n > 0 else 0
         sem_fecal = std_fecal / np.sqrt(n) if n > 0 else 0
         sem_total_weight = std_total_weight / np.sqrt(n) if n > 0 else 0
         sem_first_5min_lick_pct = std_first_5min_lick_pct / np.sqrt(n) if n > 0 else 0
         sem_first_5min_bout_pct = std_first_5min_bout_pct / np.sqrt(n) if n > 0 else 0
+        sem_time_to_50pct = std_time_to_50pct / np.sqrt(n_time_to_50pct) if n_time_to_50pct > 0 else np.nan
         if date == '11/12/25':
             n_bottle = len(bottle_weights_filtered)
             sem_bottle_weight = std_bottle_weight / np.sqrt(n_bottle) if n_bottle > 0 else 0
@@ -465,6 +517,7 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
             'avg_total_weight_loss': avg_total_weight,
             'avg_first_5min_lick_pct': avg_first_5min_lick_pct,  # NEW
             'avg_first_5min_bout_pct': avg_first_5min_bout_pct,  # NEW
+            'avg_time_to_50pct_licks': avg_time_to_50pct,  # NEW: Average time to reach 50% of total licks (minutes)
             'avg_licks_per_animal': lick_counts,
             'avg_bouts_per_animal': bout_counts,
             'avg_fecal_per_animal': fecal_counts,
@@ -472,6 +525,7 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
             'avg_total_weight_per_animal': total_weights,
             'first_5min_lick_pcts_per_animal': first_5min_lick_pcts,  # NEW
             'first_5min_bout_pcts_per_animal': first_5min_bout_pcts,  # NEW
+            'time_to_50pct_licks_per_animal': time_to_50pct_licks,  # NEW: Per-animal time to 50% (minutes)
             'std_licks': std_licks,
             'std_bouts': std_bouts,
             'std_fecal': std_fecal,
@@ -479,6 +533,7 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
             'std_total_weight': std_total_weight,
             'std_first_5min_lick_pct': std_first_5min_lick_pct,  # NEW
             'std_first_5min_bout_pct': std_first_5min_bout_pct,  # NEW
+            'std_time_to_50pct_licks': std_time_to_50pct,  # NEW: Std dev of time to 50% (minutes)
             'sem_licks': sem_licks,
             'sem_bouts': sem_bouts,
             'sem_fecal': sem_fecal,
@@ -486,6 +541,7 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
             'sem_total_weight': sem_total_weight,
             'sem_first_5min_lick_pct': sem_first_5min_lick_pct,  # NEW
             'sem_first_5min_bout_pct': sem_first_5min_bout_pct,  # NEW
+            'sem_time_to_50pct_licks': sem_time_to_50pct,  # NEW: SEM of time to 50% (minutes)
             'total_animals': len(lick_counts),
             'sum_total_licks': result['total_licks'],
             'sum_total_bouts': result['total_bouts'],
@@ -1732,21 +1788,6 @@ def display_weekly_averages(weekly_averages: Dict) -> str:
         lines.append(row)
     
     lines.append("")
-    lines.append("FIRST 5-MINUTE PERCENTAGES:")
-    header_5min = f"{'Date':<12} {'Lick %':<12} {'Std Lick%':<12} {'Bout %':<12} {'Std Bout%':<12}"
-    lines.append(header_5min)
-    lines.append("-" * 80)
-    
-    for date in sorted_dates:
-        avg_data = weekly_averages[date]
-        row = (f"{date:<12} "
-               f"{avg_data['avg_first_5min_lick_pct']:<12.1f} "
-               f"{avg_data['std_first_5min_lick_pct']:<12.1f} "
-               f"{avg_data['avg_first_5min_bout_pct']:<12.1f} "
-               f"{avg_data['std_first_5min_bout_pct']:<12.1f}")
-        lines.append(row)
-    
-    lines.append("")
     lines.append("WEIGHT AND FECAL AVERAGES:")
     header2 = f"{'Date':<12} {'Avg Fecal':<12} {'Std Fecal':<12} {'Avg Bottle':<12} {'Std Bottle':<12} {'Avg Total':<12} {'Std Total':<12}"
     lines.append(header2)
@@ -2045,6 +2086,568 @@ def save_brief_lick_summary(weekly_averages: Dict, save_path: Path) -> Path:
             f.write("\n")
         
         f.write("=" * 60 + "\n")
+    
+    return save_path
+
+
+def perform_frontloading_anova(weekly_averages: Dict) -> Dict:
+    """
+    Perform ONE-WAY REPEATED MEASURES ANOVA for front-loading measures:
+    - % of licks in first 5 minutes
+    - % of bouts in first 5 minutes
+    - Time to 50% of total licks (minutes)
+    
+    Within-subjects factor: Week (repeated measures across weeks)
+    
+    Uses pingouin.rm_anova() for repeated measures analysis.
+    
+    Parameters:
+        weekly_averages: Dictionary from compute_weekly_averages
+        
+    Returns:
+        Dictionary containing repeated measures ANOVA results for front-loading measures
+    """
+    # Check if pingouin is available
+    if not HAS_PINGOUIN:
+        print("\n" + "="*80)
+        print("WARNING: Repeated measures ANOVA requires pingouin library")
+        print("Front-loading ANOVA cannot be performed without pingouin")
+        print("Install pingouin with: pip install pingouin")
+        print("="*80 + "\n")
+        return {}
+    
+    # Build long-format dataframe for repeated measures ANOVA
+    long_data = []
+    
+    # Sort by date chronologically
+    sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+    
+    print("\n" + "="*80)
+    print("FRONT-LOADING ANOVA: Building Data")
+    print("="*80)
+    
+    for week_idx, date in enumerate(sorted_dates, 1):
+        data = weekly_averages[date]
+        animal_ids = data.get('animal_ids', [])
+        
+        # If no animal IDs, create generic ones
+        if not animal_ids:
+            animal_ids = [f"Animal_{i+1}" for i in range(len(data.get('first_5min_lick_pcts_per_animal', [])))]
+        
+        first_5min_lick_pcts = data.get('first_5min_lick_pcts_per_animal', [])
+        first_5min_bout_pcts = data.get('first_5min_bout_pcts_per_animal', [])
+        time_to_50pct = data.get('time_to_50pct_licks_per_animal', [])
+        
+        for i, animal_id in enumerate(animal_ids):
+            # Get front-loading metrics
+            first_5min_lick_val = first_5min_lick_pcts[i] if i < len(first_5min_lick_pcts) else np.nan
+            first_5min_bout_val = first_5min_bout_pcts[i] if i < len(first_5min_bout_pcts) else np.nan
+            time_50pct_val = time_to_50pct[i] if i < len(time_to_50pct) else np.nan
+            
+            long_data.append({
+                'Animal': animal_id,
+                'Week': week_idx,
+                'Date': date,
+                'first_5min_lick_pct': first_5min_lick_val,
+                'first_5min_bout_pct': first_5min_bout_val,
+                'time_to_50pct': time_50pct_val
+            })
+    
+    print(f"Total data points: {len(long_data)}")
+    print(f"Unique animals: {len(set(row['Animal'] for row in long_data))}")
+    print("="*80 + "\n")
+    
+    df_long = pd.DataFrame(long_data)
+    
+    # Perform repeated measures ANOVA for each front-loading measure
+    anova_results = {}
+    measures = ['first_5min_lick_pct', 'first_5min_bout_pct', 'time_to_50pct']
+    measure_names = {
+        'first_5min_lick_pct': '% Licks in First 5 Minutes',
+        'first_5min_bout_pct': '% Bouts in First 5 Minutes',
+        'time_to_50pct': 'Time to 50% of Total Licks (min)'
+    }
+    
+    print("\n" + "="*80)
+    print("PERFORMING ONE-WAY REPEATED MEASURES ANOVA: Week Effect for Front-Loading Measures")
+    print("="*80)
+    
+    for measure in measures:
+        measure_name = measure_names[measure]
+        print(f"\nAnalyzing: {measure_name}")
+        print("-" * 40)
+        
+        # Remove NaN values for this measure
+        df_measure = df_long[['Animal', 'Week', measure]].dropna()
+        
+        if len(df_measure) == 0:
+            print(f"  ERROR: No valid data for {measure_name}")
+            anova_results[measure] = {
+                'measure_name': measure_name,
+                'error': 'No valid data available'
+            }
+            continue
+        
+        print(f"  Valid data points: {len(df_measure)}")
+        print(f"  Animals: {df_measure['Animal'].nunique()}")
+        print(f"  Week levels: {sorted(df_measure['Week'].unique())}")
+        
+        try:
+            # Repeated measures ANOVA: Week only
+            aov = pg.rm_anova(
+                data=df_measure,
+                dv=measure,
+                within='Week',
+                subject='Animal',
+                detailed=True
+            )
+            
+            print("\n  Repeated Measures ANOVA Results:")
+            print(aov)
+            
+            week_effect = aov[aov['Source'] == 'Week'].iloc[0]
+            
+            # Extract degrees of freedom
+            df1 = week_effect['ddof1'] if 'ddof1' in week_effect.index else (week_effect['DF1'] if 'DF1' in week_effect.index else None)
+            df2 = week_effect['ddof2'] if 'ddof2' in week_effect.index else (week_effect['DF2'] if 'DF2' in week_effect.index else None)
+            
+            # Extract sphericity information
+            sphericity_met = week_effect['sphericity'] if 'sphericity' in week_effect.index else None
+            w_sphericity = week_effect['W-spher'] if 'W-spher' in week_effect.index else None
+            p_sphericity = week_effect['p-spher'] if 'p-spher' in week_effect.index else None
+            p_gg_corrected = week_effect['p-GG-corr'] if 'p-GG-corr' in week_effect.index else None
+            epsilon_gg = week_effect['eps-GG'] if 'eps-GG' in week_effect.index else None
+            
+            anova_results[measure] = {
+                'measure_name': measure_name,
+                'is_repeated_measures': True,
+                'anova_table': aov,
+                'f_statistic': week_effect['F'],
+                'p_value': week_effect['p-unc'],
+                'significant': week_effect['p-unc'] < 0.05,
+                'df1': df1,
+                'df2': df2,
+                # Sphericity test information
+                'sphericity_met': sphericity_met,
+                'w_sphericity': w_sphericity,
+                'p_sphericity': p_sphericity,
+                'p_gg_corrected': p_gg_corrected,
+                'epsilon_gg': epsilon_gg
+            }
+        
+        except Exception as e:
+            print(f"  ERROR performing ANOVA: {e}")
+            anova_results[measure] = {
+                'measure_name': measure_name,
+                'error': str(e)
+            }
+    
+    return anova_results
+
+
+def display_frontloading_anova_results(anova_results: Dict) -> str:
+    """Display front-loading ANOVA results in formatted output.
+    
+    Parameters:
+        anova_results: Dictionary from perform_frontloading_anova
+        
+    Returns:
+        Formatted string with ANOVA results
+    """
+    lines = []
+    lines.append("\n" + "=" * 80)
+    lines.append("FRONT-LOADING ANALYSIS: ONE-WAY REPEATED MEASURES ANOVA RESULTS")
+    lines.append("=" * 80)
+    lines.append("")
+    
+    if not anova_results:
+        lines.append("No ANOVA results available (pingouin library may not be installed)")
+        lines.append("=" * 80)
+        return "\n".join(lines)
+    
+    lines.append("Repeated Measures ANOVA: Week (within-subjects)")
+    lines.append("")
+    
+    for measure, results in anova_results.items():
+        lines.append(f"MEASURE: {results['measure_name']}")
+        lines.append("-" * 80)
+        
+        if 'error' in results:
+            lines.append(f"ERROR: {results['error']}")
+            lines.append("")
+            continue
+        
+        lines.append("")
+        lines.append("Week Effect:")
+        if results.get('df1') is not None and results.get('df2') is not None:
+            lines.append(f"  F({results['df1']:.0f}, {results['df2']:.0f}) = {results['f_statistic']:.4f}")
+        else:
+            lines.append(f"  F-statistic: {results['f_statistic']:.4f}")
+        lines.append(f"  p-value: {results['p_value']:.6f}")
+        if results['significant']:
+            lines.append(f"  *** SIGNIFICANT WEEK EFFECT (p < 0.05) ***")
+        else:
+            lines.append(f"  Not significant (p >= 0.05)")
+        
+        # Sphericity test information
+        if results.get('sphericity_met') is not None:
+            lines.append("")
+            lines.append("Sphericity Test (Mauchly's W):")
+            w_val = results.get('w_sphericity') if results.get('w_sphericity') is not None else np.nan
+            p_val = results.get('p_sphericity') if results.get('p_sphericity') is not None else np.nan
+            lines.append(f"  W = {w_val:.4f}, p = {p_val:.4f}")
+            if results.get('sphericity_met'):
+                lines.append(f"  Sphericity assumption MET (p >= 0.05)")
+            else:
+                lines.append(f"  Sphericity assumption VIOLATED (p < 0.05)")
+                eps_gg = results.get('epsilon_gg') if results.get('epsilon_gg') is not None else np.nan
+                p_gg = results.get('p_gg_corrected') if results.get('p_gg_corrected') is not None else np.nan
+                lines.append(f"  Greenhouse-Geisser epsilon: {eps_gg:.4f}")
+                lines.append(f"  GG-corrected p-value: {p_gg:.6f}")
+                if results.get('p_gg_corrected') is not None and results.get('p_gg_corrected') < 0.05:
+                    lines.append(f"  Result remains SIGNIFICANT after GG correction")
+                elif results.get('p_gg_corrected') is not None:
+                    lines.append(f"  Result becomes NOT SIGNIFICANT after GG correction")
+        
+        lines.append("")
+    
+    # Summary
+    lines.append("=" * 80)
+    lines.append("SUMMARY:")
+    significant_week = [r['measure_name'] for r in anova_results.values() if r.get('significant', False)]
+    lines.append(f"Significant Week effects: {', '.join(significant_week) if significant_week else 'None'}")
+    
+    # Note about sphericity violations
+    sphericity_violated = [r['measure_name'] for r in anova_results.values()
+                           if r.get('sphericity_met') is False]
+    if sphericity_violated:
+        lines.append(f"\nNote: Sphericity assumption violated for: {', '.join(sphericity_violated)}")
+        lines.append("Greenhouse-Geisser corrected p-values are provided above.")
+    
+    lines.append("=" * 80)
+    lines.append("")
+    
+    formatted_output = "\n".join(lines)
+    print(formatted_output)
+    
+    return formatted_output
+
+
+def perform_frontloading_tukey_hsd(anova_results: Dict, weekly_averages: Dict) -> Dict:
+    """
+    Perform Tukey's HSD post-hoc test for significant front-loading measures.
+    
+    For repeated measures ANOVA with significant Week effects, performs pairwise
+    comparisons across Week levels for:
+    - % of licks in first 5 minutes
+    - % of bouts in first 5 minutes
+    - Time to 50% of total licks (minutes)
+    
+    Note: For repeated measures data, this is an approximation. Proper RM post-hoc
+    tests would account for the correlated nature of repeated observations.
+    
+    Parameters:
+        anova_results: Dictionary from perform_frontloading_anova
+        weekly_averages: Dictionary from compute_weekly_averages
+        
+    Returns:
+        Dictionary containing Tukey HSD results for significant measures
+    """
+    tukey_results = {}
+    
+    for measure, anova_data in anova_results.items():
+        # Check if Week effect is significant
+        if not anova_data.get('significant', False):
+            continue
+        
+        # Skip if there's an error
+        if 'error' in anova_data:
+            continue
+        
+        try:
+            # Reconstruct long-format data from weekly_averages
+            all_data = []
+            group_labels = []
+            
+            # Map measure name to data key in weekly_averages
+            measure_to_key = {
+                'first_5min_lick_pct': 'first_5min_lick_pcts_per_animal',
+                'first_5min_bout_pct': 'first_5min_bout_pcts_per_animal',
+                'time_to_50pct': 'time_to_50pct_licks_per_animal'
+            }
+            
+            data_key = measure_to_key.get(measure)
+            if not data_key:
+                continue
+            
+            # Reconstruct data for each Week
+            sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+            
+            for week_idx, date in enumerate(sorted_dates, 1):
+                week_data = weekly_averages[date].get(data_key, [])
+                
+                # For time_to_50pct, exclude NaN values
+                if measure == 'time_to_50pct':
+                    week_data = [x for x in week_data if not np.isnan(x)]
+                
+                # Add to combined data
+                all_data.extend(week_data)
+                group_labels.extend([f"Week {week_idx}"] * len(week_data))
+            
+            if len(all_data) == 0 or len(set(group_labels)) < 2:
+                continue
+            
+            # Perform Tukey HSD
+            tukey_result = pairwise_tukeyhsd(endog=all_data, groups=group_labels, alpha=0.05)
+            
+            # Parse results into a more accessible format
+            comparisons = []
+            
+            # Extract pairwise comparison results
+            summary_data = tukey_result.summary().data[1:]  # Skip header row
+            
+            for row in summary_data:
+                group1, group2, meandiff, p_adj, lower_ci, upper_ci, reject = row
+                
+                comparisons.append({
+                    'group1': str(group1),
+                    'group2': str(group2), 
+                    'meandiff': float(meandiff),
+                    'p_adj': float(p_adj),
+                    'lower_ci': float(lower_ci),
+                    'upper_ci': float(upper_ci),
+                    'significant': bool(reject)
+                })
+            
+            tukey_results[measure] = {
+                'measure_name': anova_data['measure_name'],
+                'comparisons': comparisons,
+                'tukey_object': tukey_result
+            }
+            
+            print(f"\nTukey HSD completed for: {anova_data['measure_name']}")
+            print(f"  Total comparisons: {len(comparisons)}")
+            print(f"  Significant pairs: {sum(1 for c in comparisons if c['significant'])}")
+            
+        except Exception as e:
+            tukey_results[measure] = {
+                'measure_name': anova_data['measure_name'],
+                'error': f"Error performing Tukey HSD: {str(e)}"
+            }
+    
+    return tukey_results
+
+
+def display_frontloading_tukey_results(tukey_results: Dict) -> str:
+    """
+    Display Tukey HSD results for front-loading measures in formatted output.
+    
+    Parameters:
+        tukey_results: Dictionary from perform_frontloading_tukey_hsd
+        
+    Returns:
+        Formatted string with Tukey HSD results
+    """
+    if not tukey_results:
+        return "\nNo Tukey HSD results to display (no significant Week effects)\n"
+    
+    lines = []
+    lines.append("\n" + "=" * 80)
+    lines.append("TUKEY HSD POST-HOC TEST RESULTS - FRONT-LOADING MEASURES")
+    lines.append("=" * 80)
+    lines.append("")
+    lines.append("Tukey HSD performed for measures with significant Week effects.")
+    lines.append("Pairwise comparisons across Week levels.")
+    lines.append("Alpha = 0.05 (family-wise error rate controlled)")
+    lines.append("")
+    
+    for measure, results in tukey_results.items():
+        lines.append(f"MEASURE: {results['measure_name'].upper()}")
+        lines.append("-" * 80)
+        
+        if 'error' in results:
+            lines.append(f"ERROR: {results['error']}")
+            lines.append("")
+            continue
+        
+        if 'comparisons' not in results or not results['comparisons']:
+            lines.append("No pairwise comparisons available")
+            lines.append("")
+            continue
+        
+        # Display comparison table
+        lines.append(f"{'Comparison':<20} {'Mean Diff':<12} {'Adj p-value':<13} {'95% CI Lower':<14} {'95% CI Upper':<14} {'Significant':<12}")
+        lines.append("-" * 80)
+        
+        for comp in results['comparisons']:
+            group1 = comp['group1']
+            group2 = comp['group2']
+            comparison = f"{group1} vs {group2}"
+            meandiff = comp['meandiff']
+            p_adj = comp['p_adj']
+            lower_ci = comp['lower_ci']
+            upper_ci = comp['upper_ci']
+            sig = "Yes" if comp['significant'] else "No"
+            
+            lines.append(f"{comparison:<20} {meandiff:<12.3f} {p_adj:<13.6f} {lower_ci:<14.3f} {upper_ci:<14.3f} {sig:<12}")
+        
+        lines.append("")
+        
+        # Summarize significant pairs
+        sig_comps = [c for c in results['comparisons'] if c['significant']]
+        if sig_comps:
+            lines.append("Significant pairwise differences:")
+            for comp in sig_comps:
+                direction = "higher" if comp['meandiff'] > 0 else "lower"
+                lines.append(f"  • {comp['group1']} vs {comp['group2']}: {comp['group1']} is {direction} (p = {comp['p_adj']:.4f})")
+        else:
+            lines.append("No significant pairwise differences found.")
+        
+        lines.append("")
+        lines.append("")
+    
+    # Overall summary
+    total_measures = len(tukey_results)
+    measures_with_sig_pairs = len([r for r in tukey_results.values() 
+                                   if 'comparisons' in r and 
+                                   any(comp['significant'] for comp in r['comparisons'])])
+    
+    lines.append("SUMMARY OF TUKEY HSD RESULTS:")
+    lines.append("-" * 40)
+    lines.append(f"Measures tested: {total_measures}")
+    lines.append(f"Measures with significant pairwise differences: {measures_with_sig_pairs}")
+    
+    if measures_with_sig_pairs > 0:
+        lines.append("\nSignificant pairwise differences were found, indicating specific")
+        lines.append("weeks that differ significantly from each other.")
+    else:
+        lines.append("\nNo significant pairwise differences found despite significant omnibus test.")
+    
+    lines.append("\n" + "=" * 80)
+    lines.append("")
+    
+    # Join lines and print
+    formatted_output = "\n".join(lines)
+    print(formatted_output)
+    
+    return formatted_output
+
+
+def save_frontloading_analysis_to_file(weekly_averages: Dict, anova_output: str, save_path: Path, tukey_output: str = "") -> Path:
+    """Save front-loading behavior analysis to a separate report file.
+    
+    This report focuses specifically on front-loading metrics:
+    - % of licks in first 5 minutes
+    - % of bouts in first 5 minutes
+    - Time to 50% of total licks (minutes)
+    
+    Also includes ANOVA and Tukey HSD results for these metrics.
+    
+    Parameters:
+        weekly_averages: Dictionary from compute_weekly_averages
+        anova_output: Formatted ANOVA results string
+        save_path: Path where to save the text file
+        tukey_output: Formatted Tukey HSD results string (optional)
+        
+    Returns:
+        Path to the saved text file
+    """
+    with open(save_path, 'w', encoding='utf-8') as f:
+        f.write("=" * 80 + "\n")
+        f.write("FRONT-LOADING BEHAVIOR ANALYSIS REPORT\n")
+        f.write("=" * 80 + "\n")
+        f.write(f"Generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("\n")
+        f.write("This report analyzes front-loading behavior using three metrics:\n")
+        f.write("1. % of Licks in First 5 Minutes\n")
+        f.write("2. % of Bouts in First 5 Minutes\n")
+        f.write("3. Time to Reach 50% of Total Licks (minutes)\n")
+        f.write("\n")
+        f.write("=" * 80 + "\n")
+        f.write("\n")
+        
+        # Sort dates chronologically
+        sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+        
+        # Descriptive statistics section
+        f.write("DESCRIPTIVE STATISTICS BY WEEK\n")
+        f.write("=" * 80 + "\n\n")
+        
+        # % Licks in first 5 minutes table
+        f.write("% OF LICKS IN FIRST 5 MINUTES:\n")
+        f.write(f"{'Week':<8} {'Date':<12} {'Mean':<12} {'Std':<12} {'SEM':<12} {'Min':<12} {'Max':<12}\n")
+        f.write("-" * 80 + "\n")
+        
+        for i, date in enumerate(sorted_dates, 1):
+            data = weekly_averages[date]
+            pcts = data.get('first_5min_lick_pcts_per_animal', np.array([]))
+            mean_pct = data.get('avg_first_5min_lick_pct', np.nan)
+            std_pct = data.get('std_first_5min_lick_pct', np.nan)
+            sem_pct = data.get('sem_first_5min_lick_pct', np.nan)
+            min_pct = np.min(pcts) if len(pcts) > 0 else np.nan
+            max_pct = np.max(pcts) if len(pcts) > 0 else np.nan
+            
+            f.write(f"{i:<8} {date:<12} {mean_pct:<12.2f} {std_pct:<12.2f} {sem_pct:<12.2f} {min_pct:<12.2f} {max_pct:<12.2f}\n")
+        
+        f.write("\n\n")
+        
+        # % Bouts in first 5 minutes table
+        f.write("% OF BOUTS IN FIRST 5 MINUTES:\n")
+        f.write(f"{'Week':<8} {'Date':<12} {'Mean':<12} {'Std':<12} {'SEM':<12} {'Min':<12} {'Max':<12}\n")
+        f.write("-" * 80 + "\n")
+        
+        for i, date in enumerate(sorted_dates, 1):
+            data = weekly_averages[date]
+            pcts = data.get('first_5min_bout_pcts_per_animal', np.array([]))
+            mean_pct = data.get('avg_first_5min_bout_pct', np.nan)
+            std_pct = data.get('std_first_5min_bout_pct', np.nan)
+            sem_pct = data.get('sem_first_5min_bout_pct', np.nan)
+            min_pct = np.min(pcts) if len(pcts) > 0 else np.nan
+            max_pct = np.max(pcts) if len(pcts) > 0 else np.nan
+            
+            f.write(f"{i:<8} {date:<12} {mean_pct:<12.2f} {std_pct:<12.2f} {sem_pct:<12.2f} {min_pct:<12.2f} {max_pct:<12.2f}\n")
+        
+        f.write("\n\n")
+        
+        # Time to 50% of total licks table
+        f.write("TIME TO 50% OF TOTAL LICKS (MINUTES):\n")
+        f.write(f"{'Week':<8} {'Date':<12} {'Mean':<12} {'Std':<12} {'SEM':<12} {'Min':<12} {'Max':<12}\n")
+        f.write("-" * 80 + "\n")
+        
+        for week_idx, date in enumerate(sorted_dates, 1):
+            data = weekly_averages[date]
+            avg_time = data.get('avg_time_to_50pct_licks', np.nan)
+            std_time = data.get('std_time_to_50pct_licks', np.nan)
+            sem_time = data.get('sem_time_to_50pct_licks', np.nan)
+            
+            time_vals = data.get('time_to_50pct_licks_per_animal', [])
+            time_vals_valid = [t for t in time_vals if not np.isnan(t)]
+            min_time = np.min(time_vals_valid) if len(time_vals_valid) > 0 else np.nan
+            max_time = np.max(time_vals_valid) if len(time_vals_valid) > 0 else np.nan
+            
+            avg_str = f"{avg_time:.2f}" if not np.isnan(avg_time) else "N/A"
+            std_str = f"{std_time:.2f}" if not np.isnan(std_time) else "N/A"
+            sem_str = f"{sem_time:.2f}" if not np.isnan(sem_time) else "N/A"
+            min_str = f"{min_time:.2f}" if not np.isnan(min_time) else "N/A"
+            max_str = f"{max_time:.2f}" if not np.isnan(max_time) else "N/A"
+            
+            f.write(f"{week_idx:<8} {date:<12} {avg_str:<12} {std_str:<12} {sem_str:<12} {min_str:<12} {max_str:<12}\n")
+        
+        f.write("\n")
+        
+        # Add ANOVA results
+        if anova_output:
+            f.write("\n\n")
+            f.write(anova_output)
+        
+        # Add Tukey HSD results
+        if tukey_output:
+            f.write("\n\n")
+            f.write(tukey_output)
+        
+        f.write("=" * 80 + "\n")
+        f.write("END OF FRONT-LOADING ANALYSIS REPORT\n")
+        f.write("=" * 80 + "\n")
     
     return save_path
 
@@ -2483,6 +3086,546 @@ def plot_first_5min_by_week(
     return fig
 
 
+def plot_first_5min_bouts_by_week(
+    weekly_averages: Dict,
+    save_path: Optional[Path] = None,
+    show: bool = True
+) -> plt.Figure:
+    """Create bar plot showing percentage of bouts in first 5 minutes for each week.
+    
+    In the non-ramp design, all mice stay at the same CA% across all weeks.
+    This creates a single plot with one bar per week showing average percentage
+    with individual mouse data points overlaid and SEM error bars.
+    
+    Parameters:
+        weekly_averages: Dictionary from compute_weekly_averages
+        save_path: Optional path to save the figure
+        show: Whether to display the plot
+        
+    Returns:
+        The matplotlib figure object
+    """
+    print("\n" + "=" * 80)
+    print("PLOTTING: First 5-Minute Bout Percentage by Week")
+    print("=" * 80)
+    
+    # Sort dates chronologically to get proper week order
+    sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+    n_weeks = len(sorted_dates)
+    
+    if n_weeks == 0:
+        print("ERROR: No data found in weekly_averages.")
+        return None
+    
+    print(f"Found {n_weeks} weeks of data")
+    
+    # Extract data for each week
+    week_labels = []
+    ca_percents = []
+    avg_bout_pcts = []
+    sem_bout_pcts = []
+    individual_data = []
+    
+    for i, date in enumerate(sorted_dates):
+        data = weekly_averages[date]
+        week_labels.append(f"Week {i+1}")
+        ca_percents.append(data['ca_percent'])
+        avg_bout_pcts.append(data['avg_first_5min_bout_pct'])
+        
+        # Calculate SEM
+        individual_bout_pcts = data['first_5min_bout_pcts_per_animal']
+        individual_data.append(individual_bout_pcts)
+        n = len(individual_bout_pcts)
+        sem = data['std_first_5min_bout_pct'] / np.sqrt(n) if n > 0 else 0
+        sem_bout_pcts.append(sem)
+        
+        print(f"  Week {i+1} ({data['ca_percent']}% CA): avg={avg_bout_pcts[-1]:.2f}%, SEM={sem:.2f}%, n={n}")
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # In non-ramp design, CA% should be constant, so use a single color
+    ca_pct = ca_percents[0] if ca_percents else 0
+    if ca_pct == 0:
+        bar_color = 'seagreen'
+    elif ca_pct <= 1.0:
+        bar_color = 'mediumseagreen'
+    else:
+        bar_color = 'darkseagreen'
+    
+    x_positions = np.arange(n_weeks)
+    bar_width = 0.6
+    
+    # Plot bars
+    bars = ax.bar(x_positions, avg_bout_pcts, bar_width,
+                 color=bar_color, alpha=0.7, edgecolor='black', linewidth=1.5)
+    
+    # Add error bars
+    ax.errorbar(x_positions, avg_bout_pcts, yerr=sem_bout_pcts,
+               fmt='none', ecolor='black', capsize=5, linewidth=2, capthick=2)
+    
+    # Overlay individual mouse data points
+    jitter_amount = 0.15
+    np.random.seed(42)  # For reproducibility
+    
+    for i, individual_bout_pcts in enumerate(individual_data):
+        jitter = np.random.uniform(-jitter_amount, jitter_amount, len(individual_bout_pcts))
+        ax.scatter([x_positions[i]] * len(individual_bout_pcts) + jitter, individual_bout_pcts,
+                  color='black', s=40, alpha=0.5, edgecolors='black', linewidths=0.5, zorder=10)
+    
+    # Formatting
+    ax.set_xlabel('Week', fontsize=12, weight='bold')
+    ax.set_ylabel('% of Bouts in First 5 Minutes', fontsize=12, weight='bold')
+    ax.set_title(f'Percentage of Bouts in First 5 Minutes Across Weeks\n({ca_pct}% CA - Non-Ramp Design)',
+                fontsize=14, weight='bold')
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(week_labels)
+    ax.set_ylim(bottom=0)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # Add sample size annotation
+    n_animals = len(individual_data[0]) if individual_data else 0
+    ax.text(0.98, 0.02, f'n={n_animals} mice per week', transform=ax.transAxes,
+           ha='right', va='bottom', fontsize=10, style='italic',
+           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+    
+    plt.tight_layout()
+    
+    print(f"\nPlot created with {n_weeks} weeks")
+    print("=" * 80 + "\n")
+    
+    # Save if requested
+    if save_path:
+        fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+        print(f"Figure saved to: {save_path}")
+    
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    
+    return fig
+
+
+def plot_first_5min_bouts_by_week_with_lines(
+    weekly_averages: Dict,
+    save_path: Optional[Path] = None,
+    show: bool = True
+) -> plt.Figure:
+    """Create bar plot with individual mouse trajectories for bout percentages connected by lines across weeks.
+    
+    Shows bars for weekly averages plus lines connecting each individual mouse's data
+    across weeks in the non-ramp design (constant CA%).
+    
+    Parameters:
+        weekly_averages: Dictionary from compute_weekly_averages
+        save_path: Optional path to save the figure
+        show: Whether to display the plot
+        
+    Returns:
+        The matplotlib figure object
+    """
+    print("\n" + "=" * 80)
+    print("PLOTTING: First 5-Minute Bout Percentage by Week (with Individual Trajectories)")
+    print("=" * 80)
+    
+    # Sort dates chronologically to get proper week order
+    sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+    n_weeks = len(sorted_dates)
+    
+    if n_weeks == 0:
+        print("ERROR: No data found in weekly_averages.")
+        return None
+    
+    print(f"Found {n_weeks} weeks of data")
+    
+    # Extract data for each week and track individual animals
+    week_labels = []
+    ca_percents = []
+    avg_bout_pcts = []
+    sem_bout_pcts = []
+    animal_ids_by_week = []
+    individual_data_by_week = []
+    
+    for i, date in enumerate(sorted_dates):
+        data = weekly_averages[date]
+        week_labels.append(f"Week {i+1}")
+        ca_percents.append(data['ca_percent'])
+        avg_bout_pcts.append(data['avg_first_5min_bout_pct'])
+        
+        # Get individual animal data and IDs
+        individual_bout_pcts = data['first_5min_bout_pcts_per_animal']
+        animal_ids = data.get('animal_ids', [f"Animal_{j+1}" for j in range(len(individual_bout_pcts))])
+        
+        individual_data_by_week.append(individual_bout_pcts)
+        animal_ids_by_week.append(animal_ids)
+        
+        n = len(individual_bout_pcts)
+        sem = data['std_first_5min_bout_pct'] / np.sqrt(n) if n > 0 else 0
+        sem_bout_pcts.append(sem)
+        
+        print(f"  Week {i+1} ({data['ca_percent']}% CA): avg={avg_bout_pcts[-1]:.2f}%, SEM={sem:.2f}%, n={n}")
+    
+    # Build a mapping of animal ID to its trajectory across weeks
+    # animal_trajectories: dict mapping animal_id -> list of (week_idx, percentage) tuples
+    animal_trajectories = {}
+    
+    for week_idx, (animal_ids, individual_bout_pcts) in enumerate(zip(animal_ids_by_week, individual_data_by_week)):
+        for animal_id, bout_pct in zip(animal_ids, individual_bout_pcts):
+            if animal_id not in animal_trajectories:
+                animal_trajectories[animal_id] = []
+            animal_trajectories[animal_id].append((week_idx, bout_pct))
+    
+    print(f"\nTracking {len(animal_trajectories)} individual animals across {n_weeks} weeks")
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(12, 7))
+    
+    # In non-ramp design, CA% should be constant, so use a single color
+    ca_pct = ca_percents[0] if ca_percents else 0
+    if ca_pct == 0:
+        bar_color = 'seagreen'
+    elif ca_pct <= 1.0:
+        bar_color = 'mediumseagreen'
+    else:
+        bar_color = 'darkseagreen'
+    
+    x_positions = np.arange(n_weeks)
+    bar_width = 0.6
+    
+    # Plot bars
+    bars = ax.bar(x_positions, avg_bout_pcts, bar_width,
+                 color=bar_color, alpha=0.7, edgecolor='black', linewidth=1.5, zorder=5)
+    
+    # Add error bars
+    ax.errorbar(x_positions, avg_bout_pcts, yerr=sem_bout_pcts,
+               fmt='none', ecolor='black', capsize=5, linewidth=2, capthick=2, zorder=6)
+    
+    # Plot individual animal trajectories with lines
+    cmap = plt.cm.tab20  # Colormap with 20 distinct colors
+    colors = [cmap(i % 20) for i in range(len(animal_trajectories))]
+    
+    for idx, (animal_id, trajectory) in enumerate(animal_trajectories.items()):
+        # Sort trajectory by week index
+        trajectory.sort(key=lambda x: x[0])
+        
+        if len(trajectory) > 1:  # Only draw lines if animal appears in multiple weeks
+            weeks = [t[0] for t in trajectory]
+            bout_pcts = [t[1] for t in trajectory]
+            
+            # Draw line connecting this animal's data points
+            ax.plot(weeks, bout_pcts, color=colors[idx], alpha=0.4, linewidth=1.5, zorder=3)
+            
+            # Draw markers for this animal's data points
+            ax.scatter(weeks, bout_pcts, color=colors[idx], s=50, alpha=0.7, 
+                      edgecolors='black', linewidths=0.8, zorder=9)
+    
+    # Formatting
+    ax.set_xlabel('Week', fontsize=12, weight='bold')
+    ax.set_ylabel('% of Bouts in First 5 Minutes', fontsize=12, weight='bold')
+    ax.set_title(f'Individual Mouse Trajectories of Bout Percentage Across Weeks\n({ca_pct}% CA - Non-Ramp Design)',
+                fontsize=14, weight='bold')
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(week_labels)
+    ax.set_ylim(bottom=0)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # Add sample size annotation
+    n_animals = len(animal_trajectories)
+    ax.text(0.98, 0.02, f'n={n_animals} mice tracked across weeks', transform=ax.transAxes,
+           ha='right', va='bottom', fontsize=10, style='italic',
+           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+    
+    plt.tight_layout()
+    
+    print(f"\nPlot created with {n_weeks} weeks and {n_animals} individual mouse trajectories")
+    print("=" * 80 + "\n")
+    
+    # Save if requested
+    if save_path:
+        fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+        print(f"Figure saved to: {save_path}")
+    
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    
+    return fig
+
+
+def plot_time_to_50pct_by_week(
+    weekly_averages: Dict,
+    save_path: Optional[Path] = None,
+    show: bool = True
+) -> plt.Figure:
+    """Create bar plot showing time to 50% of total licks for each week.
+    
+    In the non-ramp design, all mice stay at the same CA% across all weeks.
+    This creates a single plot with one bar per week showing average time
+    with individual mouse data points overlaid and SEM error bars.
+    
+    Parameters:
+        weekly_averages: Dictionary from compute_weekly_averages
+        save_path: Optional path to save the figure
+        show: Whether to display the plot
+        
+    Returns:
+        The matplotlib figure object
+    """
+    print("\n" + "=" * 80)
+    print("PLOTTING: Time to 50% of Total Licks by Week")
+    print("=" * 80)
+    
+    # Sort dates chronologically to get proper week order
+    sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+    n_weeks = len(sorted_dates)
+    
+    if n_weeks == 0:
+        print("ERROR: No data found in weekly_averages.")
+        return None
+    
+    print(f"Found {n_weeks} weeks of data")
+    
+    # Extract data for each week
+    week_labels = []
+    ca_percents = []
+    avg_times = []
+    sem_times = []
+    individual_data = []
+    
+    for i, date in enumerate(sorted_dates):
+        data = weekly_averages[date]
+        week_labels.append(f"Week {i+1}")
+        ca_percents.append(data['ca_percent'])
+        avg_times.append(data['avg_time_to_50pct_licks'])
+        
+        # Calculate SEM
+        individual_times = data['time_to_50pct_licks_per_animal']
+        individual_data.append(individual_times)
+        n = len(individual_times)
+        sem = data['std_time_to_50pct_licks'] / np.sqrt(n) if n > 0 else 0
+        sem_times.append(sem)
+        
+        print(f"  Week {i+1} ({data['ca_percent']}% CA): avg={avg_times[-1]:.2f} min, SEM={sem:.2f} min, n={n}")
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # In non-ramp design, CA% should be constant, so use a single color
+    ca_pct = ca_percents[0] if ca_percents else 0
+    if ca_pct == 0:
+        bar_color = 'mediumpurple'
+    elif ca_pct <= 1.0:
+        bar_color = 'plum'
+    else:
+        bar_color = 'darkviolet'
+    
+    x_positions = np.arange(n_weeks)
+    bar_width = 0.6
+    
+    # Plot bars
+    bars = ax.bar(x_positions, avg_times, bar_width,
+                 color=bar_color, alpha=0.7, edgecolor='black', linewidth=1.5)
+    
+    # Add error bars
+    ax.errorbar(x_positions, avg_times, yerr=sem_times,
+               fmt='none', ecolor='black', capsize=5, linewidth=2, capthick=2)
+    
+    # Overlay individual mouse data points
+    jitter_amount = 0.15
+    np.random.seed(42)  # For reproducibility
+    
+    for i, individual_times in enumerate(individual_data):
+        jitter = np.random.uniform(-jitter_amount, jitter_amount, len(individual_times))
+        ax.scatter([x_positions[i]] * len(individual_times) + jitter, individual_times,
+                  color='black', s=40, alpha=0.5, edgecolors='black', linewidths=0.5, zorder=10)
+    
+    # Formatting
+    ax.set_xlabel('Week', fontsize=12, weight='bold')
+    ax.set_ylabel('Time to 50% of Total Licks (minutes)', fontsize=12, weight='bold')
+    ax.set_title(f'Time to 50% of Total Licks Across Weeks\n({ca_pct}% CA - Non-Ramp Design)',
+                fontsize=14, weight='bold')
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(week_labels)
+    ax.set_ylim(bottom=0)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # Add sample size annotation
+    n_animals = len(individual_data[0]) if individual_data else 0
+    ax.text(0.98, 0.02, f'n={n_animals} mice per week', transform=ax.transAxes,
+           ha='right', va='bottom', fontsize=10, style='italic',
+           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+    
+    plt.tight_layout()
+    
+    print(f"\nPlot created with {n_weeks} weeks")
+    print("=" * 80 + "\n")
+    
+    # Save if requested
+    if save_path:
+        fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+        print(f"Figure saved to: {save_path}")
+    
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    
+    return fig
+
+
+def plot_time_to_50pct_by_week_with_lines(
+    weekly_averages: Dict,
+    save_path: Optional[Path] = None,
+    show: bool = True
+) -> plt.Figure:
+    """Create bar plot with individual mouse trajectories for time to 50% connected by lines across weeks.
+    
+    Shows bars for weekly averages plus lines connecting each individual mouse's data
+    across weeks in the non-ramp design (constant CA%).
+    
+    Parameters:
+        weekly_averages: Dictionary from compute_weekly_averages
+        save_path: Optional path to save the figure
+        show: Whether to display the plot
+        
+    Returns:
+        The matplotlib figure object
+    """
+    print("\n" + "=" * 80)
+    print("PLOTTING: Time to 50% of Total Licks by Week (with Individual Trajectories)")
+    print("=" * 80)
+    
+    # Sort dates chronologically to get proper week order
+    sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+    n_weeks = len(sorted_dates)
+    
+    if n_weeks == 0:
+        print("ERROR: No data found in weekly_averages.")
+        return None
+    
+    print(f"Found {n_weeks} weeks of data")
+    
+    # Extract data for each week and track individual animals
+    week_labels = []
+    ca_percents = []
+    avg_times = []
+    sem_times = []
+    animal_ids_by_week = []
+    individual_data_by_week = []
+    
+    for i, date in enumerate(sorted_dates):
+        data = weekly_averages[date]
+        week_labels.append(f"Week {i+1}")
+        ca_percents.append(data['ca_percent'])
+        avg_times.append(data['avg_time_to_50pct_licks'])
+        
+        # Get individual animal data and IDs
+        individual_times = data['time_to_50pct_licks_per_animal']
+        animal_ids = data.get('animal_ids', [f"Animal_{j+1}" for j in range(len(individual_times))])
+        
+        individual_data_by_week.append(individual_times)
+        animal_ids_by_week.append(animal_ids)
+        
+        n = len(individual_times)
+        sem = data['std_time_to_50pct_licks'] / np.sqrt(n) if n > 0 else 0
+        sem_times.append(sem)
+        
+        print(f"  Week {i+1} ({data['ca_percent']}% CA): avg={avg_times[-1]:.2f} min, SEM={sem:.2f} min, n={n}")
+    
+    # Build a mapping of animal ID to its trajectory across weeks
+    # animal_trajectories: dict mapping animal_id -> list of (week_idx, time) tuples
+    animal_trajectories = {}
+    
+    for week_idx, (animal_ids, individual_times) in enumerate(zip(animal_ids_by_week, individual_data_by_week)):
+        for animal_id, time_val in zip(animal_ids, individual_times):
+            if animal_id not in animal_trajectories:
+                animal_trajectories[animal_id] = []
+            animal_trajectories[animal_id].append((week_idx, time_val))
+    
+    print(f"\nTracking {len(animal_trajectories)} individual animals across {n_weeks} weeks")
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(12, 7))
+    
+    # In non-ramp design, CA% should be constant, so use a single color
+    ca_pct = ca_percents[0] if ca_percents else 0
+    if ca_pct == 0:
+        bar_color = 'mediumpurple'
+    elif ca_pct <= 1.0:
+        bar_color = 'plum'
+    else:
+        bar_color = 'darkviolet'
+    
+    x_positions = np.arange(n_weeks)
+    bar_width = 0.6
+    
+    # Plot bars
+    bars = ax.bar(x_positions, avg_times, bar_width,
+                 color=bar_color, alpha=0.7, edgecolor='black', linewidth=1.5, zorder=5)
+    
+    # Add error bars
+    ax.errorbar(x_positions, avg_times, yerr=sem_times,
+               fmt='none', ecolor='black', capsize=5, linewidth=2, capthick=2, zorder=6)
+    
+    # Plot individual animal trajectories with lines
+    cmap = plt.cm.tab20  # Colormap with 20 distinct colors
+    colors = [cmap(i % 20) for i in range(len(animal_trajectories))]
+    
+    for idx, (animal_id, trajectory) in enumerate(animal_trajectories.items()):
+        # Sort trajectory by week index
+        trajectory.sort(key=lambda x: x[0])
+        
+        if len(trajectory) > 1:  # Only draw lines if animal appears in multiple weeks
+            weeks = [t[0] for t in trajectory]
+            times = [t[1] for t in trajectory]
+            
+            # Draw line connecting this animal's data points
+            ax.plot(weeks, times, color=colors[idx], alpha=0.4, linewidth=1.5, zorder=3)
+            
+            # Draw markers for this animal's data points
+            ax.scatter(weeks, times, color=colors[idx], s=50, alpha=0.7, 
+                      edgecolors='black', linewidths=0.8, zorder=9)
+    
+    # Formatting
+    ax.set_xlabel('Week', fontsize=12, weight='bold')
+    ax.set_ylabel('Time to 50% of Total Licks (minutes)', fontsize=12, weight='bold')
+    ax.set_title(f'Individual Mouse Trajectories of Time to 50% Across Weeks\n({ca_pct}% CA - Non-Ramp Design)',
+                fontsize=14, weight='bold')
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(week_labels)
+    ax.set_ylim(bottom=0)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # Add sample size annotation
+    n_animals = len(animal_trajectories)
+    ax.text(0.98, 0.02, f'n={n_animals} mice tracked across weeks', transform=ax.transAxes,
+           ha='right', va='bottom', fontsize=10, style='italic',
+           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+    
+    plt.tight_layout()
+    
+    print(f"\nPlot created with {n_weeks} weeks and {n_animals} individual mouse trajectories")
+    print("=" * 80 + "\n")
+    
+    # Save if requested
+    if save_path:
+        fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+        print(f"Figure saved to: {save_path}")
+    
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    
+    return fig
+
+
 def plot_first_5min_by_week_with_lines(
     weekly_averages: Dict,
     save_path: Optional[Path] = None,
@@ -2870,6 +4013,7 @@ def process_single_week(
     animal_ids = []  # NEW: Track animal IDs in same order as measurements
     first_5min_lick_pcts = []  # NEW: Percentage of licks in first 5 minutes
     first_5min_bout_pcts = []  # NEW: Percentage of bouts in first 5 minutes
+    time_to_50pct_licks = []  # NEW: Time to reach 50% of total licks (minutes)
     
     print(f"\nPer-sensor data (only selected sensors):")
     for sensor in selected_sensors:
@@ -2884,12 +4028,19 @@ def process_single_week(
             first_5min_licks = ((events_df[event_col]) & (events_df['Time_sec'] < 300)).sum()
             first_5min_lick_pct = (first_5min_licks / sensor_licks * 100) if sensor_licks > 0 else 0
             first_5min_lick_pcts.append(first_5min_lick_pct)
-            print(f"  {sensor}: Total licks = {sensor_licks}, First 5min licks = {first_5min_licks}, First 5min % = {first_5min_lick_pct:.1f}%")
+            
+            # Calculate time to 50% of total licks
+            time_50pct = calculate_time_to_50_percent_licks(events_df, sensor)
+            time_to_50pct_licks.append(time_50pct)
+            
+            time_50pct_str = f"{time_50pct:.2f} min" if not np.isnan(time_50pct) else "N/A"
+            print(f"  {sensor}: Total licks = {sensor_licks}, First 5min licks = {first_5min_licks}, First 5min % = {first_5min_lick_pct:.1f}%, Time to 50% = {time_50pct_str}")
             
             sensor_status = f"OK - {sensor_licks} licks detected ({first_5min_lick_pct:.1f}% in first 5min)"
         else:
             lick_counts.append(0)
             first_5min_lick_pcts.append(0)
+            time_to_50pct_licks.append(np.nan)
             sensor_status = f"WARNING - Event column '{event_col}' not found in data!"
         
         # Bout counts
@@ -2972,6 +4123,7 @@ def process_single_week(
         'animal_sexes': animal_sexes,  # NEW: Include sex for mixed ANOVA
         'first_5min_lick_pcts': np.array(first_5min_lick_pcts),  # NEW: First 5 min lick percentages
         'first_5min_bout_pcts': np.array(first_5min_bout_pcts),  # NEW: First 5 min bout percentages
+        'time_to_50pct_licks': np.array(time_to_50pct_licks),  # NEW: Time to 50% licks per animal (minutes)
         'correlations': {
             'lick_weight': lick_weight_corr,
             'bout_weight': bout_weight_corr,
@@ -3079,6 +4231,19 @@ def main():
     tukey_results = perform_tukey_hsd(anova_results, weekly_averages)
     tukey_output = display_tukey_results(tukey_results)
     
+    # Perform front-loading ANOVA and Tukey HSD
+    print("\nStep 6b: Performing Front-Loading ANOVA")
+    print("-" * 40)
+    
+    frontloading_anova_results = perform_frontloading_anova(weekly_averages)
+    frontloading_anova_output = display_frontloading_anova_results(frontloading_anova_results)
+    
+    print("\nStep 6c: Performing Tukey HSD for Front-Loading Measures")
+    print("-" * 40)
+    
+    frontloading_tukey_results = perform_frontloading_tukey_hsd(frontloading_anova_results, weekly_averages)
+    frontloading_tukey_output = display_frontloading_tukey_results(frontloading_tukey_results)
+    
     # Compute and plot lick rate histograms (5-minute bins over 30 minutes)
     print("\nStep 7: Computing Lick Rate Averages (5-Minute Bins)")
     print("-" * 40)
@@ -3117,14 +4282,35 @@ def main():
     print("\nPlotting percentage of licks in first 5 minutes by week (with mouse trajectories)...")
     plot_first_5min_by_week_with_lines(weekly_averages, show=True)
     
+    # Plot first 5-minute bout percentage by week
+    print("\nPlotting percentage of bouts in first 5 minutes by week...")
+    plot_first_5min_bouts_by_week(weekly_averages, show=True)
+    
+    # Plot first 5-minute bout percentage by week with individual mouse trajectories
+    print("\nPlotting percentage of bouts in first 5 minutes by week (with mouse trajectories)...")
+    plot_first_5min_bouts_by_week_with_lines(weekly_averages, show=True)
+    
+    # Plot time to 50% of licks by week
+    print("\nPlotting time to 50% of total licks by week...")
+    plot_time_to_50pct_by_week(weekly_averages, show=True)
+    
+    # Plot time to 50% of licks by week with individual mouse trajectories
+    print("\nPlotting time to 50% of total licks by week (with mouse trajectories)...")
+    plot_time_to_50pct_by_week_with_lines(weekly_averages, show=True)
+    
     # Optional: Save comprehensive summary with all statistical results
     save_table = input("\nSave weekly averages, ANOVA, and Tukey HSD results as text file? (y/n): ").strip().lower()
     if save_table in ['y', 'yes']:
         table_path = master_csv.parent / "comprehensive_statistical_analysis_summary.txt"
-        # Combine all outputs
+        # Combine all outputs (excluding front-loading metrics which are in separate report)
         combined_output = formatted_output + "\n" + anova_output + "\n" + tukey_output
         save_weekly_averages_to_file(weekly_averages, combined_output, table_path)
         print(f"Comprehensive statistical analysis saved to: {table_path}")
+    
+    # Always save front-loading analysis to separate report
+    frontloading_path = master_csv.parent / "frontloading_analysis_report.txt"
+    save_frontloading_analysis_to_file(weekly_averages, frontloading_anova_output, frontloading_path, frontloading_tukey_output)
+    print(f"Front-loading analysis report saved to: {frontloading_path}")
     
     # Always save brief lick summary
     brief_path = master_csv.parent / "weekly_lick_summary_brief.txt"
@@ -3181,6 +4367,42 @@ def main():
         if fig_5min_lines:
             plt.close(fig_5min_lines)
             print(f"Saved first 5-minute percentage plot with trajectories to: {save_path_5min_lines}")
+    
+    # Optional: Save first 5-minute bout percentage plot
+    save_first_5min_bouts = input("\nSave first 5-minute bout percentage plot as SVG? (y/n): ").strip().lower()
+    if save_first_5min_bouts in ['y', 'yes']:
+        save_path_5min_bouts = master_csv.parent / "first_5min_bout_percentage_by_week.svg"
+        fig_5min_bouts = plot_first_5min_bouts_by_week(weekly_averages, save_path=save_path_5min_bouts, show=False)
+        if fig_5min_bouts:
+            plt.close(fig_5min_bouts)
+            print(f"Saved first 5-minute bout percentage plot to: {save_path_5min_bouts}")
+    
+    # Optional: Save first 5-minute bout percentage plot with trajectories
+    save_first_5min_bouts_lines = input("\nSave first 5-minute bout percentage plot with mouse trajectories as SVG? (y/n): ").strip().lower()
+    if save_first_5min_bouts_lines in ['y', 'yes']:
+        save_path_5min_bouts_lines = master_csv.parent / "first_5min_bout_percentage_by_week_with_trajectories.svg"
+        fig_5min_bouts_lines = plot_first_5min_bouts_by_week_with_lines(weekly_averages, save_path=save_path_5min_bouts_lines, show=False)
+        if fig_5min_bouts_lines:
+            plt.close(fig_5min_bouts_lines)
+            print(f"Saved first 5-minute bout percentage plot with trajectories to: {save_path_5min_bouts_lines}")
+    
+    # Optional: Save time to 50% plot
+    save_time_50pct = input("\nSave time to 50% of licks plot as SVG? (y/n): ").strip().lower()
+    if save_time_50pct in ['y', 'yes']:
+        save_path_50pct = master_csv.parent / "time_to_50pct_licks_by_week.svg"
+        fig_50pct = plot_time_to_50pct_by_week(weekly_averages, save_path=save_path_50pct, show=False)
+        if fig_50pct:
+            plt.close(fig_50pct)
+            print(f"Saved time to 50% plot to: {save_path_50pct}")
+    
+    # Optional: Save time to 50% plot with trajectories
+    save_time_50pct_lines = input("\nSave time to 50% of licks plot with mouse trajectories as SVG? (y/n): ").strip().lower()
+    if save_time_50pct_lines in ['y', 'yes']:
+        save_path_50pct_lines = master_csv.parent / "time_to_50pct_licks_by_week_with_trajectories.svg"
+        fig_50pct_lines = plot_time_to_50pct_by_week_with_lines(weekly_averages, save_path=save_path_50pct_lines, show=False)
+        if fig_50pct_lines:
+            plt.close(fig_50pct_lines)
+            print(f"Saved time to 50% plot with trajectories to: {save_path_50pct_lines}")
     
     print("\n" + "=" * 80)
     print("COMPREHENSIVE STATISTICAL ANALYSIS COMPLETED")
