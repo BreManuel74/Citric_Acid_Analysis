@@ -31,6 +31,7 @@ import numpy as np
 import re
 import math
 from datetime import datetime
+from scipy import stats
 
 # Try to import pingouin for mixed ANOVA
 try:
@@ -5480,6 +5481,754 @@ def generate_ca_x_week_report(
 
 
 # =============================================================================
+# SLOPE ANALYSIS: COMPARING RATE OF WEIGHT CHANGE ACROSS COHORTS
+# =============================================================================
+
+def calculate_animal_slopes(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    measure: str = "Total Change",
+    time_unit: str = "Week"
+) -> pd.DataFrame:
+    """
+    Calculate linear regression slope for each animal's weight change over time.
+    
+    For each animal, fits a linear regression: measure ~ time
+    Returns slopes, intercepts, R², and metadata for all animals.
+    
+    Parameters:
+        cohort_dfs: Dictionary mapping cohort labels to DataFrames
+        measure: Weight measure to analyze ('Total Change', 'Daily Change', 'Weight')
+        time_unit: Time variable to use ('Week' or 'Day')
+        
+    Returns:
+        DataFrame with columns: ID, Sex, CA (%), Cohort, Slope, Intercept, R2, N_points
+        
+    Example:
+        >>> slopes_df = calculate_animal_slopes(cohorts, measure="Total Change", time_unit="Week")
+        >>> print(slopes_df)
+    """
+    from scipy import stats
+    
+    print("\n" + "="*80)
+    print(f"CALCULATING INDIVIDUAL ANIMAL SLOPES: {measure} vs {time_unit}")
+    print("="*80)
+    
+    # Combine cohorts
+    print("\nStep 1: Combining cohort dataframes...")
+    combined_df = combine_cohorts_for_analysis(cohort_dfs)
+    combined_df = clean_cohort(combined_df)
+    
+    # Add time columns if needed
+    if 'Day' not in combined_df.columns:
+        combined_df = add_day_column_across_cohorts(combined_df)
+    
+    if time_unit == "Week" and 'Week' not in combined_df.columns:
+        combined_df = _add_week_column_across_cohorts(combined_df)
+    
+    # Check required columns
+    required_cols = ['ID', 'Sex', 'CA (%)', 'Cohort', time_unit, measure]
+    missing_cols = [col for col in required_cols if col not in combined_df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+    
+    # Prepare data
+    analysis_df = combined_df[required_cols].copy()
+    analysis_df = analysis_df.dropna()
+    
+    print(f"\nAnalyzing: {measure} vs {time_unit}")
+    print(f"  Total observations: {len(analysis_df)}")
+    print(f"  Unique animals: {analysis_df['ID'].nunique()}")
+    print(f"  CA% levels: {sorted(analysis_df['CA (%)'].unique())}")
+    
+    # Calculate slopes for each animal
+    print(f"\nStep 2: Fitting linear regression for each animal...")
+    
+    slope_results = []
+    
+    for animal_id in analysis_df['ID'].unique():
+        animal_data = analysis_df[analysis_df['ID'] == animal_id].copy()
+        
+        # Get metadata
+        sex = animal_data['Sex'].iloc[0]
+        ca_pct = animal_data['CA (%)'].iloc[0]
+        cohort = animal_data['Cohort'].iloc[0]
+        
+        # Get time and measure values
+        x = animal_data[time_unit].values
+        y = animal_data[measure].values
+        
+        # Skip if insufficient data points
+        if len(x) < 2:
+            print(f"  Warning: Skipping {animal_id} - insufficient data points (n={len(x)})")
+            continue
+        
+        # Fit linear regression
+        slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+        
+        slope_results.append({
+            'ID': animal_id,
+            'Sex': sex,
+            'CA (%)': ca_pct,
+            'Cohort': cohort,
+            'Slope': slope,
+            'Intercept': intercept,
+            'R2': r_value**2,
+            'P_value': p_value,
+            'Std_Error': std_err,
+            'N_points': len(x)
+        })
+    
+    slopes_df = pd.DataFrame(slope_results)
+    
+    print(f"\n[OK] Calculated slopes for {len(slopes_df)} animals")
+    
+    # Display summary statistics by cohort
+    print("\n" + "="*80)
+    print("SLOPE SUMMARY BY COHORT")
+    print("="*80)
+    
+    for ca_val in sorted(slopes_df['CA (%)'].unique()):
+        cohort_slopes = slopes_df[slopes_df['CA (%)'] == ca_val]['Slope']
+        print(f"\n{ca_val}% CA (n={len(cohort_slopes)} animals):")
+        print(f"  Mean Slope:   {cohort_slopes.mean():.4f} {measure} per {time_unit}")
+        print(f"  Median Slope: {cohort_slopes.median():.4f} {measure} per {time_unit}")
+        print(f"  SD:           {cohort_slopes.std():.4f}")
+        print(f"  Range:        [{cohort_slopes.min():.4f}, {cohort_slopes.max():.4f}]")
+        print(f"  Mean R²:      {slopes_df[slopes_df['CA (%)'] == ca_val]['R2'].mean():.4f}")
+    
+    return slopes_df
+
+
+def compare_slopes_within_cohorts(slopes_df: pd.DataFrame) -> Dict:
+    """
+    Compare slopes within each cohort using descriptive statistics and variance tests.
+    
+    This analyzes the variability of slopes within each CA% group.
+    
+    Parameters:
+        slopes_df: DataFrame from calculate_animal_slopes()
+        
+    Returns:
+        Dictionary with within-cohort statistics and Levene's test results
+    """
+    from scipy import stats
+    
+    print("\n" + "="*80)
+    print("WITHIN-COHORT SLOPE VARIABILITY ANALYSIS")
+    print("="*80)
+    
+    results = {
+        'cohort_stats': [],
+        'levene_test': None
+    }
+    
+    # Descriptive statistics by cohort
+    for ca_val in sorted(slopes_df['CA (%)'].unique()):
+        cohort_slopes = slopes_df[slopes_df['CA (%)'] == ca_val]['Slope'].values
+        
+        cohort_stat = {
+            'CA (%)': ca_val,
+            'N': len(cohort_slopes),
+            'Mean': cohort_slopes.mean(),
+            'Median': np.median(cohort_slopes),
+            'SD': cohort_slopes.std(),
+            'SEM': cohort_slopes.std() / np.sqrt(len(cohort_slopes)),
+            'Min': cohort_slopes.min(),
+            'Max': cohort_slopes.max(),
+            'IQR': np.percentile(cohort_slopes, 75) - np.percentile(cohort_slopes, 25),
+            'CV': (cohort_slopes.std() / cohort_slopes.mean() * 100) if cohort_slopes.mean() != 0 else np.nan
+        }
+        
+        results['cohort_stats'].append(cohort_stat)
+        
+        print(f"\n{ca_val}% CA Cohort (n={cohort_stat['N']}):")
+        print(f"  Mean ± SEM:         {cohort_stat['Mean']:.4f} ± {cohort_stat['SEM']:.4f}")
+        print(f"  Median (IQR):       {cohort_stat['Median']:.4f} ({cohort_stat['IQR']:.4f})")
+        print(f"  SD:                 {cohort_stat['SD']:.4f}")
+        print(f"  Coefficient of Var: {cohort_stat['CV']:.2f}%")
+        print(f"  Range:              [{cohort_stat['Min']:.4f}, {cohort_stat['Max']:.4f}]")
+    
+    # Levene's test for equality of variances between cohorts
+    ca_groups = sorted(slopes_df['CA (%)'].unique())
+    
+    if len(ca_groups) >= 2:
+        print("\n" + "-"*80)
+        print("LEVENE'S TEST: Equality of Variances Between Cohorts")
+        print("-"*80)
+        
+        group_slopes = [slopes_df[slopes_df['CA (%)'] == ca]['Slope'].values 
+                       for ca in ca_groups]
+        
+        levene_stat, levene_p = stats.levene(*group_slopes)
+        
+        results['levene_test'] = {
+            'statistic': levene_stat,
+            'p_value': levene_p,
+            'ca_groups': ca_groups
+        }
+        
+        print(f"Levene's statistic: W = {levene_stat:.4f}")
+        print(f"P-value: p = {levene_p:.4f}")
+        
+        if levene_p < 0.05:
+            print("Result: Variances are significantly different between cohorts (p < 0.05)")
+        else:
+            print("Result: No significant difference in variances between cohorts (p ≥ 0.05)")
+    
+    return results
+
+
+def compare_slopes_between_cohorts(slopes_df: pd.DataFrame) -> Dict:
+    """
+    Statistically compare average slopes between cohorts.
+    
+    Performs:
+    1. Independent samples t-test (or Welch's t-test if variances unequal)
+    2. Mann-Whitney U test (non-parametric alternative)
+    3. Effect size calculation (Cohen's d)
+    
+    Parameters:
+        slopes_df: DataFrame from calculate_animal_slopes()
+        
+    Returns:
+        Dictionary with test results and effect sizes
+    """
+    from scipy import stats
+    
+    print("\n" + "="*80)
+    print("BETWEEN-COHORT SLOPE COMPARISON")
+    print("="*80)
+    
+    ca_groups = sorted(slopes_df['CA (%)'].unique())
+    
+    if len(ca_groups) != 2:
+        print(f"Warning: Expected 2 cohorts, found {len(ca_groups)}. Returning empty results.")
+        return {}
+    
+    ca_0 = ca_groups[0]
+    ca_1 = ca_groups[1]
+    
+    slopes_0 = slopes_df[slopes_df['CA (%)'] == ca_0]['Slope'].values
+    slopes_1 = slopes_df[slopes_df['CA (%)'] == ca_1]['Slope'].values
+    
+    print(f"\nComparing: {ca_0}% CA (n={len(slopes_0)}) vs {ca_1}% CA (n={len(slopes_1)})")
+    print(f"  {ca_0}% CA: Mean = {slopes_0.mean():.4f}, SD = {slopes_0.std():.4f}")
+    print(f"  {ca_1}% CA: Mean = {slopes_1.mean():.4f}, SD = {slopes_1.std():.4f}")
+    print(f"  Difference in means: {slopes_1.mean() - slopes_0.mean():.4f}")
+    
+    results = {
+        'ca_groups': ca_groups,
+        'n_0': len(slopes_0),
+        'n_1': len(slopes_1),
+        'mean_0': slopes_0.mean(),
+        'mean_1': slopes_1.mean(),
+        'sd_0': slopes_0.std(),
+        'sd_1': slopes_1.std(),
+        'mean_diff': slopes_1.mean() - slopes_0.mean()
+    }
+    
+    # 1. Welch's t-test (unequal variances assumed)
+    print("\n" + "-"*80)
+    print("1. WELCH'S T-TEST (Independent samples, unequal variances)")
+    print("-"*80)
+    
+    t_stat, t_p = stats.ttest_ind(slopes_0, slopes_1, equal_var=False)
+    
+    # Calculate Welch-Satterthwaite degrees of freedom
+    s1_sq = slopes_0.var()
+    s2_sq = slopes_1.var()
+    n1 = len(slopes_0)
+    n2 = len(slopes_1)
+    df = (s1_sq/n1 + s2_sq/n2)**2 / ((s1_sq/n1)**2/(n1-1) + (s2_sq/n2)**2/(n2-1))
+    
+    print(f"t-statistic: t = {t_stat:.4f}")
+    print(f"P-value: p = {t_p:.4f}")
+    print(f"Degrees of freedom: df = {df:.2f} (Welch-Satterthwaite)")
+    
+    if t_p < 0.05:
+        print(f"Result: Slopes are significantly different between cohorts (p < 0.05)")
+    else:
+        print(f"Result: No significant difference in slopes between cohorts (p ≥ 0.05)")
+    
+    results['t_test'] = {
+        'statistic': t_stat,
+        'p_value': t_p,
+        'df': df
+    }
+    
+    # 2. Mann-Whitney U test (non-parametric)
+    print("\n" + "-"*80)
+    print("2. MANN-WHITNEY U TEST (Non-parametric)")
+    print("-"*80)
+    
+    u_stat, u_p = stats.mannwhitneyu(slopes_0, slopes_1, alternative='two-sided')
+    
+    print(f"U-statistic: U = {u_stat:.4f}")
+    print(f"P-value: p = {u_p:.4f}")
+    
+    if u_p < 0.05:
+        print(f"Result: Slopes are significantly different between cohorts (p < 0.05)")
+    else:
+        print(f"Result: No significant difference in slopes between cohorts (p ≥ 0.05)")
+    
+    results['mann_whitney'] = {
+        'statistic': u_stat,
+        'p_value': u_p
+    }
+    
+    # 3. Effect size (Cohen's d)
+    print("\n" + "-"*80)
+    print("3. EFFECT SIZE (Cohen's d)")
+    print("-"*80)
+    
+    # Pooled standard deviation
+    pooled_sd = np.sqrt(((len(slopes_0) - 1) * slopes_0.std()**2 + 
+                         (len(slopes_1) - 1) * slopes_1.std()**2) / 
+                        (len(slopes_0) + len(slopes_1) - 2))
+    
+    cohens_d = (slopes_1.mean() - slopes_0.mean()) / pooled_sd
+    
+    # Interpretation
+    if abs(cohens_d) < 0.2:
+        interpretation = "negligible"
+    elif abs(cohens_d) < 0.5:
+        interpretation = "small"
+    elif abs(cohens_d) < 0.8:
+        interpretation = "medium"
+    else:
+        interpretation = "large"
+    
+    print(f"Cohen's d: {cohens_d:.4f}")
+    print(f"Interpretation: {interpretation} effect size")
+    
+    results['effect_size'] = {
+        'cohens_d': cohens_d,
+        'pooled_sd': pooled_sd,
+        'interpretation': interpretation
+    }
+    
+    # 4. Confidence interval for mean difference (using Welch df)
+    print("\n" + "-"*80)
+    print("4. 95% CONFIDENCE INTERVAL FOR MEAN DIFFERENCE")
+    print("-"*80)
+    
+    # Standard error of the difference (for unequal variances)
+    se_diff = np.sqrt((slopes_0.var() / len(slopes_0)) + 
+                      (slopes_1.var() / len(slopes_1)))
+    
+    # Critical value for 95% CI using Welch df
+    t_crit = stats.t.ppf(0.975, df)
+    
+    ci_lower = results['mean_diff'] - t_crit * se_diff
+    ci_upper = results['mean_diff'] + t_crit * se_diff
+    
+    print(f"Mean difference: {results['mean_diff']:.4f}")
+    print(f"95% CI: [{ci_lower:.4f}, {ci_upper:.4f}]")
+    
+    if ci_lower * ci_upper > 0:
+        print("Result: CI does not include zero (significant difference)")
+    else:
+        print("Result: CI includes zero (no significant difference)")
+    
+    results['confidence_interval'] = {
+        'mean_diff': results['mean_diff'],
+        'se_diff': se_diff,
+        'ci_95_lower': ci_lower,
+        'ci_95_upper': ci_upper
+    }
+    
+    return results
+
+
+def plot_slopes_comparison(
+    slopes_df: pd.DataFrame,
+    measure: str = "Total Change",
+    time_unit: str = "Week",
+    title: Optional[str] = None,
+    save_path: Optional[Path] = None,
+    show: bool = True
+) -> plt.Figure:
+    """
+    Create visualization comparing slope distributions between cohorts.
+    
+    Creates a figure with multiple subplots:
+    1. Box plot comparing slopes between cohorts
+    2. Individual data points with means
+    3. Histogram/density plot of slope distributions
+    
+    Parameters:
+        slopes_df: DataFrame from calculate_animal_slopes()
+        measure: Measure name for axis labels
+        time_unit: Time unit for axis labels
+        title: Optional custom title
+        save_path: Optional path to save figure
+        show: Whether to display the plot
+        
+    Returns:
+        matplotlib Figure object
+    """
+    if not HAS_MATPLOTLIB:
+        raise ImportError("matplotlib is required for plotting")
+    
+    import matplotlib.ticker as mticker
+    
+    ca_groups = sorted(slopes_df['CA (%)'].unique())
+    
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    
+    # Subplot 1: Box plot with individual points
+    ax1 = axes[0]
+    
+    positions = list(range(len(ca_groups)))
+    box_data = [slopes_df[slopes_df['CA (%)'] == ca]['Slope'].values for ca in ca_groups]
+    
+    bp = ax1.boxplot(box_data, positions=positions, widths=0.5, patch_artist=True,
+                     boxprops=dict(facecolor='lightblue', alpha=0.7),
+                     medianprops=dict(color='red', linewidth=2),
+                     whiskerprops=dict(linewidth=1.5),
+                     capprops=dict(linewidth=1.5))
+    
+    # Overlay individual points
+    for i, ca_val in enumerate(ca_groups):
+        cohort_slopes = slopes_df[slopes_df['CA (%)'] == ca_val]['Slope'].values
+        x_jitter = np.random.normal(i, 0.04, size=len(cohort_slopes))
+        ax1.scatter(x_jitter, cohort_slopes, alpha=0.6, s=50, color='darkblue', edgecolors='black', linewidths=0.5)
+    
+    ax1.set_xticks(positions)
+    ax1.set_xticklabels([f'{ca}%' for ca in ca_groups])
+    ax1.set_xlabel('CA% Concentration')
+    ax1.set_ylabel(f'Slope ({measure} per {time_unit})')
+    ax1.set_title('Slope Distribution by Cohort')
+    ax1.grid(False)
+    ax1.tick_params(direction='in', length=6)
+    ax1.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    
+    # Subplot 2: Bar plot with error bars (Mean ± SEM)
+    ax2 = axes[1]
+    
+    means = [slopes_df[slopes_df['CA (%)'] == ca]['Slope'].mean() for ca in ca_groups]
+    sems = [slopes_df[slopes_df['CA (%)'] == ca]['Slope'].std() / 
+            np.sqrt(len(slopes_df[slopes_df['CA (%)'] == ca])) for ca in ca_groups]
+    
+    colors = ['dodgerblue', 'orangered']
+    bars = ax2.bar(positions, means, yerr=sems, capsize=8, width=0.6, 
+                   color=colors[:len(ca_groups)], alpha=0.7, 
+                   edgecolor='black', linewidth=1.5, error_kw={'linewidth': 2})
+    
+    ax2.set_xticks(positions)
+    ax2.set_xticklabels([f'{ca}%' for ca in ca_groups])
+    ax2.set_xlabel('CA% Concentration')
+    ax2.set_ylabel(f'Mean Slope ± SEM ({measure} per {time_unit})')
+    ax2.set_title('Mean Slopes by Cohort')
+    ax2.grid(False)
+    ax2.tick_params(direction='in', length=6)
+    ax2.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    
+    # Subplot 3: Histogram/density comparison
+    ax3 = axes[2]
+    
+    for i, ca_val in enumerate(ca_groups):
+        cohort_slopes = slopes_df[slopes_df['CA (%)'] == ca_val]['Slope'].values
+        ax3.hist(cohort_slopes, bins=8, alpha=0.6, label=f'{ca_val}% CA (n={len(cohort_slopes)})',
+                color=colors[i], edgecolor='black', linewidth=1)
+    
+    ax3.set_xlabel(f'Slope ({measure} per {time_unit})')
+    ax3.set_ylabel('Frequency')
+    ax3.set_title('Slope Distribution Comparison')
+    ax3.legend(loc='best')
+    ax3.grid(False)
+    ax3.tick_params(direction='in', length=6)
+    ax3.axvline(x=0, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    
+    # Overall title
+    if title is None:
+        title = f'Slope Analysis: {measure} vs {time_unit}'
+    fig.suptitle(title, fontsize=14, fontweight='bold', y=1.02)
+    
+    fig.tight_layout()
+    
+    if save_path is not None:
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"\n[OK] Figure saved to: {save_path}")
+    
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    
+    return fig
+
+
+def generate_slope_analysis_report(
+    slopes_df: pd.DataFrame,
+    within_results: Dict,
+    between_results: Dict,
+    measure: str = "Total Change",
+    time_unit: str = "Week"
+) -> str:
+    """
+    Generate a comprehensive text report of slope analysis results.
+    
+    Parameters:
+        slopes_df: DataFrame from calculate_animal_slopes()
+        within_results: Results from compare_slopes_within_cohorts()
+        between_results: Results from compare_slopes_between_cohorts()
+        measure: Measure name
+        time_unit: Time unit name
+        
+    Returns:
+        Formatted text report as string
+    """
+    lines = []
+    lines.append("=" * 80)
+    lines.append("SLOPE ANALYSIS REPORT: RATE OF WEIGHT CHANGE ACROSS COHORTS")
+    lines.append("=" * 80)
+    lines.append(f"\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"Measure: {measure}")
+    lines.append(f"Time Unit: {time_unit}")
+    lines.append(f"Total Animals: {len(slopes_df)}")
+    
+    # Individual animal slopes
+    lines.append("\n\n" + "=" * 80)
+    lines.append("SECTION 1: INDIVIDUAL ANIMAL SLOPES")
+    lines.append("=" * 80)
+    lines.append(f"\nEach animal's {measure} was fit with a linear regression model:")
+    lines.append(f"    {measure} = Slope × {time_unit} + Intercept")
+    lines.append("\nThe slope represents the rate of change in {measure} per {time_unit}.")
+    
+    lines.append("\n" + "-" * 80)
+    lines.append("Individual Animal Results:")
+    lines.append("-" * 80)
+    
+    for ca_val in sorted(slopes_df['CA (%)'].unique()):
+        cohort_data = slopes_df[slopes_df['CA (%)'] == ca_val].sort_values('Slope', ascending=False)
+        lines.append(f"\n{ca_val}% CA Cohort (n={len(cohort_data)}):")
+        
+        for _, row in cohort_data.iterrows():
+            lines.append(f"  {row['ID']:8s} ({row['Sex']}): "
+                        f"Slope = {row['Slope']:7.4f}, "
+                        f"R² = {row['R2']:.3f}, "
+                        f"p = {row['P_value']:.4f}")
+    
+    # Within-cohort variability
+    lines.append("\n\n" + "=" * 80)
+    lines.append("SECTION 2: WITHIN-COHORT VARIABILITY")
+    lines.append("=" * 80)
+    lines.append("\nThis section examines the variability of slopes within each cohort.")
+    
+    for cohort_stat in within_results['cohort_stats']:
+        lines.append(f"\n{cohort_stat['CA (%)']}% CA Cohort:")
+        lines.append(f"  Sample Size:           n = {cohort_stat['N']}")
+        lines.append(f"  Mean Slope:            {cohort_stat['Mean']:.4f} {measure} per {time_unit}")
+        lines.append(f"  Standard Error (SEM):  {cohort_stat['SEM']:.4f}")
+        lines.append(f"  Standard Deviation:    {cohort_stat['SD']:.4f}")
+        lines.append(f"  Median Slope:          {cohort_stat['Median']:.4f}")
+        lines.append(f"  Interquartile Range:   {cohort_stat['IQR']:.4f}")
+        lines.append(f"  Range:                 [{cohort_stat['Min']:.4f}, {cohort_stat['Max']:.4f}]")
+        lines.append(f"  Coefficient of Var:    {cohort_stat['CV']:.2f}%")
+    
+    if within_results['levene_test']:
+        levene = within_results['levene_test']
+        lines.append("\n" + "-" * 80)
+        lines.append("Levene's Test for Equality of Variances:")
+        lines.append("-" * 80)
+        lines.append(f"  Statistic: W = {levene['statistic']:.4f}")
+        lines.append(f"  P-value:   p = {levene['p_value']:.4f}")
+        if levene['p_value'] < 0.05:
+            lines.append("  Result: Variances are significantly different between cohorts (p < 0.05)")
+        else:
+            lines.append("  Result: No significant difference in variances (p ≥ 0.05)")
+    
+    # Between-cohort comparison
+    lines.append("\n\n" + "=" * 80)
+    lines.append("SECTION 3: BETWEEN-COHORT COMPARISON")
+    lines.append("=" * 80)
+    lines.append("\nThis section compares the average slopes between the two cohorts.")
+    
+    if between_results:
+        ca_0 = between_results['ca_groups'][0]
+        ca_1 = between_results['ca_groups'][1]
+        
+        lines.append(f"\nCohort Comparison: {ca_0}% CA vs {ca_1}% CA")
+        lines.append("-" * 80)
+        lines.append(f"  {ca_0}% CA: Mean = {between_results['mean_0']:.4f}, SD = {between_results['sd_0']:.4f} (n={between_results['n_0']})")
+        lines.append(f"  {ca_1}% CA: Mean = {between_results['mean_1']:.4f}, SD = {between_results['sd_1']:.4f} (n={between_results['n_1']})")
+        lines.append(f"  Difference in means: {between_results['mean_diff']:.4f}")
+        
+        # T-test results
+        lines.append("\n" + "-" * 80)
+        lines.append("Welch's T-Test (unequal variances):")
+        lines.append("-" * 80)
+        t_test = between_results['t_test']
+        lines.append(f"  t-statistic: t({t_test['df']:.2f}) = {t_test['statistic']:.4f}")
+        lines.append(f"  P-value:     p = {t_test['p_value']:.4f}")
+        
+        if t_test['p_value'] < 0.001:
+            sig_str = "p < 0.001 (highly significant)"
+        elif t_test['p_value'] < 0.01:
+            sig_str = "p < 0.01 (very significant)"
+        elif t_test['p_value'] < 0.05:
+            sig_str = "p < 0.05 (significant)"
+        else:
+            sig_str = "p ≥ 0.05 (not significant)"
+        
+        lines.append(f"  Result: {sig_str}")
+        
+        # Mann-Whitney U test
+        lines.append("\n" + "-" * 80)
+        lines.append("Mann-Whitney U Test (Non-parametric):")
+        lines.append("-" * 80)
+        mw = between_results['mann_whitney']
+        lines.append(f"  U-statistic: U = {mw['statistic']:.4f}")
+        lines.append(f"  P-value:     p = {mw['p_value']:.4f}")
+        
+        if mw['p_value'] < 0.05:
+            lines.append(f"  Result: Significant difference (p < 0.05)")
+        else:
+            lines.append(f"  Result: No significant difference (p ≥ 0.05)")
+        
+        # Effect size
+        lines.append("\n" + "-" * 80)
+        lines.append("Effect Size (Cohen's d):")
+        lines.append("-" * 80)
+        es = between_results['effect_size']
+        lines.append(f"  Cohen's d:   {es['cohens_d']:.4f}")
+        lines.append(f"  Interpretation: {es['interpretation'].capitalize()} effect size")
+        
+        # Confidence interval
+        lines.append("\n" + "-" * 80)
+        lines.append("95% Confidence Interval for Mean Difference:")
+        lines.append("-" * 80)
+        ci = between_results['confidence_interval']
+        lines.append(f"  Mean Difference: {ci['mean_diff']:.4f}")
+        lines.append(f"  95% CI: [{ci['ci_95_lower']:.4f}, {ci['ci_95_upper']:.4f}]")
+        
+        if ci['ci_95_lower'] * ci['ci_95_upper'] > 0:
+            lines.append("  Interpretation: CI does not include zero (significant difference)")
+        else:
+            lines.append("  Interpretation: CI includes zero (no significant difference)")
+    else:
+        # No between_results (less than 2 cohorts)
+        lines.append("\n[WARNING] Between-cohort comparison could not be performed.")
+        lines.append("Expected 2 cohorts but found a different number.")
+        lines.append("Please ensure you have loaded exactly 2 cohort CSV files.")
+    
+    # Interpretation and conclusion
+    lines.append("\n\n" + "=" * 80)
+    lines.append("SECTION 4: INTERPRETATION AND CONCLUSIONS")
+    lines.append("=" * 80)
+    
+    if between_results and 't_test' in between_results and between_results['t_test']['p_value'] < 0.05:
+        lines.append(f"\nThe two cohorts show SIGNIFICANTLY DIFFERENT rates of weight change.")
+        lines.append(f"The {between_results['ca_groups'][1]}% CA group has a mean slope that is")
+        lines.append(f"{abs(between_results['mean_diff']):.4f} {measure} per {time_unit} {'higher' if between_results['mean_diff'] > 0 else 'lower'}")
+        lines.append(f"than the {between_results['ca_groups'][0]}% CA group (p = {between_results['t_test']['p_value']:.4f}).")
+    elif between_results and 't_test' in between_results:
+        lines.append(f"\nThe two cohorts show NO SIGNIFICANT DIFFERENCE in rates of weight change.")
+        lines.append(f"Both groups put on weight at approximately the same rate (p = {between_results['t_test']['p_value']:.4f}).")
+    else:
+        lines.append(f"\n[WARNING] Between-cohort comparison could not be completed.")
+        lines.append("This analysis requires exactly 2 cohorts to be loaded.")
+        lines.append("Please run the analysis again with 2 cohort CSV files selected.")
+    
+    lines.append("\n" + "=" * 80)
+    lines.append("END OF REPORT")
+    lines.append("=" * 80)
+    
+    return "\n".join(lines)
+
+
+def perform_complete_slope_analysis(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    measure: str = "Total Change",
+    time_unit: str = "Week",
+    save_plot: bool = True,
+    save_report: bool = True,
+    output_dir: Optional[Path] = None
+) -> Dict:
+    """
+    Perform complete slope analysis: calculate slopes, compare within/between cohorts,
+    generate plots and report.
+    
+    This is a convenience function that runs the entire analysis pipeline.
+    
+    Parameters:
+        cohort_dfs: Dictionary mapping cohort labels to DataFrames
+        measure: Weight measure to analyze ('Total Change', 'Daily Change', 'Weight')
+        time_unit: Time variable to use ('Week' or 'Day')
+        save_plot: Whether to save the visualization
+        save_report: Whether to save the text report
+        output_dir: Directory for saving outputs (default: current directory)
+        
+    Returns:
+        Dictionary with all analysis results
+    """
+    print("\n" + "="*80)
+    print("COMPLETE SLOPE ANALYSIS PIPELINE")
+    print("="*80)
+    
+    # Step 1: Calculate individual slopes
+    slopes_df = calculate_animal_slopes(cohort_dfs, measure=measure, time_unit=time_unit)
+    
+    # Step 2: Compare within cohorts
+    within_results = compare_slopes_within_cohorts(slopes_df)
+    
+    # Step 3: Compare between cohorts
+    between_results = compare_slopes_between_cohorts(slopes_df)
+    
+    # Step 4: Generate report
+    report_text = generate_slope_analysis_report(
+        slopes_df, within_results, between_results, 
+        measure=measure, time_unit=time_unit
+    )
+    
+    print("\n" + "="*80)
+    print("REPORT PREVIEW")
+    print("="*80)
+    print(report_text)
+    
+    # Prepare output directory and timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    if output_dir is None:
+        output_dir = Path.cwd()
+    else:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Step 5: Save report to file
+    if save_report:
+        report_path = output_dir / f"slope_analysis_report_{measure.replace(' ', '_')}_{timestamp}.txt"
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write(report_text)
+        print(f"\n[OK] Report saved to: {report_path}")
+    
+    # Step 6: Create visualization
+    if HAS_MATPLOTLIB:
+        plot_path = output_dir / f"slope_analysis_{measure.replace(' ', '_')}_{timestamp}.svg" if save_plot else None
+        
+        fig = plot_slopes_comparison(
+            slopes_df, 
+            measure=measure, 
+            time_unit=time_unit,
+            save_path=plot_path,
+            show=True
+        )
+    
+    return {
+        'slopes_df': slopes_df,
+        'within_results': within_results,
+        'between_results': between_results,
+        'report_text': report_text,
+        'measure': measure,
+        'time_unit': time_unit
+    }
+
+
+# =============================================================================
+
+
+# =============================================================================
 # TEST/DEMO FUNCTIONS
 # =============================================================================
 
@@ -5557,6 +6306,93 @@ def test_load_two_cohorts():
         return cohorts
 
 
+def test_slope_analysis():
+    """
+    Interactive test: Select two cohort files and perform complete slope analysis.
+    
+    This will:
+    1. Load two cohort CSV files via GUI
+    2. Calculate linear slopes for each animal's Total Change vs Week
+    3. Compare slopes within each cohort
+    4. Compare slopes between cohorts
+    5. Generate plots and report
+    """
+    print("\n" + "="*80)
+    print("INTERACTIVE SLOPE ANALYSIS TEST")
+    print("="*80)
+    print("\nThis analysis will:")
+    print("  1. Load two cohort CSV files")
+    print("  2. Calculate rate of weight change (slope) for each animal")
+    print("  3. Compare slopes within and between cohorts")
+    print("  4. Generate plots and statistical report")
+    print("\n")
+    
+    # Load cohorts
+    cohorts = test_load_two_cohorts()
+    
+    if not cohorts or len(cohorts) < 2:
+        print("\n[ERROR] Need at least 2 cohorts for slope analysis.")
+        return None
+    
+    # Ask user for parameters
+    print("\n" + "="*80)
+    print("ANALYSIS PARAMETERS")
+    print("="*80)
+    
+    # Measure selection
+    print("\nSelect measure to analyze:")
+    print("  1. Total Change (default)")
+    print("  2. Daily Change")
+    print("  3. Weight")
+    
+    measure_choice = input("\nEnter choice (1-3) [default: 1]: ").strip()
+    
+    if measure_choice == "2":
+        measure = "Daily Change"
+    elif measure_choice == "3":
+        measure = "Weight"
+    else:
+        measure = "Total Change"
+    
+    # Time unit selection
+    print("\nSelect time unit:")
+    print("  1. Week (default)")
+    print("  2. Day")
+    
+    time_choice = input("\nEnter choice (1-2) [default: 1]: ").strip()
+    
+    if time_choice == "2":
+        time_unit = "Day"
+    else:
+        time_unit = "Week"
+    
+    print(f"\n[OK] Analysis parameters:")
+    print(f"  Measure:   {measure}")
+    print(f"  Time Unit: {time_unit}")
+    
+    # Perform complete analysis
+    print("\n" + "="*80)
+    print("RUNNING SLOPE ANALYSIS...")
+    print("="*80)
+    
+    results = perform_complete_slope_analysis(
+        cohorts,
+        measure=measure,
+        time_unit=time_unit,
+        save_plot=True,
+        save_report=True
+    )
+    
+    print("\n" + "="*80)
+    print("[SUCCESS] Slope analysis completed!")
+    print("="*80)
+    print("\nResults saved to current directory:")
+    print("  - Plot: slope_analysis_*.svg")
+    print("  - Report: slope_analysis_report_*.txt")
+    
+    return results
+
+
 # =============================================================================
 # MAIN EXECUTION
 # =============================================================================
@@ -5595,8 +6431,9 @@ if __name__ == "__main__":
         print("  9. All analyses + report + all plots (weight + interactions)")
         print(" 10. Week-level conservative analyses + auto-save reports (all measures, Bonferroni-corrected)")
         print(" 11. 2-way CA% × Week mixed ANOVA (sex collapsed) + post-hoc Tukey + sphericity/GG")
+        print(" 12. SLOPE ANALYSIS - Compare rate of weight change between cohorts")
         
-        user_input = input("\nSelect option (1-11) or 'n' to skip: ")
+        user_input = input("\nSelect option (1-12) or 'n' to skip: ")
         
         mixed_results = None
         between_final_results = None
@@ -5969,6 +6806,59 @@ if __name__ == "__main__":
             print(f"[OK] CA% × Week report saved to: {report_file}")
             print(f"{'='*80}")
 
+        # --- Option 12: SLOPE ANALYSIS ---
+        if user_input == '12':
+            print("\n" + "="*80)
+            print("SLOPE ANALYSIS: RATE OF WEIGHT CHANGE COMPARISON")
+            print("="*80)
+            
+            # Ask user for parameters
+            print("\nSelect measure to analyze:")
+            print("  1. Total Change (default)")
+            print("  2. Daily Change")
+            print("  3. Weight")
+            
+            measure_choice = input("\nEnter choice (1-3) [default: 1]: ").strip()
+            
+            if measure_choice == "2":
+                measure = "Daily Change"
+            elif measure_choice == "3":
+                measure = "Weight"
+            else:
+                measure = "Total Change"
+            
+            # Time unit selection
+            print("\nSelect time unit:")
+            print("  1. Week (default)")
+            print("  2. Day")
+            
+            time_choice = input("\nEnter choice (1-2) [default: 1]: ").strip()
+            
+            if time_choice == "2":
+                time_unit = "Day"
+            else:
+                time_unit = "Week"
+            
+            print(f"\n[OK] Analysis parameters:")
+            print(f"  Measure:   {measure}")
+            print(f"  Time Unit: {time_unit}")
+            
+            # Perform complete analysis
+            slope_results = perform_complete_slope_analysis(
+                cohorts,
+                measure=measure,
+                time_unit=time_unit,
+                save_plot=True,
+                save_report=True
+            )
+            
+            print("\n" + "="*80)
+            print("[SUCCESS] Slope analysis completed!")
+            print("="*80)
+            print("\nResults saved to current directory:")
+            print("  - Plot: slope_analysis_*.svg")
+            print("  - Report: slope_analysis_report_*.txt")
+
         # Summary of what was run
         if mixed_results or between_final_results or between_avg_results or daily_results or results_males or results_females or results_ca0 or results_ca2 or plot_figures or interaction_figures:
             print("\n" + "="*80)
@@ -6080,4 +6970,14 @@ if __name__ == "__main__":
         print("         mixed_results=perform_cross_cohort_mixed_anova_weekly(cohorts),")
         print("         results_males=w_males, results_females=w_females,")
         print("         results_ca0=w_ca0, results_ca2=w_ca2, cohort_dfs=cohorts)")
+        print("\n 11. SLOPE ANALYSIS - Compare rate of weight change between cohorts:")
+        print("     # Calculate individual slopes and compare between cohorts")
+        print("     slope_results = perform_complete_slope_analysis(")
+        print("         cohorts, measure='Total Change', time_unit='Week',")
+        print("         save_plot=True, save_report=True)")
+        print("     # Or step by step:")
+        print("     slopes_df = calculate_animal_slopes(cohorts, measure='Total Change', time_unit='Week')")
+        print("     within = compare_slopes_within_cohorts(slopes_df)")
+        print("     between = compare_slopes_between_cohorts(slopes_df)")
+        print("     fig = plot_slopes_comparison(slopes_df, measure='Total Change', time_unit='Week')")
         print("="*80)
