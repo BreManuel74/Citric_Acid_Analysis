@@ -2426,6 +2426,383 @@ def perform_mixed_anova_posthoc(df: pd.DataFrame, measure: str,
 	return results
 
 
+def plot_time_by_sex_interaction(
+	df: pd.DataFrame,
+	measure: str,
+	time_col: str = 'Day',
+	results: Optional[dict] = None,
+	save_dir: Optional[Path] = None,
+	show: bool = True
+) -> plt.Figure:
+	"""
+	Plot Time × Sex interaction showing how measure changes over time for each sex.
+	
+	Parameters:
+		df: DataFrame with time_col, Sex, and measure columns
+		measure: Name of the measure column to plot (e.g., "Total Change")
+		time_col: Name of the time column ('Day' or 'Week')
+		results: Optional results dict with interaction p-value
+		save_dir: Optional directory to save plot
+		show: Whether to display plot
+		
+	Returns:
+		matplotlib Figure object
+	"""
+	# Group by sex and time, compute mean and SEM
+	grouped = df.groupby(['Sex', time_col])[measure].agg(['mean', 'sem']).reset_index()
+	
+	male_data = grouped[grouped['Sex'] == 'M']
+	female_data = grouped[grouped['Sex'] == 'F']
+	
+	fig, ax = plt.subplots(figsize=(12, 8))
+	
+	# Plot males
+	ax.errorbar(male_data[time_col], male_data['mean'], yerr=male_data['sem'],
+			   marker='o', markersize=8, linewidth=2.5, capsize=5, capthick=2,
+			   color='steelblue', markerfacecolor='lightblue', markeredgecolor='steelblue',
+			   label='Male', linestyle='-', markeredgewidth=2, alpha=0.8)
+	
+	# Plot females
+	ax.errorbar(female_data[time_col], female_data['mean'], yerr=female_data['sem'],
+			   marker='s', markersize=8, linewidth=2.5, capsize=5, capthick=2,
+			   color='coral', markerfacecolor='lightcoral', markeredgecolor='coral',
+			   label='Female', linestyle='--', markeredgewidth=2, alpha=0.8)
+	
+	ax.set_xlabel(time_col, fontsize=14, weight='bold')
+	ax.set_ylabel(f'{measure} (%, Mean ± SEM)', fontsize=14, weight='bold')
+	
+	# Title with p-value if available
+	if results and 'interaction' in results:
+		p_val = results['interaction'].get('p', np.nan)
+		if not np.isnan(p_val):
+			sig_marker = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'
+			ax.set_title(f'{time_col} × Sex Interaction: {measure}\n(p = {p_val:.4f} {sig_marker})',
+						fontsize=16, weight='bold', pad=20)
+		else:
+			ax.set_title(f'{time_col} × Sex Interaction: {measure}', fontsize=16, weight='bold', pad=20)
+	else:
+		ax.set_title(f'{time_col} × Sex Interaction: {measure}', fontsize=16, weight='bold', pad=20)
+	
+	ax.tick_params(axis='both', labelsize=12, direction='in', length=6)
+	ax.legend(loc='best', fontsize=13, frameon=True, shadow=True, fancybox=True)
+	ax.spines['top'].set_visible(False)
+	ax.spines['right'].set_visible(False)
+	ax.spines['left'].set_linewidth(1.5)
+	ax.spines['bottom'].set_linewidth(1.5)
+	ax.grid(False)
+	
+	# Ensure x-axis shows whole numbers only
+	ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+	
+	# Set y-axis to start on a tick mark
+	ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins='auto', prune=None))
+	ymin, ymax = ax.get_ylim()
+	ticks = ax.yaxis.get_major_locator().tick_values(ymin, ymax)
+	if len(ticks) > 0:
+		ax.set_ylim(bottom=ticks[0])
+	
+	plt.tight_layout(pad=1.5)
+	
+	if save_dir:
+		save_dir = Path(save_dir)
+		save_dir.mkdir(parents=True, exist_ok=True)
+		safe_measure = measure.replace(' ', '_')
+		save_path = save_dir / f"CAH_{time_col}_by_Sex_{safe_measure}.svg"
+		fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+		print(f"  [OK] Saved to: {save_path}")
+	
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+	
+	return fig
+
+
+def plot_time_by_ca_interaction(
+	df: pd.DataFrame,
+	measure: str,
+	time_col: str = 'Day',
+	results: Optional[dict] = None,
+	save_dir: Optional[Path] = None,
+	show: bool = True
+) -> plt.Figure:
+	"""
+	Plot Time × CA% interaction showing how measure changes over time for each CA% level.
+	
+	Parameters:
+		df: DataFrame with time_col, CA (%), and measure columns
+		measure: Name of the measure column to plot (e.g., "Total Change")
+		time_col: Name of the time column ('Day' or 'Week')
+		results: Optional results dict with interaction p-value
+		save_dir: Optional directory to save plot
+		show: Whether to display plot
+		
+	Returns:
+		matplotlib Figure object
+	"""
+	# Group by CA% and time, compute mean and SEM
+	grouped = df.groupby(['CA (%)', time_col])[measure].agg(['mean', 'sem']).reset_index()
+	
+	ca0_data = grouped[grouped['CA (%)'] == 0]
+	ca2_data = grouped[grouped['CA (%)'] == 2]
+	
+	fig, ax = plt.subplots(figsize=(12, 8))
+	
+	# Plot 0% CA
+	ax.errorbar(ca0_data[time_col], ca0_data['mean'], yerr=ca0_data['sem'],
+			   marker='o', markersize=8, linewidth=2.5, capsize=5, capthick=2,
+			   color='forestgreen', markerfacecolor='lightgreen', markeredgecolor='forestgreen',
+			   label='0% CA', linestyle='-', markeredgewidth=2, alpha=0.8)
+	
+	# Plot 2% CA
+	ax.errorbar(ca2_data[time_col], ca2_data['mean'], yerr=ca2_data['sem'],
+			   marker='s', markersize=8, linewidth=2.5, capsize=5, capthick=2,
+			   color='crimson', markerfacecolor='lightcoral', markeredgecolor='crimson',
+			   label='2% CA', linestyle='--', markeredgewidth=2, alpha=0.8)
+	
+	ax.set_xlabel(time_col, fontsize=14, weight='bold')
+	ax.set_ylabel(f'{measure} (%, Mean ± SEM)', fontsize=14, weight='bold')
+	
+	# Title with p-value if available
+	if results and 'interaction' in results:
+		p_val = results['interaction'].get('p', np.nan)
+		if not np.isnan(p_val):
+			sig_marker = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'
+			ax.set_title(f'{time_col} × CA% Interaction: {measure}\n(p = {p_val:.4f} {sig_marker})',
+						fontsize=16, weight='bold', pad=20)
+		else:
+			ax.set_title(f'{time_col} × CA% Interaction: {measure}', fontsize=16, weight='bold', pad=20)
+	else:
+		ax.set_title(f'{time_col} × CA% Interaction: {measure}', fontsize=16, weight='bold', pad=20)
+	
+	ax.tick_params(axis='both', labelsize=12, direction='in', length=6)
+	ax.legend(loc='best', fontsize=13, frameon=True, shadow=True, fancybox=True)
+	ax.spines['top'].set_visible(False)
+	ax.spines['right'].set_visible(False)
+	ax.spines['left'].set_linewidth(1.5)
+	ax.spines['bottom'].set_linewidth(1.5)
+	ax.grid(False)
+	
+	# Ensure x-axis shows whole numbers only
+	ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+	
+	# Set y-axis to start on a tick mark
+	ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins='auto', prune=None))
+	ymin, ymax = ax.get_ylim()
+	ticks = ax.yaxis.get_major_locator().tick_values(ymin, ymax)
+	if len(ticks) > 0:
+		ax.set_ylim(bottom=ticks[0])
+	
+	plt.tight_layout(pad=1.5)
+	
+	if save_dir:
+		save_dir = Path(save_dir)
+		save_dir.mkdir(parents=True, exist_ok=True)
+		safe_measure = measure.replace(' ', '_')
+		save_path = save_dir / f"CAH_{time_col}_by_CA_{safe_measure}.svg"
+		fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+		print(f"  [OK] Saved to: {save_path}")
+	
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+	
+	return fig
+
+
+def plot_time_by_ca_stratified(
+	df: pd.DataFrame,
+	measure: str,
+	sex: str,
+	time_col: str = 'Day',
+	results: Optional[dict] = None,
+	save_dir: Optional[Path] = None,
+	show: bool = True
+) -> plt.Figure:
+	"""
+	Plot Time × CA% interaction for a specific sex (sex-stratified analysis).
+	
+	Parameters:
+		df: DataFrame with time_col, CA (%), and measure columns (already filtered by sex)
+		measure: Name of the measure column to plot
+		sex: Sex being analyzed ('M' or 'F')
+		time_col: Name of the time column ('Day' or 'Week')
+		results: Optional results dict with interaction p-value
+		save_dir: Optional directory to save plot
+		show: Whether to display plot
+		
+	Returns:
+		matplotlib Figure object
+	"""
+	# Group by CA% and time, compute mean and SEM
+	grouped = df.groupby(['CA (%)', time_col])[measure].agg(['mean', 'sem']).reset_index()
+	
+	ca0_data = grouped[grouped['CA (%)'] == 0]
+	ca2_data = grouped[grouped['CA (%)'] == 2]
+	
+	fig, ax = plt.subplots(figsize=(12, 8))
+	
+	# Plot 0% CA
+	ax.errorbar(ca0_data[time_col], ca0_data['mean'], yerr=ca0_data['sem'],
+			   marker='o', markersize=8, linewidth=2.5, capsize=5, capthick=2,
+			   color='forestgreen', markerfacecolor='lightgreen', markeredgecolor='forestgreen',
+			   label='0% CA', linestyle='-', markeredgewidth=2, alpha=0.8)
+	
+	# Plot 2% CA
+	ax.errorbar(ca2_data[time_col], ca2_data['mean'], yerr=ca2_data['sem'],
+			   marker='s', markersize=8, linewidth=2.5, capsize=5, capthick=2,
+			   color='crimson', markerfacecolor='lightcoral', markeredgecolor='crimson',
+			   label='2% CA', linestyle='--', markeredgewidth=2, alpha=0.8)
+	
+	sex_label = 'Males' if sex == 'M' else 'Females'
+	ax.set_xlabel(time_col, fontsize=14, weight='bold')
+	ax.set_ylabel(f'{measure} (%, Mean ± SEM)', fontsize=14, weight='bold')
+	
+	# Title with p-value if available
+	if results and 'interaction' in results:
+		p_val = results['interaction'].get('p', np.nan)
+		if not np.isnan(p_val):
+			sig_marker = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'
+			ax.set_title(f'{time_col} × CA% Interaction in {sex_label}: {measure}\n(p = {p_val:.4f} {sig_marker})',
+						fontsize=16, weight='bold', pad=20)
+		else:
+			ax.set_title(f'{time_col} × CA% Interaction in {sex_label}: {measure}', fontsize=16, weight='bold', pad=20)
+	else:
+		ax.set_title(f'{time_col} × CA% Interaction in {sex_label}: {measure}', fontsize=16, weight='bold', pad=20)
+	
+	ax.tick_params(axis='both', labelsize=12, direction='in', length=6)
+	ax.legend(loc='best', fontsize=13, frameon=True, shadow=True, fancybox=True)
+	ax.spines['top'].set_visible(False)
+	ax.spines['right'].set_visible(False)
+	ax.spines['left'].set_linewidth(1.5)
+	ax.spines['bottom'].set_linewidth(1.5)
+	ax.grid(False)
+	
+	# Ensure x-axis shows whole numbers only
+	ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+	
+	# Set y-axis to start on a tick mark
+	ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins='auto', prune=None))
+	ymin, ymax = ax.get_ylim()
+	ticks = ax.yaxis.get_major_locator().tick_values(ymin, ymax)
+	if len(ticks) > 0:
+		ax.set_ylim(bottom=ticks[0])
+	
+	plt.tight_layout(pad=1.5)
+	
+	if save_dir:
+		save_dir = Path(save_dir)
+		save_dir.mkdir(parents=True, exist_ok=True)
+		safe_measure = measure.replace(' ', '_')
+		save_path = save_dir / f"CAH_{time_col}_by_CA_{sex_label}_{safe_measure}.svg"
+		fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+		print(f"  [OK] Saved to: {save_path}")
+	
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+	
+	return fig
+
+
+def plot_time_by_sex_stratified(
+	df: pd.DataFrame,
+	measure: str,
+	ca_percent: int,
+	time_col: str = 'Day',
+	results: Optional[dict] = None,
+	save_dir: Optional[Path] = None,
+	show: bool = True
+) -> plt.Figure:
+	"""
+	Plot Time × Sex interaction for a specific CA% level (CA%-stratified analysis).
+	
+	Parameters:
+		df: DataFrame with time_col, Sex, and measure columns (already filtered by CA%)
+		measure: Name of the measure column to plot
+		ca_percent: CA% level being analyzed (0 or 2)
+		time_col: Name of the time column ('Day' or 'Week')
+		results: Optional results dict with interaction p-value
+		save_dir: Optional directory to save plot
+		show: Whether to display plot
+		
+	Returns:
+		matplotlib Figure object
+	"""
+	# Group by sex and time, compute mean and SEM
+	grouped = df.groupby(['Sex', time_col])[measure].agg(['mean', 'sem']).reset_index()
+	
+	male_data = grouped[grouped['Sex'] == 'M']
+	female_data = grouped[grouped['Sex'] == 'F']
+	
+	fig, ax = plt.subplots(figsize=(12, 8))
+	
+	# Plot males
+	ax.errorbar(male_data[time_col], male_data['mean'], yerr=male_data['sem'],
+			   marker='o', markersize=8, linewidth=2.5, capsize=5, capthick=2,
+			   color='steelblue', markerfacecolor='lightblue', markeredgecolor='steelblue',
+			   label='Male', linestyle='-', markeredgewidth=2, alpha=0.8)
+	
+	# Plot females
+	ax.errorbar(female_data[time_col], female_data['mean'], yerr=female_data['sem'],
+			   marker='s', markersize=8, linewidth=2.5, capsize=5, capthick=2,
+			   color='coral', markerfacecolor='lightcoral', markeredgecolor='coral',
+			   label='Female', linestyle='--', markeredgewidth=2, alpha=0.8)
+	
+	ax.set_xlabel(time_col, fontsize=14, weight='bold')
+	ax.set_ylabel(f'{measure} (%, Mean ± SEM)', fontsize=14, weight='bold')
+	
+	# Title with p-value if available
+	if results and 'interaction' in results:
+		p_val = results['interaction'].get('p', np.nan)
+		if not np.isnan(p_val):
+			sig_marker = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'
+			ax.set_title(f'{time_col} × Sex Interaction at {ca_percent}% CA: {measure}\n(p = {p_val:.4f} {sig_marker})',
+						fontsize=16, weight='bold', pad=20)
+		else:
+			ax.set_title(f'{time_col} × Sex Interaction at {ca_percent}% CA: {measure}', fontsize=16, weight='bold', pad=20)
+	else:
+		ax.set_title(f'{time_col} × Sex Interaction at {ca_percent}% CA: {measure}', fontsize=16, weight='bold', pad=20)
+	
+	ax.tick_params(axis='both', labelsize=12, direction='in', length=6)
+	ax.legend(loc='best', fontsize=13, frameon=True, shadow=True, fancybox=True)
+	ax.spines['top'].set_visible(False)
+	ax.spines['right'].set_visible(False)
+	ax.spines['left'].set_linewidth(1.5)
+	ax.spines['bottom'].set_linewidth(1.5)
+	ax.grid(False)
+	
+	# Ensure x-axis shows whole numbers only
+	ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+	
+	# Set y-axis to start on a tick mark
+	ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins='auto', prune=None))
+	ymin, ymax = ax.get_ylim()
+	ticks = ax.yaxis.get_major_locator().tick_values(ymin, ymax)
+	if len(ticks) > 0:
+		ax.set_ylim(bottom=ticks[0])
+	
+	plt.tight_layout(pad=1.5)
+	
+	if save_dir:
+		save_dir = Path(save_dir)
+		save_dir.mkdir(parents=True, exist_ok=True)
+		safe_measure = measure.replace(' ', '_')
+		save_path = save_dir / f"CAH_{time_col}_by_Sex_at_{ca_percent}pctCA_{safe_measure}.svg"
+		fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+		print(f"  [OK] Saved to: {save_path}")
+	
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+	
+	return fig
+
+
 def plot_interaction_effects(
 	between_results: Optional[dict] = None,
 	mixed_results: Optional[dict] = None,
@@ -2567,7 +2944,7 @@ def plot_interaction_effects(
 			   label='Female', linestyle='--', markeredgewidth=2)
 	
 	ax.set_xlabel('Citric Acid Concentration (%)', fontsize=14, weight='bold')
-	ax.set_ylabel(f'{measure} (g)', fontsize=14, weight='bold')
+	ax.set_ylabel(f'{measure} (%)', fontsize=14, weight='bold')
 	
 	# Title with p-value if available
 	if not np.isnan(interaction_p):
@@ -2665,7 +3042,7 @@ def plot_total_change_by_id(
 		)
 
 	ax.set_xlabel("Day", fontsize=12)
-	ax.set_ylabel("Total Change (g)", fontsize=12)
+	ax.set_ylabel("Total Change (%)", fontsize=12)
 	ax.grid(False)
 	ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 
@@ -2766,7 +3143,7 @@ def plot_daily_change_by_id(
 		)
 
 	ax.set_xlabel("Day", fontsize=12)
-	ax.set_ylabel("Daily Change (g)", fontsize=12)
+	ax.set_ylabel("Daily Change (%)", fontsize=12)
 	ax.grid(False)
 	ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 
@@ -2877,7 +3254,7 @@ def plot_total_change_by_sex(
 						color="purple", alpha=0.2)
 	
 	ax.set_xlabel("Day", fontsize=12)
-	ax.set_ylabel("Total Change (g, Mean ± SEM)", fontsize=12)
+	ax.set_ylabel("Total Change (%, Mean ± SEM)", fontsize=12)
 	ax.grid(False)
 	ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 	
@@ -2976,7 +3353,7 @@ def plot_daily_change_by_sex(
 						color="purple", alpha=0.2)
 	
 	ax.set_xlabel("Day", fontsize=12)
-	ax.set_ylabel("Daily Change (g, Mean ± SEM)", fontsize=12)
+	ax.set_ylabel("Daily Change (%, Mean ± SEM)", fontsize=12)
 	ax.grid(False)
 	ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 	
@@ -3087,7 +3464,7 @@ def plot_total_change_by_ca(
 						color=ca2_color, alpha=0.2)
 	
 	ax.set_xlabel("Day", fontsize=12)
-	ax.set_ylabel("Total Change (g, Mean ± SEM)", fontsize=12)
+	ax.set_ylabel("Total Change (%, Mean ± SEM)", fontsize=12)
 	ax.grid(False)
 	ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 	
@@ -3198,7 +3575,7 @@ def plot_daily_change_by_ca(
 						color=ca2_color, alpha=0.2)
 	
 	ax.set_xlabel("Day", fontsize=12)
-	ax.set_ylabel("Daily Change (g, Mean ± SEM)", fontsize=12)
+	ax.set_ylabel("Daily Change (%, Mean ± SEM)", fontsize=12)
 	ax.grid(False)
 	ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 	
@@ -3349,11 +3726,10 @@ def main():
 		time_unit = 'week' if use_weeks else 'day'
 		time_label = 'Week' if use_weeks else 'Day'
 		
-		# If using weeks, add week column and average
+		# If using weeks, add week column
 		if use_weeks:
 			print("\nProcessing data for week-based analysis...")
 			print("  - Adding week column (Day 0 excluded)")
-			print("  - Averaging measures within each week per animal")
 			
 			df = add_week_column(df)
 			
@@ -3364,11 +3740,6 @@ def main():
 				for week, (d_min, d_max) in week_counts.items():
 					if pd.notna(week):
 						print(f"  Week {int(week)}: Days {int(d_min)}-{int(d_max)}")
-			
-			# Average by week
-			df = average_by_week(df, measure="Total Change")
-			print(f"  Data shape after averaging: {df.shape}")
-			print(f"  Weeks available: {sorted(df['Week'].dropna().unique())}")
 		
 		# Ask user for multiple comparison correction method
 		print("\nChoose multiple comparison correction for post-hoc tests:")
@@ -3381,195 +3752,247 @@ def main():
 		
 		print(f"\nUsing {correction_name} correction for post-hoc tests")
 		
-		# Example 1: Between-subjects ANOVA at final time point
-		final_time = 4 if use_weeks else 27
-		print("\n\n" + "="*80)
-		print(f"EXAMPLE 1: Between-Subjects ANOVA at Final Time Point ({time_label} {final_time})")
-		print("="*80)
-		results_final = perform_two_way_between_anova(
-			df, 
-			measure="Total Change",
-			time_point=final_time,
-			average_over_days=False
-		)
+		# ====================================================================
+		# ANALYZE BOTH MEASURES: Total Change and Daily Change
+		# ====================================================================
+		measures_to_analyze = ["Total Change", "Daily Change"]
+		all_results = {}  # Store results for each measure
 		
-		# Example 2: Between-subjects ANOVA with averaged data
-		print("\n\n" + "="*80)
-		print(f"EXAMPLE 2: Between-Subjects ANOVA with {time_label}-Averaged Data")
-		print("="*80)
-		results_avg = perform_two_way_between_anova(
-			df,
-			measure="Total Change",
-			average_over_days=True
-		)
+		# Only ask once about post-hoc tests
+		run_posthoc = input("\nWould you like to run post-hoc tests for stratified mixed ANOVAs (both measures)? (y/n): ").strip().lower()
 		
-		# Example 3: Mixed ANOVA with Time
-		print("\n\n" + "="*80)
-		print(f"EXAMPLE 3: Mixed ANOVA - Time × Sex × CA%")
-		print("="*80)
-		print(f"Note: Using all available {time_label.lower()}s for complete analysis")
-		results_mixed = perform_mixed_anova_time(
-			df,
-			measure="Total Change",
-			time_points=None,  # Use all available time points
-			time_unit=time_unit
-		)
-		
-		# Example 4: Sex-stratified Mixed ANOVA - Males only
-		print("\n\n" + "="*80)
-		print(f"EXAMPLE 4: Sex-Stratified Mixed ANOVA - Time × CA% (MALES ONLY)")
-		print("="*80)
-		results_males = perform_mixed_anova_sex_stratified(
-			df,
-			sex="M",
-			measure="Total Change",
-			time_points=None,
-			time_unit=time_unit
-		)
-		
-		# Example 5: Sex-stratified Mixed ANOVA - Females only
-		print("\n\n" + "="*80)
-		print(f"EXAMPLE 5: Sex-Stratified Mixed ANOVA - Time × CA% (FEMALES ONLY)")
-		print("="*80)
-		results_females = perform_mixed_anova_sex_stratified(
-			df,
-			sex="F",
-			measure="Total Change",
-			time_points=None,
-			time_unit=time_unit
-		)
-		
-		# Example 6: CA%-stratified Mixed ANOVA - 0% CA only
-		print("\n\n" + "="*80)
-		print(f"EXAMPLE 6: CA%-Stratified Mixed ANOVA - Time × Sex (0% CA ONLY)")
-		print("="*80)
-		results_ca0 = perform_mixed_anova_ca_stratified(
-			df,
-			ca_percent=0,
-			measure="Total Change",
-			time_points=None,
-			time_unit=time_unit
-		)
-		
-		# Example 7: CA%-stratified Mixed ANOVA - 2% CA only
-		print("\n\n" + "="*80)
-		print(f"EXAMPLE 7: CA%-Stratified Mixed ANOVA - Time × Sex (2% CA ONLY)")
-		print("="*80)
-		results_ca2 = perform_mixed_anova_ca_stratified(
-			df,
-			ca_percent=2,
-			measure="Total Change",
-			time_points=None,
-			time_unit=time_unit
-		)
-		
-		# Post-hoc tests if main effects are significant
-		tukey_results = None
-		
-		if results_avg and results_avg.get('sex', {}).get('significant'):
-			print("\n\nSex effect is significant. Running Tukey HSD...")
-			avg_df = df.groupby(["ID", "Sex", "CA (%)"])["Total Change"].mean().reset_index()
-			tukey_sex = perform_tukey_hsd(avg_df, "Total Change", "Sex")
-		
-		if results_avg and results_avg.get('ca_percent', {}).get('significant'):
-			print("\n\nCA% effect is significant. Running Tukey HSD...")
-			avg_df = df.groupby(["ID", "Sex", "CA (%)"])["Total Change"].mean().reset_index()
-			avg_df["CA (%) Group"] = avg_df["CA (%)"].astype(str) + "%"
-			tukey_results = perform_tukey_hsd(avg_df, "Total Change", "CA (%) Group")
-		
-		# Run post-hoc tests for sex-stratified mixed ANOVAs if significant interaction
-		mixed_posthoc_males = None
-		mixed_posthoc_females = None
-		mixed_posthoc_ca0 = None
-		mixed_posthoc_ca2 = None
-		
-		# Determine which time column to use for post-hoc
-		time_col = "Week" if use_weeks else "Day"
-		
-		# Check if any of the stratified analyses had significant interactions
-		run_posthoc = input("\nWould you like to run post-hoc tests for stratified mixed ANOVAs? (y/n): ").strip().lower()
-		
-		if run_posthoc == 'y':
-			# Post-hoc for males (Time x CA%)
-			if results_males and results_males.get('interaction', {}).get('significant'):
-				print(f"\n\nTime × CA% interaction significant in males. Running post-hoc tests...")
-				male_df = df[df['Sex'] == 'M'].copy()
-				mixed_posthoc_males = perform_mixed_anova_posthoc(
-					male_df,
-					measure="Total Change",
-					within=time_col,
-					between="CA (%)",
-					subject="ID",
-					padjust=padjust_method
-				)
+		for measure in measures_to_analyze:
+			print("\n\n" + "="*80)
+			print(f"ANALYZING MEASURE: {measure}")
+			print("="*80)
 			
-			# Post-hoc for females (Time x CA%)
-			if results_females and results_females.get('interaction', {}).get('significant'):
-				print(f"\n\nTime × CA% interaction significant in females. Running post-hoc tests...")
-				female_df = df[df['Sex'] == 'F'].copy()
-				mixed_posthoc_females = perform_mixed_anova_posthoc(
-					female_df,
-					measure="Total Change",
-					within=time_col,
-					between="CA (%)",
-					subject="ID",
-					padjust=padjust_method
-				)
+			# Make a copy of the data for this measure
+			df_measure = df.copy()
 			
-			# Post-hoc for 0% CA (Time x Sex)
-			if results_ca0 and results_ca0.get('interaction', {}).get('significant'):
-				print(f"\n\nTime × Sex interaction significant at 0% CA. Running post-hoc tests...")
-				ca0_df = df[df['CA (%)'] == 0].copy()
-				mixed_posthoc_ca0 = perform_mixed_anova_posthoc(
-					ca0_df,
-					measure="Total Change",
-					within=time_col,
-					between="Sex",
-					subject="ID",
-					padjust=padjust_method
-				)
+			# If using weeks, average by week for this measure
+			if use_weeks:
+				print(f"\n  - Averaging {measure} within each week per animal")
+				df_measure = average_by_week(df_measure, measure=measure)
+				print(f"  - Data shape after averaging: {df_measure.shape}")
+				print(f"  - Weeks available: {sorted(df_measure['Week'].dropna().unique())}")
 			
-			# Post-hoc for 2% CA (Time x Sex)
-			if results_ca2 and results_ca2.get('interaction', {}).get('significant'):
-				print(f"\n\nTime × Sex interaction significant at 2% CA. Running post-hoc tests...")
-				ca2_df = df[df['CA (%)'] == 2].copy()
-				mixed_posthoc_ca2 = perform_mixed_anova_posthoc(
-					ca2_df,
-					measure="Total Change",
-					within=time_col,
-					between="Sex",
-					subject="ID",
-					padjust=padjust_method
-				)
+			# Store results for this measure
+			measure_results = {}
+			
+			# Example 1: Between-subjects ANOVA at final time point
+			final_time = 4 if use_weeks else 27
+			print("\n\n" + "="*80)
+			print(f"[{measure}] Between-Subjects ANOVA at Final Time Point ({time_label} {final_time})")
+			print("="*80)
+			results_final = perform_two_way_between_anova(
+				df_measure, 
+				measure=measure,
+				time_point=final_time,
+				average_over_days=False
+			)
+			
+			# Example 2: Between-subjects ANOVA with averaged data
+			print("\n\n" + "="*80)
+			print(f"[{measure}] Between-Subjects ANOVA with {time_label}-Averaged Data")
+			print("="*80)
+			results_avg = perform_two_way_between_anova(
+				df_measure,
+				measure=measure,
+				average_over_days=True
+			)
+			measure_results['between'] = results_avg
+			
+			# Example 3: Mixed ANOVA with Time
+			print("\n\n" + "="*80)
+			print(f"[{measure}] Mixed ANOVA - Time × Sex × CA%")
+			print("="*80)
+			print(f"Note: Using all available {time_label.lower()}s for complete analysis")
+			results_mixed = perform_mixed_anova_time(
+				df_measure,
+				measure=measure,
+				time_points=None,  # Use all available time points
+				time_unit=time_unit
+			)
+			measure_results['mixed'] = results_mixed
+			
+			# Example 4: Sex-stratified Mixed ANOVA - Males only
+			print("\n\n" + "="*80)
+			print(f"[{measure}] Sex-Stratified Mixed ANOVA - Time × CA% (MALES ONLY)")
+			print("="*80)
+			results_males = perform_mixed_anova_sex_stratified(
+				df_measure,
+				sex="M",
+				measure=measure,
+				time_points=None,
+				time_unit=time_unit
+			)
+			measure_results['males'] = results_males
+			
+			# Example 5: Sex-stratified Mixed ANOVA - Females only
+			print("\n\n" + "="*80)
+			print(f"[{measure}] Sex-Stratified Mixed ANOVA - Time × CA% (FEMALES ONLY)")
+			print("="*80)
+			results_females = perform_mixed_anova_sex_stratified(
+				df_measure,
+				sex="F",
+				measure=measure,
+				time_points=None,
+				time_unit=time_unit
+			)
+			measure_results['females'] = results_females
+			
+			# Example 6: CA%-stratified Mixed ANOVA - 0% CA only
+			print("\n\n" + "="*80)
+			print(f"[{measure}] CA%-Stratified Mixed ANOVA - Time × Sex (0% CA ONLY)")
+			print("="*80)
+			results_ca0 = perform_mixed_anova_ca_stratified(
+				df_measure,
+				ca_percent=0,
+				measure=measure,
+				time_points=None,
+				time_unit=time_unit
+			)
+			measure_results['ca0'] = results_ca0
+			
+			# Example 7: CA%-stratified Mixed ANOVA - 2% CA only
+			print("\n\n" + "="*80)
+			print(f"[{measure}] CA%-Stratified Mixed ANOVA - Time × Sex (2% CA ONLY)")
+			print("="*80)
+			results_ca2 = perform_mixed_anova_ca_stratified(
+				df_measure,
+				ca_percent=2,
+				measure=measure,
+				time_points=None,
+				time_unit=time_unit
+			)
+			measure_results['ca2'] = results_ca2
+			
+			# Post-hoc tests if main effects are significant
+			tukey_results = None
+			
+			if results_avg and results_avg.get('sex', {}).get('significant'):
+				print(f"\n\n[{measure}] Sex effect is significant. Running Tukey HSD...")
+				avg_df = df_measure.groupby(["ID", "Sex", "CA (%)"])[measure].mean().reset_index()
+				tukey_sex = perform_tukey_hsd(avg_df, measure, "Sex")
+			
+			if results_avg and results_avg.get('ca_percent', {}).get('significant'):
+				print(f"\n\n[{measure}] CA% effect is significant. Running Tukey HSD...")
+				avg_df = df_measure.groupby(["ID", "Sex", "CA (%)"])[measure].mean().reset_index()
+				avg_df["CA (%) Group"] = avg_df["CA (%)"].astype(str) + "%"
+				tukey_results = perform_tukey_hsd(avg_df, measure, "CA (%) Group")
+			
+			measure_results['tukey'] = tukey_results
+			
+			# Run post-hoc tests for stratified mixed ANOVAs if significant interaction
+			mixed_posthoc_males = None
+			mixed_posthoc_females = None
+			mixed_posthoc_ca0 = None
+			mixed_posthoc_ca2 = None
+			
+			# Determine which time column to use for post-hoc
+			time_col = "Week" if use_weeks else "Day"
+			
+			if run_posthoc == 'y':
+				# Post-hoc for males (Time x CA%)
+				if results_males and results_males.get('interaction', {}).get('significant'):
+					print(f"\n\n[{measure}] Time × CA% interaction significant in males. Running post-hoc tests...")
+					male_df = df_measure[df_measure['Sex'] == 'M'].copy()
+					mixed_posthoc_males = perform_mixed_anova_posthoc(
+						male_df,
+						measure=measure,
+						within=time_col,
+						between="CA (%)",
+						subject="ID",
+						padjust=padjust_method
+					)
+				
+				# Post-hoc for females (Time x CA%)
+				if results_females and results_females.get('interaction', {}).get('significant'):
+					print(f"\n\n[{measure}] Time × CA% interaction significant in females. Running post-hoc tests...")
+					female_df = df_measure[df_measure['Sex'] == 'F'].copy()
+					mixed_posthoc_females = perform_mixed_anova_posthoc(
+						female_df,
+						measure=measure,
+						within=time_col,
+						between="CA (%)",
+						subject="ID",
+						padjust=padjust_method
+					)
+				
+				# Post-hoc for 0% CA (Time x Sex)
+				if results_ca0 and results_ca0.get('interaction', {}).get('significant'):
+					print(f"\n\n[{measure}] Time × Sex interaction significant at 0% CA. Running post-hoc tests...")
+					ca0_df = df_measure[df_measure['CA (%)'] == 0].copy()
+					mixed_posthoc_ca0 = perform_mixed_anova_posthoc(
+						ca0_df,
+						measure=measure,
+						within=time_col,
+						between="Sex",
+						subject="ID",
+						padjust=padjust_method
+					)
+				
+				# Post-hoc for 2% CA (Time x Sex)
+				if results_ca2 and results_ca2.get('interaction', {}).get('significant'):
+					print(f"\n\n[{measure}] Time × Sex interaction significant at 2% CA. Running post-hoc tests...")
+					ca2_df = df_measure[df_measure['CA (%)'] == 2].copy()
+					mixed_posthoc_ca2 = perform_mixed_anova_posthoc(
+						ca2_df,
+						measure=measure,
+						within=time_col,
+						between="Sex",
+						subject="ID",
+						padjust=padjust_method
+					)
+			
+			measure_results['posthoc_males'] = mixed_posthoc_males
+			measure_results['posthoc_females'] = mixed_posthoc_females
+			measure_results['posthoc_ca0'] = mixed_posthoc_ca0
+			measure_results['posthoc_ca2'] = mixed_posthoc_ca2
+			
+			# Store all results for this measure
+			all_results[measure] = measure_results
 		
 		print("\n" + "="*80)
-		print("ANALYSIS COMPLETE")
+		print("ANALYSIS COMPLETE FOR BOTH MEASURES")
 		print("="*80)
 		
-		# Generate comprehensive report
+		# Generate comprehensive reports for both measures
 		print("\n\n" + "="*80)
-		print("GENERATING COMPREHENSIVE STATISTICAL REPORT")
+		print("GENERATING COMPREHENSIVE STATISTICAL REPORTS")
 		print("="*80)
 		
-		report = generate_analysis_report(
-			between_results=results_avg,
-			mixed_results=results_mixed,
-			results_males=results_males,
-			results_females=results_females,
-			results_ca0=results_ca0,
-			results_ca2=results_ca2,
-			tukey_results=tukey_results,
-			mixed_posthoc_males=mixed_posthoc_males,
-			mixed_posthoc_females=mixed_posthoc_females,
-			mixed_posthoc_ca0=mixed_posthoc_ca0,
-			mixed_posthoc_ca2=mixed_posthoc_ca2,
-			df=df
-		)
+		combined_report = ""
 		
-		print("\n" + report)
+		for measure in measures_to_analyze:
+			print(f"\nGenerating report for {measure}...")
+			results = all_results[measure]
+			
+			report = generate_analysis_report(
+				between_results=results['between'],
+				mixed_results=results['mixed'],
+				results_males=results['males'],
+				results_females=results['females'],
+				results_ca0=results['ca0'],
+				results_ca2=results['ca2'],
+				tukey_results=results['tukey'],
+				mixed_posthoc_males=results['posthoc_males'],
+				mixed_posthoc_females=results['posthoc_females'],
+				mixed_posthoc_ca0=results['posthoc_ca0'],
+				mixed_posthoc_ca2=results['posthoc_ca2'],
+				df=df
+			)
+			
+			combined_report += f"\n{'='*80}\n"
+			combined_report += f"MEASURE: {measure}\n"
+			combined_report += f"{'='*80}\n"
+			combined_report += report
+			combined_report += "\n\n"
+		
+		print("\n" + combined_report)
 		
 		# Offer to save report
-		save_report = input("\nWould you like to save this report to a file? (y/n): ").strip().lower()
+		save_report = input("\nWould you like to save this combined report to a file? (y/n): ").strip().lower()
 		if save_report == 'y':
 			from datetime import datetime
 			timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -3579,33 +4002,155 @@ def main():
 			report_path = Path(__file__).parent / report_filename
 			
 			with open(report_path, 'w', encoding='utf-8') as f:
-				f.write(report)
+				f.write(combined_report)
 			
 			print(f"\n[OK] Report saved to: {report_path}")
 		
-		# Generate interaction plots
+		# ====================================================================
+		# AUTOMATICALLY GENERATE PLOTS FOR ALL SIGNIFICANT INTERACTIONS
+		# ====================================================================
 		print("\n\n" + "="*80)
-		print("GENERATING INTERACTION PLOTS")
+		print("GENERATING INTERACTION PLOTS FOR SIGNIFICANT RESULTS")
 		print("="*80)
 		
-		plot_interaction = input("\nWould you like to generate Sex × CA% interaction plots? (y/n): ").strip().lower()
-		if plot_interaction == 'y':
-			# Determine save directory (same as report if saved)
-			save_dir = None
-			if save_report == 'y':
-				save_dir = Path(__file__).parent
+		plot_choice = input("\nWould you like to generate plots for all significant interactions? (y/n): ").strip().lower()
+		
+		if plot_choice == 'y':
+			# Ask about saving plots
+			save_plots = input("Save plots to files? (y/n): ").strip().lower()
+			save_dir = Path(__file__).parent if save_plots == 'y' else None
 			
-			# Generate plots
-			interaction_figs = plot_interaction_effects(
-				between_results=results_avg,
-				mixed_results=results_mixed,
-				df=df,
-				save_dir=save_dir,
-				show=True
-			)
+			# Ask whether to show plots interactively
+			show_plots = input("Display plots interactively? (y/n): ").strip().lower() == 'y'
 			
-			if interaction_figs:
-				print(f"\n[OK] Generated {len(interaction_figs)} interaction plot(s)")
+			total_plots = 0
+			
+			for measure in measures_to_analyze:
+				print(f"\n{'='*80}")
+				print(f"CHECKING SIGNIFICANT INTERACTIONS FOR: {measure}")
+				print(f"{'='*80}")
+				
+				results = all_results[measure]
+				
+				# Get the appropriate data for this measure
+				df_measure = df.copy()
+				if use_weeks:
+					df_measure = average_by_week(df_measure, measure=measure)
+				
+				time_col = "Week" if use_weeks else "Day"
+				
+				# 1. Between-subjects Sex × CA% interaction
+				if results['between'] and results['between'].get('interaction', {}).get('significant'):
+					print(f"\n✓ Sex × CA% interaction significant (p = {results['between']['interaction']['p']:.4f})")
+					print("  Generating interaction plot...")
+					plot_interaction_effects(
+						between_results=results['between'],
+						df=df,
+						save_dir=save_dir,
+						show=show_plots
+					)
+					total_plots += 1
+				
+				# 2. Time × Sex interaction (from full mixed ANOVA)
+				if results['mixed'] and results['mixed'].get('time_sex', {}).get('significant'):
+					print(f"\n✓ {time_col} × Sex interaction significant (p = {results['mixed']['time_sex']['p']:.4f})")
+					print("  Generating interaction plot...")
+					plot_time_by_sex_interaction(
+						df=df_measure,
+						measure=measure,
+						time_col=time_col,
+						results={'interaction': results['mixed']['time_sex']},
+						save_dir=save_dir,
+						show=show_plots
+					)
+					total_plots += 1
+				
+				# 3. Time × CA% interaction (from full mixed ANOVA)
+				if results['mixed'] and results['mixed'].get('time_ca', {}).get('significant'):
+					print(f"\n✓ {time_col} × CA% interaction significant (p = {results['mixed']['time_ca']['p']:.4f})")
+					print("  Generating interaction plot...")
+					plot_time_by_ca_interaction(
+						df=df_measure,
+						measure=measure,
+						time_col=time_col,
+						results={'interaction': results['mixed']['time_ca']},
+						save_dir=save_dir,
+						show=show_plots
+					)
+					total_plots += 1
+				
+				# 4. Time × CA% interaction in MALES (sex-stratified)
+				if results['males'] and results['males'].get('interaction', {}).get('significant'):
+					print(f"\n✓ {time_col} × CA% interaction in MALES significant (p = {results['males']['interaction']['p']:.4f})")
+					print("  Generating interaction plot...")
+					male_df = df_measure[df_measure['Sex'] == 'M'].copy()
+					plot_time_by_ca_stratified(
+						df=male_df,
+						measure=measure,
+						sex='M',
+						time_col=time_col,
+						results=results['males'],
+						save_dir=save_dir,
+						show=show_plots
+					)
+					total_plots += 1
+				
+				# 5. Time × CA% interaction in FEMALES (sex-stratified)
+				if results['females'] and results['females'].get('interaction', {}).get('significant'):
+					print(f"\n✓ {time_col} × CA% interaction in FEMALES significant (p = {results['females']['interaction']['p']:.4f})")
+					print("  Generating interaction plot...")
+					female_df = df_measure[df_measure['Sex'] == 'F'].copy()
+					plot_time_by_ca_stratified(
+						df=female_df,
+						measure=measure,
+						sex='F',
+						time_col=time_col,
+						results=results['females'],
+						save_dir=save_dir,
+						show=show_plots
+					)
+					total_plots += 1
+				
+				# 6. Time × Sex interaction at 0% CA (CA%-stratified)
+				if results['ca0'] and results['ca0'].get('interaction', {}).get('significant'):
+					print(f"\n✓ {time_col} × Sex interaction at 0% CA significant (p = {results['ca0']['interaction']['p']:.4f})")
+					print("  Generating interaction plot...")
+					ca0_df = df_measure[df_measure['CA (%)'] == 0].copy()
+					plot_time_by_sex_stratified(
+						df=ca0_df,
+						measure=measure,
+						ca_percent=0,
+						time_col=time_col,
+						results=results['ca0'],
+						save_dir=save_dir,
+						show=show_plots
+					)
+					total_plots += 1
+				
+				# 7. Time × Sex interaction at 2% CA (CA%-stratified)
+				if results['ca2'] and results['ca2'].get('interaction', {}).get('significant'):
+					print(f"\n✓ {time_col} × Sex interaction at 2% CA significant (p = {results['ca2']['interaction']['p']:.4f})")
+					print("  Generating interaction plot...")
+					ca2_df = df_measure[df_measure['CA (%)'] == 2].copy()
+					plot_time_by_sex_stratified(
+						df=ca2_df,
+						measure=measure,
+						ca_percent=2,
+						time_col=time_col,
+						results=results['ca2'],
+						save_dir=save_dir,
+						show=show_plots
+					)
+					total_plots += 1
+			
+			print(f"\n{'='*80}")
+			print(f"PLOTTING COMPLETE")
+			print(f"{'='*80}")
+			print(f"\nTotal plots generated: {total_plots}")
+			if save_dir:
+				print(f"All plots saved to: {save_dir.resolve()}")
+			else:
+				print("Plots were displayed but not saved to files")
 	
 	return df
 
