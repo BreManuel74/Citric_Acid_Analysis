@@ -1056,7 +1056,7 @@ def _perform_standard_anova_fallback(weekly_averages: Dict) -> Dict:
     return anova_results
 
 
-def perform_tukey_hsd(anova_results: Dict, weekly_averages: Dict) -> Dict:
+def perform_bonferroni_posthoc(anova_results: Dict, weekly_averages: Dict) -> Dict:
     """
     Perform Bonferroni-corrected paired t-test post-hoc tests for significant
     Week main effects. Animal IDs are preserved across weeks, so paired
@@ -1070,7 +1070,7 @@ def perform_tukey_hsd(anova_results: Dict, weekly_averages: Dict) -> Dict:
         Dictionary containing post-hoc results for significant measures
     """
     import itertools
-    tukey_results = {}
+    bonferroni_results = {}
 
     for measure, anova_data in anova_results.items():
         if not anova_data.get('significant', False):
@@ -1154,31 +1154,31 @@ def perform_tukey_hsd(anova_results: Dict, weekly_averages: Dict) -> Dict:
                     'n_pairs': len(common),
                 })
 
-            tukey_results[measure] = {
+            bonferroni_results[measure] = {
                 'measure_name': anova_data['measure_name'],
                 'comparisons': comparisons,
             }
 
         except Exception as e:
-            tukey_results[measure] = {
+            bonferroni_results[measure] = {
                 'measure_name': anova_data['measure_name'],
                 'error': f"Error performing post-hoc tests: {str(e)}"
             }
 
-    return tukey_results
+    return bonferroni_results
 
 
-def display_tukey_results(tukey_results: Dict) -> str:
+def display_bonferroni_results(bonferroni_results: Dict) -> str:
     """
     Display Bonferroni-corrected post-hoc test results in a formatted table.
 
     Parameters:
-        tukey_results: Dictionary from perform_tukey_hsd
+        bonferroni_results: Dictionary from perform_bonferroni_posthoc
 
     Returns:
         Formatted string with post-hoc results
     """
-    if not tukey_results:
+    if not bonferroni_results:
         return "\n" + "=" * 80 + f"\n{_MLB['post_no_sig']}\n" + "=" * 80 + "\n"
 
     lines = []
@@ -1191,7 +1191,7 @@ def display_tukey_results(tukey_results: Dict) -> str:
     lines.append("Alpha = 0.05 (Bonferroni-adjusted family-wise error rate)")
     lines.append("")
 
-    for measure, results in tukey_results.items():
+    for measure, results in bonferroni_results.items():
         if 'error' in results:
             lines.append(f"{results['measure_name']}: {results['error']}")
             lines.append("")
@@ -1232,8 +1232,8 @@ def display_tukey_results(tukey_results: Dict) -> str:
         lines.append("")
         lines.append("")
 
-    total_measures = len(tukey_results)
-    measures_with_sig_pairs = len([r for r in tukey_results.values()
+    total_measures = len(bonferroni_results)
+    measures_with_sig_pairs = len([r for r in bonferroni_results.values()
                                    if 'comparisons' in r and
                                    any(comp['significant'] for comp in r['comparisons'])])
 
@@ -1525,7 +1525,7 @@ def display_anova_results(anova_results: Dict) -> str:
         if significant_measures_week:
             lines.append(f"Significant differences found in: {', '.join(significant_measures_week)}")
             lines.append(f"\nThese measures show statistically {_MLB['sig_across']}.")
-            lines.append("Consider post-hoc tests (e.g., Tukey's HSD) for pairwise comparisons.")
+            lines.append("Consider post-hoc tests (e.g., Bonferroni-corrected pairwise) for pairwise comparisons.")
         else:
             lines.append(f"No {_MLB['sig_across']} in any measure.")
     
@@ -2375,7 +2375,7 @@ def display_frontloading_anova_results(anova_results: Dict) -> str:
     return formatted_output
 
 
-def perform_frontloading_tukey_hsd(anova_results: Dict, weekly_averages: Dict) -> Dict:
+def perform_frontloading_bonferroni_posthoc(anova_results: Dict, weekly_averages: Dict) -> Dict:
     """
     Perform Bonferroni-corrected paired t-test post-hoc tests for significant
     front-loading measures. Animal IDs are preserved across weeks, so paired
@@ -2389,7 +2389,7 @@ def perform_frontloading_tukey_hsd(anova_results: Dict, weekly_averages: Dict) -
         Dictionary containing post-hoc results for significant measures
     """
     import itertools
-    tukey_results = {}
+    bonferroni_results = {}
 
     for measure, anova_data in anova_results.items():
         if not anova_data.get('significant', False):
@@ -2465,7 +2465,7 @@ def perform_frontloading_tukey_hsd(anova_results: Dict, weekly_averages: Dict) -
                     'n_pairs': len(common),
                 })
 
-            tukey_results[measure] = {
+            bonferroni_results[measure] = {
                 'measure_name': anova_data['measure_name'],
                 'comparisons': comparisons,
             }
@@ -2475,25 +2475,25 @@ def perform_frontloading_tukey_hsd(anova_results: Dict, weekly_averages: Dict) -
             print(f"  Significant pairs: {sum(1 for c in comparisons if c['significant'])}")
 
         except Exception as e:
-            tukey_results[measure] = {
+            bonferroni_results[measure] = {
                 'measure_name': anova_data['measure_name'],
                 'error': f"Error performing post-hoc tests: {str(e)}"
             }
 
-    return tukey_results
+    return bonferroni_results
 
 
-def display_frontloading_tukey_results(tukey_results: Dict) -> str:
+def display_frontloading_bonferroni_results(bonferroni_results: Dict) -> str:
     """
     Display Bonferroni-corrected post-hoc test results for front-loading measures.
 
     Parameters:
-        tukey_results: Dictionary from perform_frontloading_tukey_hsd
+        bonferroni_results: Dictionary from perform_frontloading_bonferroni_posthoc
 
     Returns:
         Formatted string with post-hoc results
     """
-    if not tukey_results:
+    if not bonferroni_results:
         return f"\nNo post-hoc results to display (no {_MLB['fl_not_sig']})\n"
 
     lines = []
@@ -2506,7 +2506,7 @@ def display_frontloading_tukey_results(tukey_results: Dict) -> str:
     lines.append("Alpha = 0.05 (Bonferroni-adjusted family-wise error rate)")
     lines.append("")
 
-    for measure, results in tukey_results.items():
+    for measure, results in bonferroni_results.items():
         lines.append(f"MEASURE: {results['measure_name'].upper()}")
         lines.append("-" * 80)
 
@@ -2548,8 +2548,8 @@ def display_frontloading_tukey_results(tukey_results: Dict) -> str:
         lines.append("")
         lines.append("")
 
-    total_measures = len(tukey_results)
-    measures_with_sig_pairs = len([r for r in tukey_results.values()
+    total_measures = len(bonferroni_results)
+    measures_with_sig_pairs = len([r for r in bonferroni_results.values()
                                    if 'comparisons' in r and
                                    any(comp['significant'] for comp in r['comparisons'])])
     lines.append("SUMMARY OF POST-HOC RESULTS:")
@@ -2570,7 +2570,7 @@ def display_frontloading_tukey_results(tukey_results: Dict) -> str:
     return formatted_output
 
 
-def save_frontloading_analysis_to_file(weekly_averages: Dict, anova_output: str, save_path: Path, tukey_output: str = "") -> Path:
+def save_frontloading_analysis_to_file(weekly_averages: Dict, anova_output: str, save_path: Path, bonferroni_output: str = "") -> Path:
     """Save front-loading behavior analysis to a separate report file.
     
     This report focuses specifically on front-loading metrics:
@@ -2578,13 +2578,13 @@ def save_frontloading_analysis_to_file(weekly_averages: Dict, anova_output: str,
     - % of bouts in first 5 minutes
     - Time to 50% of total licks (minutes)
     
-    Also includes ANOVA and Tukey HSD results for these metrics.
+    Also includes ANOVA and Bonferroni post-hoc results for these metrics.
     
     Parameters:
         weekly_averages: Dictionary from compute_weekly_averages
         anova_output: Formatted ANOVA results string
         save_path: Path where to save the text file
-        tukey_output: Formatted Tukey HSD results string (optional)
+        bonferroni_output: Formatted Bonferroni post-hoc results string (optional)
         
     Returns:
         Path to the saved text file
@@ -2677,10 +2677,10 @@ def save_frontloading_analysis_to_file(weekly_averages: Dict, anova_output: str,
             f.write("\n\n")
             f.write(anova_output)
         
-        # Add Tukey HSD results
-        if tukey_output:
+        # Add Bonferroni post-hoc results
+        if bonferroni_output:
             f.write("\n\n")
-            f.write(tukey_output)
+            f.write(bonferroni_output)
         
         f.write("=" * 80 + "\n")
         f.write("END OF FRONT-LOADING ANALYSIS REPORT\n")
@@ -4636,12 +4636,12 @@ def main():
     anova_results = perform_anova_analysis(weekly_averages)
     anova_output = display_anova_results(anova_results)
     
-    # Perform Tukey HSD for significant results
-    print("\nStep 6: Performing Tukey HSD Post-Hoc Tests")
+    # Perform Bonferroni post-hoc for significant results
+    print("\nStep 6: Performing Bonferroni Post-Hoc Tests")
     print("-" * 40)
     
-    tukey_results = perform_tukey_hsd(anova_results, weekly_averages)
-    tukey_output = display_tukey_results(tukey_results)
+    bonferroni_results = perform_bonferroni_posthoc(anova_results, weekly_averages)
+    bonferroni_output = display_bonferroni_results(bonferroni_results)
     
     # Plot interaction effects (ramp mode only)
     interaction_figures = {}
@@ -4650,7 +4650,7 @@ def main():
         print("-" * 40)
         interaction_figures = plot_interaction_effects(anova_results, weekly_averages, show=True)
     
-    # Perform front-loading ANOVA and Tukey HSD
+    # Perform front-loading ANOVA and Bonferroni post-hoc
     fl_step_a = '6c' if EXPERIMENT_MODE == 'ramp' else '6b'
     fl_step_b = '6d' if EXPERIMENT_MODE == 'ramp' else '6c'
     print(f"\nStep {fl_step_a}: Performing Front-Loading ANOVA")
@@ -4659,11 +4659,11 @@ def main():
     frontloading_anova_results = perform_frontloading_anova(weekly_averages)
     frontloading_anova_output = display_frontloading_anova_results(frontloading_anova_results)
     
-    print(f"\nStep {fl_step_b}: Performing Tukey HSD for Front-Loading Measures")
+    print(f"\nStep {fl_step_b}: Performing Bonferroni Post-Hoc for Front-Loading Measures")
     print("-" * 40)
     
-    frontloading_tukey_results = perform_frontloading_tukey_hsd(frontloading_anova_results, weekly_averages)
-    frontloading_tukey_output = display_frontloading_tukey_results(frontloading_tukey_results)
+    frontloading_bonferroni_results = perform_frontloading_bonferroni_posthoc(frontloading_anova_results, weekly_averages)
+    frontloading_bonferroni_output = display_frontloading_bonferroni_results(frontloading_bonferroni_results)
     
     # Compute and plot lick rate histograms (5-minute bins over 30 minutes)
     print("\nStep 7: Computing Lick Rate Averages (5-Minute Bins)")
@@ -4724,17 +4724,17 @@ def main():
     plot_time_to_50pct_by_week_with_lines(weekly_averages, show=True)
     
     # Optional: Save comprehensive summary with all statistical results
-    save_table = input("\nSave weekly averages, ANOVA, and Tukey HSD results as text file? (y/n): ").strip().lower()
+    save_table = input("\nSave weekly averages, ANOVA, and Bonferroni post-hoc results as text file? (y/n): ").strip().lower()
     if save_table in ['y', 'yes']:
         table_path = master_csv.parent / "comprehensive_statistical_analysis_summary.txt"
         # Combine all outputs (excluding front-loading metrics which are in separate report)
-        combined_output = formatted_output + "\n" + anova_output + "\n" + tukey_output
+        combined_output = formatted_output + "\n" + anova_output + "\n" + bonferroni_output
         save_weekly_averages_to_file(weekly_averages, combined_output, table_path)
         print(f"Comprehensive statistical analysis saved to: {table_path}")
     
     # Always save front-loading analysis to separate report
     frontloading_path = master_csv.parent / "frontloading_analysis_report.txt"
-    save_frontloading_analysis_to_file(weekly_averages, frontloading_anova_output, frontloading_path, frontloading_tukey_output)
+    save_frontloading_analysis_to_file(weekly_averages, frontloading_anova_output, frontloading_path, frontloading_bonferroni_output)
     print(f"Front-loading analysis report saved to: {frontloading_path}")
     
     # Always save brief lick summary
@@ -4848,16 +4848,16 @@ def main():
     print("=" * 80)
     print(f"Analyzed: Licks, Bouts, Fecal Counts, Bottle Weight Loss, Total Weight Loss")
     if EXPERIMENT_MODE == 'ramp':
-        print(f"Statistical Analysis: Mixed ANOVA (Sex × CA%) and Tukey HSD post-hoc tests completed")
+        print(f"Statistical Analysis: Mixed ANOVA (Sex × CA%) and Bonferroni post-hoc tests completed")
         print(f"All pairwise comparisons identified for significant measures")
         if interaction_figures:
             print(f"Interaction plots created for {len(interaction_figures)} measure(s) with significant Sex × CA% interactions")
     else:
-        print(f"Statistical Analysis: One-way ANOVA across weeks and Tukey HSD post-hoc tests completed")
+        print(f"Statistical Analysis: One-way ANOVA across weeks and Bonferroni post-hoc tests completed")
         print(f"All pairwise week comparisons identified for significant measures")
     print(f"Lick Rate Analysis: 5-minute bins over 30 minutes for each week + comprehensive combined plot")
     
-    return weekly_results, weekly_averages, anova_results, tukey_results
+    return weekly_results, weekly_averages, anova_results, bonferroni_results
 
 
 if __name__ == "__main__":
