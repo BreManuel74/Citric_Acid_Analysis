@@ -315,6 +315,72 @@ def add_day_number_column(df: pd.DataFrame) -> pd.DataFrame:
 	return df
 
 
+def add_week_column(df: pd.DataFrame) -> pd.DataFrame:
+	"""
+	Add a 'Week' column based on Day number, excluding Day 0.
+	
+	Week assignment:
+	- Day 0: Excluded (baseline, not in any week)
+	- Days 1-7: Week 1
+	- Days 8-14: Week 2
+	- Days 15-21: Week 3
+	- Days 22-28: Week 4
+	- etc.
+	
+	Parameters:
+		df: DataFrame with 'Day' column
+		
+	Returns:
+		DataFrame with added 'Week' column (NaN for Day 0)
+	"""
+	if "Day" not in df.columns:
+		print("[WARNING] 'Day' column not found. Cannot add 'Week' column.")
+		return df
+	
+	df = df.copy()
+	
+	# Week = 0 for Day 0 (will be filtered out), then Week 1 starts at Day 1
+	df["Week"] = np.where(df["Day"] == 0, np.nan, ((df["Day"] - 1) // 7) + 1)
+	
+	return df
+
+
+def average_by_week(df: pd.DataFrame, measure: str = "Total Change") -> pd.DataFrame:
+	"""
+	Average weight measures within each week per animal, excluding Day 0.
+	
+	Parameters:
+		df: DataFrame with ID, Week, and measure columns
+		measure: Weight measure to average
+		
+	Returns:
+		DataFrame with one row per ID × Week combination
+	"""
+	if not {"ID", "Week"}.issubset(df.columns):
+		raise ValueError("DataFrame must have 'ID' and 'Week' columns")
+	
+	if measure not in df.columns:
+		raise ValueError(f"Measure '{measure}' not found in DataFrame")
+	
+	# Exclude Day 0 (Week = NaN)
+	df = df[df["Week"].notna()].copy()
+	
+	# Determine grouping columns (keep metadata like Sex, CA%, Strain)
+	meta_cols = ["ID", "Week"]
+	for col in ["Sex", "CA (%)", "Strain", "Condition"]:
+		if col in df.columns:
+			meta_cols.append(col)
+	
+	# Average the measure within each Week per ID
+	weekly_df = (
+		df.groupby(meta_cols, dropna=False)[measure]
+		.mean()
+		.reset_index()
+	)
+	
+	return weekly_df
+
+
 def summarize_dataframe(df: pd.DataFrame) -> None:
 	"""
 	Print a comprehensive summary of the DataFrame structure and data.
@@ -646,25 +712,30 @@ def perform_two_way_between_anova(df: pd.DataFrame, measure: str = "Total Change
 
 
 def perform_mixed_anova_time(df: pd.DataFrame, measure: str = "Total Change",
-							 time_points: Optional[list] = None) -> dict:
+							 time_points: Optional[list] = None,
+							 time_unit: str = "day") -> dict:
 	"""
 	Perform 3-Way Mixed ANOVA: Time (within) × Sex (between) × CA% (between)
 	
 	This analyzes longitudinal weight changes where:
-	- Time (Day): Within-subjects factor (repeated measures over days)
+	- Time (Day or Week): Within-subjects factor (repeated measures over time)
 	- Sex: Between-subjects factor (each animal is M or F)
 	- CA%: Between-subjects factor (each animal assigned to 0% or 2%)
 	
 	Parameters:
-		df: Cleaned DataFrame with Day column
+		df: Cleaned DataFrame with Day or Week column
 		measure: Weight measure to analyze ('Weight', 'Daily Change', 'Total Change')
-		time_points: List of specific Days to include, None = all days
+		time_points: List of specific time points to include (Days or Weeks), None = all
+		time_unit: 'day' or 'week' - determines which column to use for time
 		
 	Returns:
 		Dictionary with ANOVA results
 	"""
+	time_col = "Week" if time_unit.lower() == "week" else "Day"
+	time_label = "WEEK" if time_unit.lower() == "week" else "DAY"
+	
 	print("\n" + "="*80)
-	print(f"THREE-WAY MIXED ANOVA: TIME (WITHIN) × SEX (BETWEEN) × CA% (BETWEEN)")
+	print(f"THREE-WAY MIXED ANOVA: TIME ({time_label}, WITHIN) × SEX (BETWEEN) × CA% (BETWEEN)")
 	print("="*80)
 	
 	if not HAS_PINGOUIN:
@@ -673,7 +744,7 @@ def perform_mixed_anova_time(df: pd.DataFrame, measure: str = "Total Change",
 		return {}
 	
 	# Prepare data
-	required_cols = ["ID", "Day", "Sex", "CA (%)", measure]
+	required_cols = ["ID", time_col, "Sex", "CA (%)", measure]
 	if not all(col in df.columns for col in required_cols):
 		print(f"\nERROR: Missing required columns. Need: {required_cols}")
 		return {}
@@ -683,20 +754,20 @@ def perform_mixed_anova_time(df: pd.DataFrame, measure: str = "Total Change",
 	
 	# Filter to specific time points if requested
 	if time_points is not None:
-		analysis_df = analysis_df[analysis_df["Day"].isin(time_points)]
-		print(f"\nAnalyzing: {measure} at Days {time_points}")
+		analysis_df = analysis_df[analysis_df[time_col].isin(time_points)]
+		print(f"\nAnalyzing: {measure} at {time_label}s {time_points}")
 	else:
-		print(f"\nAnalyzing: {measure} across all days")
+		print(f"\nAnalyzing: {measure} across all {time_label.lower()}s")
 	
 	print(f"  Total observations: {len(analysis_df)}")
 	print(f"  Unique animals: {analysis_df['ID'].nunique()}")
-	print(f"  Days: {sorted(analysis_df['Day'].unique())}")
+	print(f"  {time_label}s: {sorted(analysis_df[time_col].unique())}")
 	
 	# Check completeness across time points
-	subjects_per_day = analysis_df.groupby('ID')['Day'].nunique()
-	total_days = analysis_df['Day'].nunique()
-	complete_subjects = subjects_per_day[subjects_per_day == total_days].index.tolist()
-	incomplete_subjects = subjects_per_day[subjects_per_day < total_days].index.tolist()
+	subjects_per_time = analysis_df.groupby('ID')[time_col].nunique()
+	total_times = analysis_df[time_col].nunique()
+	complete_subjects = subjects_per_time[subjects_per_time == total_times].index.tolist()
+	incomplete_subjects = subjects_per_time[subjects_per_time < total_times].index.tolist()
 	
 	if incomplete_subjects:
 		print(f"\nWarning: {len(incomplete_subjects)} animals missing data at some time points")
@@ -756,7 +827,7 @@ def perform_mixed_anova_time(df: pd.DataFrame, measure: str = "Total Change",
 		aov = pg.mixed_anova(
 			data=analysis_df,
 			dv=measure,
-			within='Day',
+			within=time_col,
 			between='Group',
 			subject='ID',
 			correction='auto'
@@ -771,31 +842,32 @@ def perform_mixed_anova_time(df: pd.DataFrame, measure: str = "Total Change",
 		# For 3-way interaction, need to run separate models
 		# First, test Sex × CA% at each time point
 		print(f"\n" + "="*60)
-		print("Testing Sex × CA% Interaction at Each Time Point")
+		print(f"Testing Sex × CA% Interaction at Each {time_label}")
 		print("="*60)
 		
 		time_point_results = {}
-		for day in sorted(analysis_df['Day'].unique()):
-			day_df = analysis_df[analysis_df['Day'] == day]
+		for timepoint in sorted(analysis_df[time_col].unique()):
+			tp_df = analysis_df[analysis_df[time_col] == timepoint]
 			try:
-				day_aov = pg.anova(data=day_df, dv=measure, between=['Sex', 'CA (%)'])
+				tp_aov = pg.anova(data=tp_df, dv=measure, between=['Sex', 'CA (%)'])
 				# Determine p-value column for this ANOVA table
-				day_p_col = 'p-unc' if 'p-unc' in day_aov.columns else 'p_unc'
-				interaction_row = day_aov[day_aov['Source'] == 'Sex * CA (%)'].iloc[0]
-				time_point_results[day] = {
+				tp_p_col = 'p-unc' if 'p-unc' in tp_aov.columns else 'p_unc'
+				interaction_row = tp_aov[tp_aov['Source'] == 'Sex * CA (%)'].iloc[0]
+				time_point_results[timepoint] = {
 					'F': interaction_row['F'],
-					'p': interaction_row[day_p_col],
-					'significant': interaction_row[day_p_col] < 0.05
+					'p': interaction_row[tp_p_col],
+					'significant': interaction_row[tp_p_col] < 0.05
 				}
-				sig_marker = '***' if interaction_row[day_p_col] < 0.001 else '**' if interaction_row[day_p_col] < 0.01 else '*' if interaction_row[day_p_col] < 0.05 else 'ns'
-				print(f"  Day {day}: F = {interaction_row['F']:.3f}, p = {interaction_row[day_p_col]:.4f} {sig_marker}")
+				sig_marker = '***' if interaction_row[tp_p_col] < 0.001 else '**' if interaction_row[tp_p_col] < 0.01 else '*' if interaction_row[tp_p_col] < 0.05 else 'ns'
+				print(f"  {time_label} {int(timepoint)}: F = {interaction_row['F']:.3f}, p = {interaction_row[tp_p_col]:.4f} {sig_marker}")
 			except Exception as e:
-				print(f"  Day {day}: Unable to compute ({e})")
-				time_point_results[day] = {'error': str(e)}
+				print(f"  {time_label} {int(timepoint)}: Unable to compute ({e})")
+				time_point_results[timepoint] = {'error': str(e)}
 		
 		results = {
 			'measure': measure,
 			'type': 'mixed_anova',
+			'time_unit': time_unit,
 			'anova_table': aov,
 			'time_point_interactions': time_point_results
 		}
@@ -810,28 +882,33 @@ def perform_mixed_anova_time(df: pd.DataFrame, measure: str = "Total Change",
 
 
 def perform_mixed_anova_sex_stratified(df: pd.DataFrame, sex: str, measure: str = "Total Change",
-										time_points: Optional[list] = None) -> dict:
+										time_points: Optional[list] = None,
+										time_unit: str = "day") -> dict:
 	"""
 	Perform 2-Way Mixed ANOVA: Time (within) × CA% (between), holding Sex constant
 	
 	This analyzes longitudinal weight changes for ONE sex at a time, testing:
-	- Time (Day): Within-subjects factor (repeated measures over days)
+	- Time (Day or Week): Within-subjects factor (repeated measures over time)
 	- CA%: Between-subjects factor (0% vs 2%)
 	
 	By stratifying by sex, this reveals whether the Time × CA% interaction differs
 	between males and females.
 	
 	Parameters:
-		df: Cleaned DataFrame with Day column
+		df: Cleaned DataFrame with Day or Week column
 		sex: Sex to analyze ("M" or "F")
 		measure: Weight measure to analyze ('Weight', 'Daily Change', 'Total Change')
-		time_points: List of specific Days to include, None = all days
+		time_points: List of specific time points to include (Days or Weeks), None = all
+		time_unit: 'day' or 'week' - determines which column to use for time
 		
 	Returns:
 		Dictionary with ANOVA results for the specified sex
 	"""
+	time_col = "Week" if time_unit.lower() == "week" else "Day"
+	time_label = "WEEK" if time_unit.lower() == "week" else "DAY"
+	
 	print("\n" + "="*80)
-	print(f"TWO-WAY MIXED ANOVA (SEX-STRATIFIED): TIME (WITHIN) × CA% (BETWEEN)")
+	print(f"TWO-WAY MIXED ANOVA (SEX-STRATIFIED): TIME ({time_label}, WITHIN) × CA% (BETWEEN)")
 	print(f"Analyzing: {'MALES' if sex == 'M' else 'FEMALES'} only")
 	print("="*80)
 	
@@ -846,7 +923,7 @@ def perform_mixed_anova_sex_stratified(df: pd.DataFrame, sex: str, measure: str 
 		return {}
 	
 	# Prepare data
-	required_cols = ["ID", "Day", "Sex", "CA (%)", measure]
+	required_cols = ["ID", time_col, "Sex", "CA (%)", measure]
 	if not all(col in df.columns for col in required_cols):
 		print(f"\nERROR: Missing required columns. Need: {required_cols}")
 		return {}
@@ -861,21 +938,21 @@ def perform_mixed_anova_sex_stratified(df: pd.DataFrame, sex: str, measure: str 
 	
 	# Filter to specific time points if requested
 	if time_points is not None:
-		analysis_df = analysis_df[analysis_df["Day"].isin(time_points)]
-		print(f"\nAnalyzing: {measure} at Days {time_points}")
+		analysis_df = analysis_df[analysis_df[time_col].isin(time_points)]
+		print(f"\nAnalyzing: {measure} at {time_label}s {time_points}")
 	else:
-		print(f"\nAnalyzing: {measure} across all days")
+		print(f"\nAnalyzing: {measure} across all {time_label.lower()}s")
 	
 	print(f"  Total observations: {len(analysis_df)}")
 	print(f"  Unique animals: {analysis_df['ID'].nunique()}")
-	print(f"  Days: {sorted(analysis_df['Day'].unique())}")
+	print(f"  {time_label}s: {sorted(analysis_df[time_col].unique())}")
 	print(f"  CA% groups: {sorted(analysis_df['CA (%)'].unique())}")
 	
 	# Check completeness across time points
-	subjects_per_day = analysis_df.groupby('ID')['Day'].nunique()
-	total_days = analysis_df['Day'].nunique()
-	complete_subjects = subjects_per_day[subjects_per_day == total_days].index.tolist()
-	incomplete_subjects = subjects_per_day[subjects_per_day < total_days].index.tolist()
+	subjects_per_time = analysis_df.groupby('ID')[time_col].nunique()
+	total_times = analysis_df[time_col].nunique()
+	complete_subjects = subjects_per_time[subjects_per_time == total_times].index.tolist()
+	incomplete_subjects = subjects_per_time[subjects_per_time < total_times].index.tolist()
 	
 	if incomplete_subjects:
 		print(f"\nWarning: {len(incomplete_subjects)} animals missing data at some time points")
@@ -940,7 +1017,7 @@ def perform_mixed_anova_sex_stratified(df: pd.DataFrame, sex: str, measure: str 
 		aov = pg.mixed_anova(
 			data=analysis_df,
 			dv=measure,
-			within='Day',
+			within=time_col,
 			between='CA (%)',
 			subject='ID',
 			correction=True  # force GG correction; 'auto' lacks power with n=3
@@ -1043,28 +1120,33 @@ def perform_mixed_anova_sex_stratified(df: pd.DataFrame, sex: str, measure: str 
 
 
 def perform_mixed_anova_ca_stratified(df: pd.DataFrame, ca_percent: int, measure: str = "Total Change",
-									   time_points: Optional[list] = None) -> dict:
+									   time_points: Optional[list] = None,
+									   time_unit: str = "day") -> dict:
 	"""
 	Perform 2-Way Mixed ANOVA: Time (within) × Sex (between), holding CA% constant
 	
 	This analyzes longitudinal weight changes for ONE CA% level at a time, testing:
-	- Time (Day): Within-subjects factor (repeated measures over days)
+	- Time (Day or Week): Within-subjects factor (repeated measures over time)
 	- Sex: Between-subjects factor (M vs F)
 	
 	By stratifying by CA%, this reveals whether the Time × Sex interaction differs
 	between CA% conditions.
 	
 	Parameters:
-		df: Cleaned DataFrame with Day column
+		df: Cleaned DataFrame with Day or Week column
 		ca_percent: CA% level to analyze (e.g., 0 or 2)
 		measure: Weight measure to analyze ('Weight', 'Daily Change', 'Total Change')
-		time_points: List of specific Days to include, None = all days
+		time_points: List of specific time points to include (Days or Weeks), None = all
+		time_unit: 'day' or 'week' - determines which column to use for time
 		
 	Returns:
 		Dictionary with ANOVA results for the specified CA% level
 	"""
+	time_col = "Week" if time_unit.lower() == "week" else "Day"
+	time_label = "WEEK" if time_unit.lower() == "week" else "DAY"
+	
 	print("\n" + "="*80)
-	print(f"TWO-WAY MIXED ANOVA (CA%-STRATIFIED): TIME (WITHIN) × SEX (BETWEEN)")
+	print(f"TWO-WAY MIXED ANOVA (CA%-STRATIFIED): TIME ({time_label}, WITHIN) × SEX (BETWEEN)")
 	print(f"Analyzing: {ca_percent}% CA only")
 	print("="*80)
 	
@@ -1074,7 +1156,7 @@ def perform_mixed_anova_ca_stratified(df: pd.DataFrame, ca_percent: int, measure
 		return {}
 	
 	# Prepare data
-	required_cols = ["ID", "Day", "Sex", "CA (%)", measure]
+	required_cols = ["ID", time_col, "Sex", "CA (%)", measure]
 	if not all(col in df.columns for col in required_cols):
 		print(f"\nERROR: Missing required columns. Need: {required_cols}")
 		return {}
@@ -1089,21 +1171,21 @@ def perform_mixed_anova_ca_stratified(df: pd.DataFrame, ca_percent: int, measure
 	
 	# Filter to specific time points if requested
 	if time_points is not None:
-		analysis_df = analysis_df[analysis_df["Day"].isin(time_points)]
-		print(f"\nAnalyzing: {measure} at Days {time_points}")
+		analysis_df = analysis_df[analysis_df[time_col].isin(time_points)]
+		print(f"\nAnalyzing: {measure} at {time_label}s {time_points}")
 	else:
-		print(f"\nAnalyzing: {measure} across all days")
+		print(f"\nAnalyzing: {measure} across all {time_label.lower()}s")
 	
 	print(f"  Total observations: {len(analysis_df)}")
 	print(f"  Unique animals: {analysis_df['ID'].nunique()}")
-	print(f"  Days: {sorted(analysis_df['Day'].unique())}")
+	print(f"  {time_label}s: {sorted(analysis_df[time_col].unique())}")
 	print(f"  Sex groups: {sorted(analysis_df['Sex'].unique())}")
 	
 	# Check completeness across time points
-	subjects_per_day = analysis_df.groupby('ID')['Day'].nunique()
-	total_days = analysis_df['Day'].nunique()
-	complete_subjects = subjects_per_day[subjects_per_day == total_days].index.tolist()
-	incomplete_subjects = subjects_per_day[subjects_per_day < total_days].index.tolist()
+	subjects_per_time = analysis_df.groupby('ID')[time_col].nunique()
+	total_times = analysis_df[time_col].nunique()
+	complete_subjects = subjects_per_time[subjects_per_time == total_times].index.tolist()
+	incomplete_subjects = subjects_per_time[subjects_per_time < total_times].index.tolist()
 	
 	if incomplete_subjects:
 		print(f"\nWarning: {len(incomplete_subjects)} animals missing data at some time points")
@@ -1168,7 +1250,7 @@ def perform_mixed_anova_ca_stratified(df: pd.DataFrame, ca_percent: int, measure
 		aov = pg.mixed_anova(
 			data=analysis_df,
 			dv=measure,
-			within='Day',
+			within=time_col,
 			between='Sex',
 			subject='ID',
 			correction=True  # force GG correction; 'auto' lacks power with n=3
@@ -1181,13 +1263,14 @@ def perform_mixed_anova_ca_stratified(df: pd.DataFrame, ca_percent: int, measure
 		p_col = 'p-unc' if 'p-unc' in aov.columns else 'p_unc'
 		
 		# Extract key results
-		time_row = aov[aov['Source'] == 'Day'].iloc[0] if 'Day' in aov['Source'].values else None
+		time_row = aov[aov['Source'] == time_col].iloc[0] if time_col in aov['Source'].values else None
 		sex_row = aov[aov['Source'] == 'Sex'].iloc[0] if 'Sex' in aov['Source'].values else None
 		interaction_row = aov[aov['Source'] == 'Interaction'].iloc[0] if 'Interaction' in aov['Source'].values else None
 		
 		# Alternative interaction label check
 		if interaction_row is None:
-			interaction_row = aov[aov['Source'] == 'Day * Sex'].iloc[0] if 'Day * Sex' in aov['Source'].values else None
+			interaction_label = f'{time_col} * Sex'
+			interaction_row = aov[aov['Source'] == interaction_label].iloc[0] if interaction_label in aov['Source'].values else None
 		
 		# Greenhouse-Geisser correction for within-subjects effects
 		def _gg_p(row):
@@ -1508,32 +1591,43 @@ def generate_analysis_report(
 			# Sphericity violations (Mauchly's test)
 			report_lines.append("Sphericity Assessment:")
 			report_lines.append("-" * 80)
+			report_lines.append("Sphericity assumption: Variances of differences between all time points are equal.")
+			report_lines.append("When violated (ε < 0.75), Greenhouse-Geisser (GG) correction is applied to p-values.")
+			report_lines.append("")
 			
 			# Check sphericity and Greenhouse-Geisser epsilon
-			eps_rows = aov[aov['Source'] == 'Day'] if 'Day' in aov['Source'].values else pd.DataFrame()
+			# Determine time column name
+			time_col = 'Week' if mixed_results.get('time_unit', 'day') == 'week' else 'Day'
+			eps_rows = aov[aov['Source'] == time_col] if time_col in aov['Source'].values else pd.DataFrame()
 			
 			if 'sphericity' in aov.columns or 'W-spher' in aov.columns:
 				if not eps_rows.empty:
-					if 'sphericity' in aov.columns:
-						sphericity = eps_rows['sphericity'].iloc[0]
-						report_lines.append(f"Mauchly's Test of Sphericity: W = {sphericity:.4f}")
+					if 'W-spher' in aov.columns and not pd.isna(eps_rows['W-spher'].iloc[0]):
+						w_spher = float(eps_rows['W-spher'].iloc[0])
+						p_spher = float(eps_rows['p-spher'].iloc[0]) if 'p-spher' in eps_rows.columns else np.nan
+						report_lines.append(f"Mauchly's Test: W = {w_spher:.6f}, p = {p_spher:.4f}")
+						if not np.isnan(p_spher):
+							if p_spher < 0.05:
+								report_lines.append("  → Sphericity VIOLATED (p < 0.05)")
+							else:
+								report_lines.append("  → Sphericity met (p ≥ 0.05)")
 					
 					if 'eps' in aov.columns and not pd.isna(eps_rows['eps'].iloc[0]):
 						epsilon = float(eps_rows['eps'].iloc[0])
 						report_lines.append(f"Greenhouse-Geisser ε = {epsilon:.4f}")
 						if epsilon < 0.75:
-							report_lines.append("⚠ WARNING: Sphericity violated (ε < 0.75) — GG correction applied")
+							report_lines.append(f"  → ε < 0.75: Using GG-corrected p-values for {time_col} and Interaction")
 						else:
-							report_lines.append("[OK] Sphericity assumption met (ε ≥ 0.75)")
+							report_lines.append(f"  → ε ≥ 0.75: Uncorrected p-values acceptable")
 				else:
 					report_lines.append("Note: Sphericity information not found in ANOVA table")
 			elif 'eps' in aov.columns and not eps_rows.empty and not pd.isna(eps_rows['eps'].iloc[0]):
 				epsilon = float(eps_rows['eps'].iloc[0])
 				report_lines.append(f"Greenhouse-Geisser ε = {epsilon:.4f}")
 				if epsilon < 0.75:
-					report_lines.append("⚠ WARNING: Sphericity violated (ε < 0.75) — GG correction applied to within-subjects p-values")
+					report_lines.append(f"  → ε < 0.75: Using GG-corrected p-values for {time_col} and Interaction")
 				else:
-					report_lines.append("[OK] Sphericity assumption met (ε ≥ 0.75)")
+					report_lines.append(f"  → ε ≥ 0.75: Uncorrected p-values acceptable")
 			else:
 				report_lines.append("Note: Sphericity statistics not available in this analysis")
 			
@@ -1543,8 +1637,8 @@ def generate_analysis_report(
 			report_lines.append("Main Effects and Interactions:")
 			report_lines.append("-" * 80)
 			
-			# Within-subjects sources where GG correction applies
-			within_sources = {'Day', 'Interaction'}
+			# Within-subjects sources where GG correction applies (both Day and Week possible)
+			within_sources = {'Day', 'Week', 'Interaction'}
 			
 			for idx, row in aov.iterrows():
 				source = row['Source']
@@ -1578,20 +1672,47 @@ def generate_analysis_report(
 		
 		# Time-point specific interactions
 		if 'time_point_interactions' in mixed_results:
-			report_lines.append("Time-Point Specific Sex × CA% Interactions:")
+			time_label = "Week" if mixed_results.get('time_unit', 'day') == 'week' else "Day"
+			n_tests = len(mixed_results['time_point_interactions'])
+			bonf_alpha = 0.05 / n_tests if n_tests > 0 else 0.05
+			
+			report_lines.append(f"Time-Point Specific Sex × CA% Interactions:")
 			report_lines.append("-" * 80)
+			report_lines.append(f"Note: Testing Sex × CA% at each {time_label} separately (k = {n_tests} tests)")
+			report_lines.append(f"Bonferroni-corrected α = 0.05 / {n_tests} = {bonf_alpha:.4f}")
+			report_lines.append(f"Showing both uncorrected p and Bonferroni significance")
+			report_lines.append("")
 			
 			time_results = mixed_results['time_point_interactions']
-			for day in sorted(time_results.keys()):
-				result = time_results[day]
+			sig_count_raw = 0
+			sig_count_bonf = 0
+			
+			for timepoint in sorted(time_results.keys()):
+				result = time_results[timepoint]
 				if 'error' in result:
-					report_lines.append(f"Day {day}: {result['error']}")
+					report_lines.append(f"{time_label} {int(timepoint)}: {result['error']}")
 				else:
 					F = result.get('F', np.nan)
 					p = result.get('p', np.nan)
-					sig = result.get('significant', False)
-					sig_marker = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
-					report_lines.append(f"Day {day}: F = {F:.3f}, p = {p:.4f} {sig_marker}")
+					sig_raw = p < 0.05
+					sig_bonf = p < bonf_alpha
+					
+					if sig_raw:
+						sig_count_raw += 1
+					if sig_bonf:
+						sig_count_bonf += 1
+					
+					# Significance markers
+					sig_marker_raw = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
+					sig_marker_bonf = '***' if p < 0.001 / n_tests else '**' if p < 0.01 / n_tests else '*' if p < bonf_alpha else 'ns'
+					
+					bonf_note = " (survives Bonferroni)" if sig_bonf else " (does not survive Bonferroni)" if sig_raw else ""
+					
+					report_lines.append(f"{time_label} {int(timepoint)}: F = {F:.3f}, p = {p:.4f} {sig_marker_raw}{bonf_note}")
+			
+			report_lines.append("")
+			report_lines.append(f"Summary: {sig_count_raw}/{n_tests} significant at α=0.05 (uncorrected)")
+			report_lines.append(f"         {sig_count_bonf}/{n_tests} significant at α={bonf_alpha:.4f} (Bonferroni-corrected)")
 			
 			report_lines.append("")
 			report_lines.append("")
@@ -1695,41 +1816,47 @@ def generate_analysis_report(
 		male_int = results_males.get('interaction', {})
 		female_int = results_females.get('interaction', {})
 		
+		# Bonferroni correction for k=2 stratified tests
+		n_tests = 2
+		bonf_alpha = 0.05 / n_tests
+		
 		report_lines.append("Time × CA% Interaction:")
 		report_lines.append("-" * 80)
+		report_lines.append(f"Note: Comparing interaction in k = {n_tests} sex strata")
+		report_lines.append(f"Bonferroni-corrected α = 0.05 / {n_tests} = {bonf_alpha:.4f}")
+		report_lines.append("")
 		
-		male_sig = male_int.get('significant', False)
-		female_sig = female_int.get('significant', False)
+		male_p = male_int.get('p', np.nan)
+		female_p = female_int.get('p', np.nan)
 		
-		male_marker = '***' if male_int.get('p', 1) < 0.001 else '**' if male_int.get('p', 1) < 0.01 else '*' if male_int.get('p', 1) < 0.05 else 'ns'
-		female_marker = '***' if female_int.get('p', 1) < 0.001 else '**' if female_int.get('p', 1) < 0.01 else '*' if female_int.get('p', 1) < 0.05 else 'ns'
+		male_sig_raw = male_p < 0.05
+		female_sig_raw = female_p < 0.05
+		male_sig_bonf = male_p < bonf_alpha
+		female_sig_bonf = female_p < bonf_alpha
+		
+		male_marker = '***' if male_p < 0.001 else '**' if male_p < 0.01 else '*' if male_p < 0.05 else 'ns'
+		female_marker = '***' if female_p < 0.001 else '**' if female_p < 0.01 else '*' if female_p < 0.05 else 'ns'
+		
+		male_bonf_note = " (survives Bonferroni)" if male_sig_bonf else " (does not survive Bonferroni)" if male_sig_raw else ""
+		female_bonf_note = " (survives Bonferroni)" if female_sig_bonf else " (does not survive Bonferroni)" if female_sig_raw else ""
 		
 		report_lines.append(f"Males:   F({male_int.get('df1', 0):.0f}, {male_int.get('df2', 0):.0f}) = "
-						  f"{male_int.get('F', np.nan):.3f}, p = {male_int.get('p', np.nan):.4f} {male_marker}")
+					  f"{male_int.get('F', np.nan):.3f}, p = {male_p:.4f} {male_marker}{male_bonf_note}")
 		report_lines.append(f"Females: F({female_int.get('df1', 0):.0f}, {female_int.get('df2', 0):.0f}) = "
-						  f"{female_int.get('F', np.nan):.3f}, p = {female_int.get('p', np.nan):.4f} {female_marker}")
+					  f"{female_int.get('F', np.nan):.3f}, p = {female_p:.4f} {female_marker}{female_bonf_note}")
 		report_lines.append("")
 		
-		if male_sig and not female_sig:
-			report_lines.append("→ Time × CA% interaction is significant in MALES but not FEMALES")
+		if male_sig_bonf and not female_sig_bonf:
+			report_lines.append("→ Time × CA% interaction is significant in MALES but not FEMALES (Bonferroni-corrected)")
 			report_lines.append("  This suggests sex differences in how CA% affects weight over time.")
-		elif female_sig and not male_sig:
-			report_lines.append("→ Time × CA% interaction is significant in FEMALES but not MALES")
+		elif female_sig_bonf and not male_sig_bonf:
+			report_lines.append("→ Time × CA% interaction is significant in FEMALES but not MALES (Bonferroni-corrected)")
 			report_lines.append("  This suggests sex differences in how CA% affects weight over time.")
-		elif male_sig and female_sig:
-			report_lines.append("→ Time × CA% interaction is significant in BOTH sexes")
+		elif male_sig_bonf and female_sig_bonf:
+			report_lines.append("→ Time × CA% interaction is significant in BOTH sexes (Bonferroni-corrected)")
 			report_lines.append("  Both males and females show CA%-dependent weight trajectories.")
 		else:
-			report_lines.append("→ Time × CA% interaction is NOT significant in either sex")
-			report_lines.append("  CA% does not differentially affect weight trajectories over time.")
-		
-		report_lines.append("")
-	
-	# CA%-stratified mixed ANOVA results
-	if results_ca0:
-		report_lines.append("=" * 80)
-		report_lines.append("CA%-STRATIFIED MIXED ANOVA: TIME × SEX (0% CA ONLY)")
-		report_lines.append("=" * 80)
+			report_lines.append("→ Time × CA% interaction is NOT significant in either sex (Bonferroni-corrected)")
 		report_lines.append("")
 		
 		measure = results_ca0.get('measure', 'Unknown')
@@ -1824,35 +1951,47 @@ def generate_analysis_report(
 		ca0_int = results_ca0.get('interaction', {})
 		ca2_int = results_ca2.get('interaction', {})
 		
+		# Bonferroni correction for k=2 stratified tests
+		n_tests = 2
+		bonf_alpha = 0.05 / n_tests
+		
 		report_lines.append("Time × Sex Interaction:")
 		report_lines.append("-" * 80)
+		report_lines.append(f"Note: Comparing interaction in k = {n_tests} CA% strata")
+		report_lines.append(f"Bonferroni-corrected α = 0.05 / {n_tests} = {bonf_alpha:.4f}")
+		report_lines.append("")
 		
-		ca0_sig = ca0_int.get('significant', False)
-		ca2_sig = ca2_int.get('significant', False)
+		ca0_p = ca0_int.get('p', np.nan)
+		ca2_p = ca2_int.get('p', np.nan)
 		
-		ca0_marker = '***' if ca0_int.get('p', 1) < 0.001 else '**' if ca0_int.get('p', 1) < 0.01 else '*' if ca0_int.get('p', 1) < 0.05 else 'ns'
-		ca2_marker = '***' if ca2_int.get('p', 1) < 0.001 else '**' if ca2_int.get('p', 1) < 0.01 else '*' if ca2_int.get('p', 1) < 0.05 else 'ns'
+		ca0_sig_raw = ca0_p < 0.05
+		ca2_sig_raw = ca2_p < 0.05
+		ca0_sig_bonf = ca0_p < bonf_alpha
+		ca2_sig_bonf = ca2_p < bonf_alpha
+		
+		ca0_marker = '***' if ca0_p < 0.001 else '**' if ca0_p < 0.01 else '*' if ca0_p < 0.05 else 'ns'
+		ca2_marker = '***' if ca2_p < 0.001 else '**' if ca2_p < 0.01 else '*' if ca2_p < 0.05 else 'ns'
+		
+		ca0_bonf_note = " (survives Bonferroni)" if ca0_sig_bonf else " (does not survive Bonferroni)" if ca0_sig_raw else ""
+		ca2_bonf_note = " (survives Bonferroni)" if ca2_sig_bonf else " (does not survive Bonferroni)" if ca2_sig_raw else ""
 		
 		report_lines.append(f"0% CA:  F({ca0_int.get('df1', 0):.0f}, {ca0_int.get('df2', 0):.0f}) = "
-						  f"{ca0_int.get('F', np.nan):.3f}, p = {ca0_int.get('p', np.nan):.4f} {ca0_marker}")
+					  f"{ca0_int.get('F', np.nan):.3f}, p = {ca0_p:.4f} {ca0_marker}{ca0_bonf_note}")
 		report_lines.append(f"2% CA:  F({ca2_int.get('df1', 0):.0f}, {ca2_int.get('df2', 0):.0f}) = "
-						  f"{ca2_int.get('F', np.nan):.3f}, p = {ca2_int.get('p', np.nan):.4f} {ca2_marker}")
+					  f"{ca2_int.get('F', np.nan):.3f}, p = {ca2_p:.4f} {ca2_marker}{ca2_bonf_note}")
 		report_lines.append("")
 		
-		if ca0_sig and not ca2_sig:
-			report_lines.append("→ Time × Sex interaction is significant at 0% CA but NOT at 2% CA")
+		if ca0_sig_bonf and not ca2_sig_bonf:
+			report_lines.append("→ Time × Sex interaction is significant at 0% CA but NOT at 2% CA (Bonferroni-corrected)")
 			report_lines.append("  Sex differences in weight trajectories are present without CA but eliminated with CA.")
-		elif ca2_sig and not ca0_sig:
-			report_lines.append("→ Time × Sex interaction is significant at 2% CA but NOT at 0% CA")
+		elif ca2_sig_bonf and not ca0_sig_bonf:
+			report_lines.append("→ Time × Sex interaction is significant at 2% CA but NOT at 0% CA (Bonferroni-corrected)")
 			report_lines.append("  CA exposure reveals sex differences in weight trajectories that aren't present in controls.")
-		elif ca0_sig and ca2_sig:
-			report_lines.append("→ Time × Sex interaction is significant at BOTH CA% levels")
+		elif ca0_sig_bonf and ca2_sig_bonf:
+			report_lines.append("→ Time × Sex interaction is significant at BOTH CA% levels (Bonferroni-corrected)")
 			report_lines.append("  Sex differences in weight trajectories persist across CA% conditions.")
 		else:
-			report_lines.append("→ Time × Sex interaction is NOT significant at either CA% level")
-			report_lines.append("  Males and females have similar weight trajectories regardless of CA% exposure.")
-		
-		report_lines.append("")
+			report_lines.append("→ Time × Sex interaction is NOT significant at either CA% level (Bonferroni-corrected)")
 	
 	# Mixed ANOVA post-hoc results
 	posthoc_list = [
@@ -3200,20 +3339,63 @@ def main():
 	user_input = input("\nWould you like to run example ANOVA analyses? (y/n): ").strip().lower()
 	
 	if user_input == 'y':
+		# Ask user for time unit
+		print("\nChoose time unit for longitudinal analysis:")
+		print("  [1] Days (default, most granular)")
+		print("  [2] Weeks (averaged by week, more conservative, Day 0 excluded)")
+		time_unit_choice = input("Enter choice (1 or 2): ").strip()
+		
+		use_weeks = (time_unit_choice == '2')
+		time_unit = 'week' if use_weeks else 'day'
+		time_label = 'Week' if use_weeks else 'Day'
+		
+		# If using weeks, add week column and average
+		if use_weeks:
+			print("\nProcessing data for week-based analysis...")
+			print("  - Adding week column (Day 0 excluded)")
+			print("  - Averaging measures within each week per animal")
+			
+			df = add_week_column(df)
+			
+			# Show week distribution
+			if "Week" in df.columns:
+				week_counts = df.groupby('Week')['Day'].apply(lambda x: (x.min(), x.max()))
+				print(f"\nWeek mapping:")
+				for week, (d_min, d_max) in week_counts.items():
+					if pd.notna(week):
+						print(f"  Week {int(week)}: Days {int(d_min)}-{int(d_max)}")
+			
+			# Average by week
+			df = average_by_week(df, measure="Total Change")
+			print(f"  Data shape after averaging: {df.shape}")
+			print(f"  Weeks available: {sorted(df['Week'].dropna().unique())}")
+		
+		# Ask user for multiple comparison correction method
+		print("\nChoose multiple comparison correction for post-hoc tests:")
+		print("  [1] FDR-BH (Benjamini-Hochberg) - balanced, recommended for many comparisons")
+		print("  [2] Bonferroni - very conservative, controls family-wise error rate")
+		correction_choice = input("Enter choice (1 or 2, default=1): ").strip()
+		
+		padjust_method = 'bonf' if correction_choice == '2' else 'fdr_bh'
+		correction_name = 'Bonferroni' if correction_choice == '2' else 'FDR-BH'
+		
+		print(f"\nUsing {correction_name} correction for post-hoc tests")
+		
 		# Example 1: Between-subjects ANOVA at final time point
+		final_time = 4 if use_weeks else 27
 		print("\n\n" + "="*80)
-		print("EXAMPLE 1: Between-Subjects ANOVA at Final Time Point (Day 27)")
+		print(f"EXAMPLE 1: Between-Subjects ANOVA at Final Time Point ({time_label} {final_time})")
 		print("="*80)
 		results_final = perform_two_way_between_anova(
 			df, 
 			measure="Total Change",
-			time_point=27,
+			time_point=final_time,
 			average_over_days=False
 		)
 		
 		# Example 2: Between-subjects ANOVA with averaged data
 		print("\n\n" + "="*80)
-		print("EXAMPLE 2: Between-Subjects ANOVA with Day-Averaged Data")
+		print(f"EXAMPLE 2: Between-Subjects ANOVA with {time_label}-Averaged Data")
 		print("="*80)
 		results_avg = perform_two_way_between_anova(
 			df,
@@ -3223,57 +3405,62 @@ def main():
 		
 		# Example 3: Mixed ANOVA with Time
 		print("\n\n" + "="*80)
-		print("EXAMPLE 3: Mixed ANOVA - Time × Sex × CA%")
+		print(f"EXAMPLE 3: Mixed ANOVA - Time × Sex × CA%")
 		print("="*80)
-		print("Note: Using all available time points for complete analysis")
+		print(f"Note: Using all available {time_label.lower()}s for complete analysis")
 		results_mixed = perform_mixed_anova_time(
 			df,
 			measure="Total Change",
-			time_points=None  # Use all available days
+			time_points=None,  # Use all available time points
+			time_unit=time_unit
 		)
 		
 		# Example 4: Sex-stratified Mixed ANOVA - Males only
 		print("\n\n" + "="*80)
-		print("EXAMPLE 4: Sex-Stratified Mixed ANOVA - Time × CA% (MALES ONLY)")
+		print(f"EXAMPLE 4: Sex-Stratified Mixed ANOVA - Time × CA% (MALES ONLY)")
 		print("="*80)
 		results_males = perform_mixed_anova_sex_stratified(
 			df,
 			sex="M",
 			measure="Total Change",
-			time_points=None
+			time_points=None,
+			time_unit=time_unit
 		)
 		
 		# Example 5: Sex-stratified Mixed ANOVA - Females only
 		print("\n\n" + "="*80)
-		print("EXAMPLE 5: Sex-Stratified Mixed ANOVA - Time × CA% (FEMALES ONLY)")
+		print(f"EXAMPLE 5: Sex-Stratified Mixed ANOVA - Time × CA% (FEMALES ONLY)")
 		print("="*80)
 		results_females = perform_mixed_anova_sex_stratified(
 			df,
 			sex="F",
 			measure="Total Change",
-			time_points=None
+			time_points=None,
+			time_unit=time_unit
 		)
 		
 		# Example 6: CA%-stratified Mixed ANOVA - 0% CA only
 		print("\n\n" + "="*80)
-		print("EXAMPLE 6: CA%-Stratified Mixed ANOVA - Time × Sex (0% CA ONLY)")
+		print(f"EXAMPLE 6: CA%-Stratified Mixed ANOVA - Time × Sex (0% CA ONLY)")
 		print("="*80)
 		results_ca0 = perform_mixed_anova_ca_stratified(
 			df,
 			ca_percent=0,
 			measure="Total Change",
-			time_points=None
+			time_points=None,
+			time_unit=time_unit
 		)
 		
 		# Example 7: CA%-stratified Mixed ANOVA - 2% CA only
 		print("\n\n" + "="*80)
-		print("EXAMPLE 7: CA%-Stratified Mixed ANOVA - Time × Sex (2% CA ONLY)")
+		print(f"EXAMPLE 7: CA%-Stratified Mixed ANOVA - Time × Sex (2% CA ONLY)")
 		print("="*80)
 		results_ca2 = perform_mixed_anova_ca_stratified(
 			df,
 			ca_percent=2,
 			measure="Total Change",
-			time_points=None
+			time_points=None,
+			time_unit=time_unit
 		)
 		
 		# Post-hoc tests if main effects are significant
@@ -3296,60 +3483,63 @@ def main():
 		mixed_posthoc_ca0 = None
 		mixed_posthoc_ca2 = None
 		
+		# Determine which time column to use for post-hoc
+		time_col = "Week" if use_weeks else "Day"
+		
 		# Check if any of the stratified analyses had significant interactions
 		run_posthoc = input("\nWould you like to run post-hoc tests for stratified mixed ANOVAs? (y/n): ").strip().lower()
 		
 		if run_posthoc == 'y':
 			# Post-hoc for males (Time x CA%)
 			if results_males and results_males.get('interaction', {}).get('significant'):
-				print("\n\nTime × CA% interaction significant in males. Running post-hoc tests...")
+				print(f"\n\nTime × CA% interaction significant in males. Running post-hoc tests...")
 				male_df = df[df['Sex'] == 'M'].copy()
 				mixed_posthoc_males = perform_mixed_anova_posthoc(
 					male_df,
 					measure="Total Change",
-					within="Day",
+					within=time_col,
 					between="CA (%)",
 					subject="ID",
-					padjust='fdr_bh'
+					padjust=padjust_method
 				)
 			
 			# Post-hoc for females (Time x CA%)
 			if results_females and results_females.get('interaction', {}).get('significant'):
-				print("\n\nTime × CA% interaction significant in females. Running post-hoc tests...")
+				print(f"\n\nTime × CA% interaction significant in females. Running post-hoc tests...")
 				female_df = df[df['Sex'] == 'F'].copy()
 				mixed_posthoc_females = perform_mixed_anova_posthoc(
 					female_df,
 					measure="Total Change",
-					within="Day",
+					within=time_col,
 					between="CA (%)",
 					subject="ID",
-					padjust='fdr_bh'
+					padjust=padjust_method
 				)
 			
 			# Post-hoc for 0% CA (Time x Sex)
 			if results_ca0 and results_ca0.get('interaction', {}).get('significant'):
-				print("\n\nTime × Sex interaction significant at 0% CA. Running post-hoc tests...")
+				print(f"\n\nTime × Sex interaction significant at 0% CA. Running post-hoc tests...")
 				ca0_df = df[df['CA (%)'] == 0].copy()
 				mixed_posthoc_ca0 = perform_mixed_anova_posthoc(
 					ca0_df,
 					measure="Total Change",
-					within="Day",
+					within=time_col,
 					between="Sex",
 					subject="ID",
-					padjust='fdr_bh'
+					padjust=padjust_method
 				)
 			
 			# Post-hoc for 2% CA (Time x Sex)
 			if results_ca2 and results_ca2.get('interaction', {}).get('significant'):
-				print("\n\nTime × Sex interaction significant at 2% CA. Running post-hoc tests...")
+				print(f"\n\nTime × Sex interaction significant at 2% CA. Running post-hoc tests...")
 				ca2_df = df[df['CA (%)'] == 2].copy()
 				mixed_posthoc_ca2 = perform_mixed_anova_posthoc(
 					ca2_df,
 					measure="Total Change",
-					within="Day",
+					within=time_col,
 					between="Sex",
 					subject="ID",
-					padjust='fdr_bh'
+					padjust=padjust_method
 				)
 		
 		print("\n" + "="*80)
@@ -3383,7 +3573,9 @@ def main():
 		if save_report == 'y':
 			from datetime import datetime
 			timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-			report_filename = f"CAH_statistical_report_{timestamp}.txt"
+			time_suffix = "weekly" if use_weeks else "daily"
+			correction_suffix = "bonf" if padjust_method == 'bonf' else "fdr"
+			report_filename = f"CAH_statistical_report_{time_suffix}_{correction_suffix}_{timestamp}.txt"
 			report_path = Path(__file__).parent / report_filename
 			
 			with open(report_path, 'w', encoding='utf-8') as f:
