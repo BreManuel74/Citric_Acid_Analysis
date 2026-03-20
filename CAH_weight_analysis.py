@@ -3978,7 +3978,9 @@ def plot_slopes_comparison_cah(
 	ax1.set_xticklabels([f'{ca}% CA' for ca in ca_groups])
 	ax1.set_ylabel(f'Slope ({measure} per {time_unit})')
 	ax1.set_title('Slope Distribution by Group')
-	ax1.grid(axis='y', alpha=0.3)
+	ax1.grid(False)
+	ax1.spines['top'].set_visible(False)
+	ax1.spines['right'].set_visible(False)
 	
 	# Panel 2: Bar chart with error bars
 	ax2 = axes[1]
@@ -3993,7 +3995,9 @@ def plot_slopes_comparison_cah(
 	ax2.set_xticklabels([f'{ca}% CA' for ca in ca_groups])
 	ax2.set_ylabel(f'Mean Slope ± SEM ({measure} per {time_unit})')
 	ax2.set_title('Mean Slopes with Error Bars')
-	ax2.grid(axis='y', alpha=0.3)
+	ax2.grid(False)
+	ax2.spines['top'].set_visible(False)
+	ax2.spines['right'].set_visible(False)
 	
 	# Panel 3: Histogram overlay
 	ax3 = axes[2]
@@ -4006,7 +4010,9 @@ def plot_slopes_comparison_cah(
 	ax3.set_ylabel('Frequency')
 	ax3.set_title('Slope Distribution Histogram')
 	ax3.legend()
-	ax3.grid(axis='y', alpha=0.3)
+	ax3.grid(False)
+	ax3.spines['top'].set_visible(False)
+	ax3.spines['right'].set_visible(False)
 	
 	# Overall title
 	if title is None:

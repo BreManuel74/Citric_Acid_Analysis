@@ -46,7 +46,7 @@ plt.rcParams["svg.fonttype"] = "none"
 # ═══════════════════════════════════════════════════════════════════════════════
 #  EXPERIMENT MODE — change this single value to switch between designs
 # ═══════════════════════════════════════════════════════════════════════════════
-EXPERIMENT_MODE = 'nonramp'   # 'ramp' or 'nonramp'
+EXPERIMENT_MODE = 'ramp'   # 'ramp' or 'nonramp'
 
 _MODE_LABELS = {
     'ramp': {
@@ -962,6 +962,7 @@ def plot_average_weight_change_by_ca(
 	ax1.grid(False)
 	ax1.spines['top'].set_visible(False)
 	ax1.spines['right'].set_visible(False)
+	ax1.tick_params(direction='in', which='both', length=5)
 	
 	# Set x-axis to span exactly the width of the bars (no padding)
 	ax1.set_xlim(-bar_width/2, len(ca_labels) - 1 + bar_width/2)
@@ -999,6 +1000,7 @@ def plot_average_weight_change_by_ca(
 	ax2.grid(False)
 	ax2.spines['top'].set_visible(False)
 	ax2.spines['right'].set_visible(False)
+	ax2.tick_params(direction='in', which='both', length=5)
 	
 	# Set x-axis to span exactly the width of the bars (no padding)
 	ax2.set_xlim(-bar_width/2, len(ca_labels) - 1 + bar_width/2)
@@ -1140,6 +1142,7 @@ def plot_average_weight_change_by_week(
 	ax1.set_xticks(x_pos); ax1.set_xticklabels(week_labels)
 	ax1.axhline(0, color='black', linewidth=1.5, linestyle='-', alpha=0.8)
 	ax1.grid(False); ax1.spines['top'].set_visible(False); ax1.spines['right'].set_visible(False)
+	ax1.tick_params(direction='in', which='both', length=5)
 	ax1.set_xlim(-bar_width/2, len(week_labels) - 1 + bar_width/2)
 	d_step = _auto_integer_step(float(np.min(np.array(daily_means) - np.array(daily_sems))),
 	                            float(np.max(np.array(daily_means) + np.array(daily_sems))), target_ticks=6)
@@ -1158,6 +1161,7 @@ def plot_average_weight_change_by_week(
 	ax2.set_xticks(x_pos); ax2.set_xticklabels(week_labels)
 	ax2.axhline(0, color='black', linewidth=1.5, linestyle='-', alpha=0.8)
 	ax2.grid(False); ax2.spines['top'].set_visible(False); ax2.spines['right'].set_visible(False)
+	ax2.tick_params(direction='in', which='both', length=5)
 	ax2.set_xlim(-bar_width/2, len(week_labels) - 1 + bar_width/2)
 	t_step = _auto_integer_step(float(np.min(np.array(total_means) - np.array(total_sems))),
 	                            float(np.max(np.array(total_means) + np.array(total_sems))), target_ticks=6)
@@ -2001,6 +2005,204 @@ def plot_pie_charts_by_week(
 		plt.show()
 	
 	return figures
+
+
+def plot_aberrant_behaviors_lines(
+	df: pd.DataFrame,
+	*,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> plt.Figure:
+	"""
+	3-panel line plot of aberrant behavioral observations across the within-subjects
+	factor (Week for nonramp, CA% for ramp). One panel per behavior:
+	  - No Nest  : 'Nest Made?' == No
+	  - Anxious  : 'Anxious Behaviors?' == Yes
+	  - Lethargy : 'Lethargy?' == Yes
+
+	Y-axis: % of observations (0-100%) — each panel is independent.
+	X-axis: within-subjects factor (Week or CA%).
+	Each behavior's trend across the experiment is immediately readable.
+	"""
+	cdf = clean_master_dataframe(df)
+	if EXPERIMENT_MODE == 'nonramp':
+		cdf = _add_day_number_column(cdf)
+		cdf = _add_week_column(cdf)
+		cdf = cdf[cdf["Day"] >= 0]
+
+	within_col = _MLB['within_col']
+	x_label    = _MLB['bar_xlabel']
+
+	if within_col not in cdf.columns:
+		raise ValueError(f"Column '{within_col}' not found in DataFrame")
+
+	groups = sorted(cdf[within_col].dropna().unique())
+	x_labels_display = [_group_label(g) for g in groups]
+	x = np.arange(len(groups))
+
+	# (column, aberrant_value, panel_title, color)
+	behaviors = [
+		('Nest Made?',         False, 'No Nest',  '#E07B54'),
+		('Anxious Behaviors?', True,  'Anxious',  '#5B8DB8'),
+		('Lethargy?',          True,  'Lethargy', '#6DBF67'),
+	]
+
+	fig, axes = plt.subplots(1, 3, figsize=(14, 5), sharey=True)
+	fig.suptitle(
+		'Aberrant Behavioral Observations — ' + _MLB.get('plot_suffix', ''),
+		fontsize=16, weight='bold', y=0.98
+	)
+
+	for ax, (col, pos_val, title, color) in zip(axes, behaviors):
+		pcts = []
+		for g in groups:
+			grp = cdf[cdf[within_col] == g]
+			n = len(grp)
+			if col not in grp.columns or n == 0:
+				pcts.append(0.0)
+			else:
+				valid = grp[col].dropna()
+				pcts.append(100.0 * (valid == pos_val).sum() / n)
+
+		ax.plot(x, pcts, color=color, linewidth=2.2, marker='o',
+		        markersize=7, markerfacecolor='white',
+		        markeredgecolor=color, markeredgewidth=2)
+		ax.set_xticks(x)
+		ax.set_xticklabels(x_labels_display, fontsize=10)
+		ax.set_xlabel(x_label, fontsize=12, weight='bold')
+		ax.set_ylim(0, 100)
+		ax.set_title(title, fontsize=13, weight='bold', pad=10)
+		ax.grid(False)
+		ax.spines['top'].set_visible(False)
+		ax.spines['right'].set_visible(False)
+		ax.tick_params(direction='in', which='both', length=5)
+
+	axes[0].set_ylabel('% of Observations', fontsize=12, weight='bold')
+	fig.tight_layout()
+
+	if save_path is not None:
+		fig.savefig(str(save_path), dpi=200, bbox_inches='tight')
+		print(f"Saved figure to: {save_path}")
+
+	if save_svg:
+		base = svg_filename or f"aberrant_behaviors_lines{_MLB.get('plot_suffix', '').replace(' ', '_')}"
+		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+		if not safe.lower().endswith(".svg"):
+			safe += ".svg"
+		out_path = Path.cwd() / safe
+		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		print(f"Saved SVG to: {out_path}")
+
+	if show:
+		plt.show()
+
+	return fig
+
+
+def plot_aberrant_behaviors_load_bar(
+	df: pd.DataFrame,
+	*,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> plt.Figure:
+	"""
+	100% stacked bar chart of aberrant behavior load per observation across the
+	within-subjects factor (Week for nonramp, CA% for ramp).
+
+	Each observation is classified by how many aberrant behaviors it shows (0–3):
+	  0 = None, 1 = 1 Behavior, 2 = 2 Behaviors, 3 = All 3
+	Categories are mutually exclusive and sum to exactly 100% per bar.
+
+	Aberrant = No Nest (Nest Made?==No), Anxious (Anxious Behaviors?==Yes),
+	           Lethargy (Lethargy?==Yes).
+	"""
+	cdf = clean_master_dataframe(df)
+	if EXPERIMENT_MODE == 'nonramp':
+		cdf = _add_day_number_column(cdf)
+		cdf = _add_week_column(cdf)
+		cdf = cdf[cdf["Day"] >= 0]
+
+	within_col = _MLB['within_col']
+	x_label    = _MLB['bar_xlabel']
+
+	if within_col not in cdf.columns:
+		raise ValueError(f"Column '{within_col}' not found in DataFrame")
+
+	groups = sorted(cdf[within_col].dropna().unique())
+	x_labels_display = [_group_label(g) for g in groups]
+
+	# Count aberrant behaviors per row
+	_aberrant = {'Nest Made?': False, 'Anxious Behaviors?': True, 'Lethargy?': True}
+
+	def _count_aberrant(row):
+		return sum(
+			1 for col, aval in _aberrant.items()
+			if col in row.index and not pd.isna(row[col]) and row[col] == aval
+		)
+
+	cdf = cdf.copy()
+	cdf['_aberrant_count'] = cdf.apply(_count_aberrant, axis=1)
+
+	load_labels = ['None (0)', '1 Behavior', '2 Behaviors', 'All 3']
+	load_colors = ['#A8D5A2', '#FFD580', '#FF8A65', '#B71C1C']
+
+	pct_matrix = {lbl: [] for lbl in load_labels}
+	for g in groups:
+		grp = cdf[cdf[within_col] == g]
+		n = len(grp)
+		for i, lbl in enumerate(load_labels):
+			count = (grp['_aberrant_count'] == i).sum()
+			pct_matrix[lbl].append(100.0 * count / n if n > 0 else 0.0)
+
+	x = np.arange(len(groups))
+	bar_width = 0.55
+
+	fig, ax = plt.subplots(figsize=(max(8, len(groups) * 1.5), 6))
+	bottoms = np.zeros(len(groups))
+
+	for lbl, color in zip(load_labels, load_colors):
+		vals = np.array(pct_matrix[lbl])
+		ax.bar(x, vals, bar_width, bottom=bottoms, label=lbl,
+		       color=color, edgecolor='black', linewidth=1.2, alpha=0.8)
+		bottoms += vals
+
+	ax.set_xticks(x)
+	ax.set_xticklabels(x_labels_display, fontsize=10)
+	ax.set_xlabel(x_label, fontsize=12, weight='bold')
+	ax.set_ylabel('% of Observations', fontsize=12, weight='bold')
+	ax.set_ylim(0, 100)
+	ax.set_xlim(-bar_width / 2, len(groups) - 1 + bar_width / 2)
+	ax.set_title('Aberrant Behavior Load per Observation — ' + _MLB.get('plot_suffix', ''),
+	             fontsize=13, weight='bold', pad=10)
+	ax.legend(title='# Aberrant Behaviors', fontsize=10, title_fontsize=10,
+	          loc='upper right')
+	ax.grid(False)
+	ax.spines['top'].set_visible(False)
+	ax.spines['right'].set_visible(False)
+	ax.tick_params(direction='in', which='both', length=5)
+	fig.tight_layout()
+
+	if save_path is not None:
+		fig.savefig(str(save_path), dpi=200, bbox_inches='tight')
+		print(f"Saved figure to: {save_path}")
+
+	if save_svg:
+		base = svg_filename or f"aberrant_behaviors_load_bar{_MLB.get('plot_suffix', '').replace(' ', '_')}"
+		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+		if not safe.lower().endswith(".svg"):
+			safe += ".svg"
+		out_path = Path.cwd() / safe
+		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		print(f"Saved SVG to: {out_path}")
+
+	if show:
+		plt.show()
+
+	return fig
 
 
 # ---- Statistical Analysis Functions -----------------------------------------------------------
@@ -4182,7 +4384,7 @@ def plot_interaction_effects(
 		
 		ax.set_xticks(ca_levels)
 		ax.set_xticklabels([f'{int(ca)}%' for ca in ca_levels], fontsize=12)
-		ax.tick_params(axis='y', labelsize=12)
+		ax.tick_params(direction='in', which='both', length=5, labelsize=12)
 		ax.legend(loc='best', fontsize=13, frameon=True, shadow=True, fancybox=True)
 		ax.spines['top'].set_visible(False)
 		ax.spines['right'].set_visible(False)
@@ -4311,7 +4513,7 @@ def plot_interaction_effects(
 			y_max = max_val * 1.2  # Add 20% margin above highest point
 			ax.set_ylim(0, y_max)
 		
-		ax.tick_params(axis='y', labelsize=12)
+		ax.tick_params(direction='in', which='both', length=5, labelsize=12)
 		ax.legend(loc='best', fontsize=13, frameon=True, shadow=True, fancybox=True)
 		ax.spines['top'].set_visible(False)
 		ax.spines['right'].set_visible(False)
@@ -4401,6 +4603,13 @@ def main() -> None:
 				df, save_svg=False, show=False,
 			)
 
+		fig_aberrant_lines = plot_aberrant_behaviors_lines(
+			df, save_svg=False, show=False,
+		)
+		fig_aberrant_load = plot_aberrant_behaviors_load_bar(
+			df, save_svg=False, show=False,
+		)
+
 		plt.show()
 
 		# After viewing, ask for custom SVG filenames (optional)
@@ -4416,6 +4625,8 @@ def main() -> None:
 				custom_wf_pies_prefix = input(f"Filename prefix for {fl}-sorted pie charts (will add _CA0, _CA1, etc.): ").strip()
 			else:
 				custom_wf_pies_prefix = input(f"Filename prefix for {fl}-sorted pie charts (will add _Week1, _Week2, etc.): ").strip()
+			custom_aberrant_lines_svg = input("Filename for aberrant behaviors line plot: ").strip()
+			custom_aberrant_load_svg = input("Filename for aberrant behavior load stacked bar chart: ").strip()
 		except Exception:
 			custom_total_svg = ""
 			custom_daily_svg = ""
@@ -4424,6 +4635,8 @@ def main() -> None:
 			custom_pies_svg = ""
 			custom_wf_bars_svg = ""
 			custom_wf_pies_prefix = ""
+			custom_aberrant_lines_svg = ""
+			custom_aberrant_load_svg = ""
 
 		def _safe_svg_name(base: str) -> str:
 			name = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("-_.") or "plot"
@@ -4436,6 +4649,8 @@ def main() -> None:
 		out_daily_sex = Path.cwd() / _safe_svg_name(custom_daily_sex_svg or "daily_change_by_sex")
 		out_pies = Path.cwd() / _safe_svg_name(custom_pies_svg or "all_behavioral_pie_charts")
 		out_wf_bars = Path.cwd() / _safe_svg_name(custom_wf_bars_svg or bar_default)
+		out_aberrant_lines = Path.cwd() / _safe_svg_name(custom_aberrant_lines_svg or "aberrant_behaviors_lines")
+		out_aberrant_load = Path.cwd() / _safe_svg_name(custom_aberrant_load_svg or "aberrant_behaviors_load_bar")
 
 		# Save all figures
 		for fig_obj, out_path, label in [
@@ -4445,6 +4660,8 @@ def main() -> None:
 			(fig_daily_sex, out_daily_sex, "Daily Change by Sex"),
 			(fig_all_pies, out_pies, "combined pie charts"),
 			(fig_wf_bars, out_wf_bars, f"{fl} bar charts"),
+			(fig_aberrant_lines, out_aberrant_lines, "aberrant behaviors line plot"),
+			(fig_aberrant_load, out_aberrant_load, "aberrant behavior load bar"),
 		]:
 			try:
 				fig_obj.savefig(str(out_path), format="svg", bbox_inches="tight")

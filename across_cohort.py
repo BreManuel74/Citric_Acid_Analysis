@@ -5902,6 +5902,8 @@ def plot_slopes_comparison(
     ax1.grid(False)
     ax1.tick_params(direction='in', length=6)
     ax1.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
     
     # Subplot 2: Bar plot with error bars (Mean ± SEM)
     ax2 = axes[1]
@@ -5923,6 +5925,8 @@ def plot_slopes_comparison(
     ax2.grid(False)
     ax2.tick_params(direction='in', length=6)
     ax2.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
     
     # Subplot 3: Histogram/density comparison
     ax3 = axes[2]
@@ -5939,6 +5943,8 @@ def plot_slopes_comparison(
     ax3.grid(False)
     ax3.tick_params(direction='in', length=6)
     ax3.axvline(x=0, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    ax3.spines['top'].set_visible(False)
+    ax3.spines['right'].set_visible(False)
     
     # Overall title
     if title is None:
