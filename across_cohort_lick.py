@@ -1969,7 +1969,7 @@ def plot_lick_measure_by_cohort(
             color_idx += 1
     
     # Format axes (EXACT lick_nonramp.py style)
-    ax.set_xlabel('Week', fontsize=12)
+    ax.set_xlabel('Week', fontsize=12, weight='bold')
     
     # Create nice label from measure name
     measure_label = measure.replace('_', ' ')
@@ -1978,7 +1978,7 @@ def plot_lick_measure_by_cohort(
     elif 'Avg' in measure:
         measure_label = measure_label
     
-    ax.set_ylabel(measure_label, fontsize=12)
+    ax.set_ylabel(measure_label, fontsize=12, weight='bold')
     
     error_type = '±SD' if use_std else '±SEM'
     ax.set_title(f'{measure_label} Across Weeks by Cohort ({error_type})', 
@@ -1994,6 +1994,8 @@ def plot_lick_measure_by_cohort(
     ax.legend(loc='best', fontsize=10)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
+    ax.grid(False)
+    ax.tick_params(direction='in', which='both', length=5)
     
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     

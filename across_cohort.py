@@ -5896,12 +5896,13 @@ def plot_slopes_comparison(
     
     ax1.set_xticks(positions)
     ax1.set_xticklabels([f'{ca}%' for ca in ca_groups])
+    ax1.set_xlim(-0.7, len(ca_groups) - 1 + 0.7)
     ax1.set_xlabel('CA% Concentration')
     ax1.set_ylabel(f'Slope ({measure} per {time_unit})')
     ax1.set_title('Slope Distribution by Cohort')
     ax1.grid(False)
     ax1.tick_params(direction='in', length=6)
-    ax1.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    ax1.set_ylim(bottom=0)
     ax1.spines['top'].set_visible(False)
     ax1.spines['right'].set_visible(False)
     
@@ -5919,12 +5920,13 @@ def plot_slopes_comparison(
     
     ax2.set_xticks(positions)
     ax2.set_xticklabels([f'{ca}%' for ca in ca_groups])
+    ax2.set_xlim(-0.7, len(ca_groups) - 1 + 0.7)
     ax2.set_xlabel('CA% Concentration')
     ax2.set_ylabel(f'Mean Slope ± SEM ({measure} per {time_unit})')
     ax2.set_title('Mean Slopes by Cohort')
     ax2.grid(False)
     ax2.tick_params(direction='in', length=6)
-    ax2.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    ax2.set_ylim(bottom=0)
     ax2.spines['top'].set_visible(False)
     ax2.spines['right'].set_visible(False)
     
@@ -5942,16 +5944,16 @@ def plot_slopes_comparison(
     ax3.legend(loc='best')
     ax3.grid(False)
     ax3.tick_params(direction='in', length=6)
-    ax3.axvline(x=0, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    ax3.set_xlim(left=0)
     ax3.spines['top'].set_visible(False)
     ax3.spines['right'].set_visible(False)
     
     # Overall title
     if title is None:
         title = f'Slope Analysis: {measure} vs {time_unit}'
-    fig.suptitle(title, fontsize=14, fontweight='bold', y=1.02)
+    fig.suptitle(title, fontsize=14, fontweight='bold', y=0.98)
     
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
     
     if save_path is not None:
         fig.savefig(save_path, dpi=300, bbox_inches='tight')

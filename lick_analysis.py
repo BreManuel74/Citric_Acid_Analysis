@@ -39,7 +39,7 @@ except ImportError:
 #   'ramp'    → CA% increases each week; within-subjects factor = CA_Percent
 #   'nonramp' → CA% is constant across weeks; within-subjects factor = Week
 # ─────────────────────────────────────────────────────────────────────────────
-EXPERIMENT_MODE = 'nonramp'  # << CHANGE THIS: 'ramp' or 'nonramp'
+EXPERIMENT_MODE = 'ramp'  # << CHANGE THIS: 'ramp' or 'nonramp'
 # ─────────────────────────────────────────────────────────────────────────────
 
 _MODE_LABELS: dict = {
@@ -1946,27 +1946,31 @@ def plot_weekly_averages(weekly_averages: Dict, save_path: Optional[Path] = None
     ax1.errorbar(x_pos, avg_licks, yerr=std_licks, 
                 marker='o', markersize=8, linewidth=2, capsize=5, 
                 color='steelblue', markerfacecolor='lightblue', markeredgecolor='steelblue')
-    ax1.set_xlabel('Week')
-    ax1.set_ylabel('Average Licks per Animal')
+    ax1.set_xlabel('Week', fontsize=12, weight='bold')
+    ax1.set_ylabel('Average Licks per Animal', fontsize=12, weight='bold')
     ax1.set_title('Average Licks Across Weeks (±SEM)', fontsize=13, weight='bold')
     ax1.set_xticks(x_pos)
     ax1.set_xticklabels([f"{i+1}" for i in range(len(dates))])
     ax1.set_ylim(bottom=0)
     ax1.spines['top'].set_visible(False)
     ax1.spines['right'].set_visible(False)
+    ax1.grid(False)
+    ax1.tick_params(direction='in', which='both', length=5)
     
     # Plot 2: Average Bouts
     ax2.errorbar(x_pos, avg_bouts, yerr=std_bouts,
                 marker='s', markersize=8, linewidth=2, capsize=5,
                 color='darkgreen', markerfacecolor='lightgreen', markeredgecolor='darkgreen')
-    ax2.set_xlabel('Week')
-    ax2.set_ylabel('Average Bouts per Animal')
+    ax2.set_xlabel('Week', fontsize=12, weight='bold')
+    ax2.set_ylabel('Average Bouts per Animal', fontsize=12, weight='bold')
     ax2.set_title('Average Lick Bouts Across Weeks (±SEM)', fontsize=13, weight='bold')
     ax2.set_xticks(x_pos)
     ax2.set_xticklabels([f"{i+1}" for i in range(len(dates))])
     ax2.set_ylim(bottom=0)
     ax2.spines['top'].set_visible(False)
     ax2.spines['right'].set_visible(False)
+    ax2.grid(False)
+    ax2.tick_params(direction='in', which='both', length=5)
     
     fig1.suptitle('Behavioral Metrics Across Weeks', fontsize=16, weight='bold', y=0.96)
     fig1.tight_layout(rect=[0, 0.03, 1, 0.93])
@@ -1979,39 +1983,45 @@ def plot_weekly_averages(weekly_averages: Dict, save_path: Optional[Path] = None
     ax3.errorbar(x_pos, avg_fecal, yerr=std_fecal,
                 marker='^', markersize=8, linewidth=2, capsize=5,
                 color='saddlebrown', markerfacecolor='tan', markeredgecolor='saddlebrown')
-    ax3.set_xlabel('Week')
-    ax3.set_ylabel('Average Fecal Count per Animal')
+    ax3.set_xlabel('Week', fontsize=12, weight='bold')
+    ax3.set_ylabel('Average Fecal Count per Animal', fontsize=12, weight='bold')
     ax3.set_title('Average Fecal Count Across Weeks (±SEM)', fontsize=13, weight='bold')
     ax3.set_xticks(x_pos)
     ax3.set_xticklabels([f"{i+1}" for i in range(len(dates))])
     ax3.set_ylim(bottom=0)
     ax3.spines['top'].set_visible(False)
     ax3.spines['right'].set_visible(False)
+    ax3.grid(False)
+    ax3.tick_params(direction='in', which='both', length=5)
     
     # Plot 4: Average Bottle Weight Loss
     ax4.errorbar(x_pos, avg_bottle_weight, yerr=std_bottle_weight,
                 marker='D', markersize=8, linewidth=2, capsize=5,
                 color='purple', markerfacecolor='plum', markeredgecolor='purple')
-    ax4.set_xlabel('Week')
-    ax4.set_ylabel('Average Bottle Weight Loss per Animal (g)')
+    ax4.set_xlabel('Week', fontsize=12, weight='bold')
+    ax4.set_ylabel('Average Bottle Weight Loss per Animal (g)', fontsize=12, weight='bold')
     ax4.set_title('Average Bottle Weight Loss Across Weeks (±SEM)', fontsize=13, weight='bold')
     ax4.set_xticks(x_pos)
     ax4.set_xticklabels([f"{i+1}" for i in range(len(dates))])
     ax4.set_ylim(bottom=0)
     ax4.spines['top'].set_visible(False)
     ax4.spines['right'].set_visible(False)
+    ax4.grid(False)
+    ax4.tick_params(direction='in', which='both', length=5)
     
     # Plot 5: Average Total Weight Loss
     ax5.errorbar(x_pos, avg_total_weight, yerr=std_total_weight,
                 marker='v', markersize=8, linewidth=2, capsize=5,
                 color='darkorange', markerfacecolor='orange', markeredgecolor='darkorange')
-    ax5.set_xlabel('Week')
-    ax5.set_ylabel('Average Total Weight Loss per Animal (g)')
+    ax5.set_xlabel('Week', fontsize=12, weight='bold')
+    ax5.set_ylabel('Average Total Weight Loss per Animal (g)', fontsize=12, weight='bold')
     ax5.set_title('Average Total Weight Loss Across Weeks (±SEM)', fontsize=13, weight='bold')
     ax5.set_xticks(x_pos)
     ax5.set_xticklabels([f"{i+1}" for i in range(len(dates))])
     ax5.spines['top'].set_visible(False)
     ax5.spines['right'].set_visible(False)
+    ax5.grid(False)
+    ax5.tick_params(direction='in', which='both', length=5)
     
     fig2.suptitle('Physiological Metrics Across Weeks', fontsize=16, weight='bold', y=0.97)
     fig2.tight_layout(rect=[0, 0.03, 1, 0.94])
@@ -2889,6 +2899,8 @@ def plot_lick_rate_histogram(
     # Remove top and right spines
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
+    ax.grid(False)
+    ax.tick_params(direction='in', which='both', length=5)
     
     plt.tight_layout()
     
@@ -2986,6 +2998,8 @@ def plot_comprehensive_lick_rate(
     # Remove top and right spines
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
+    ax.grid(False)
+    ax.tick_params(direction='in', which='both', length=5)
     
     plt.tight_layout()
     
@@ -3083,6 +3097,8 @@ def plot_comprehensive_lick_rate_by_ca(
     ax.set_ylim(bottom=0)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
+    ax.grid(False)
+    ax.tick_params(direction='in', which='both', length=5)
     plt.tight_layout()
 
     print("=" * 80 + "\n")
@@ -3212,6 +3228,8 @@ def plot_first_5min_by_week(
     ax.set_ylim(bottom=0)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
+    ax.grid(False)
+    ax.tick_params(direction='in', which='both', length=5)
     
     # Add sample size annotation
     n_animals = len(individual_data[0]) if individual_data else 0
@@ -3352,6 +3370,8 @@ def plot_first_5min_bouts_by_week(
     ax.set_ylim(bottom=0)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
+    ax.grid(False)
+    ax.tick_params(direction='in', which='both', length=5)
     
     # Add sample size annotation
     n_animals = len(individual_data[0]) if individual_data else 0
@@ -3520,6 +3540,8 @@ def plot_first_5min_bouts_by_week_with_lines(
     ax.set_ylim(bottom=0)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
+    ax.grid(False)
+    ax.tick_params(direction='in', which='both', length=5)
     
     # Add sample size annotation
     n_animals = len(animal_trajectories)
@@ -3660,6 +3682,8 @@ def plot_time_to_50pct_by_week(
     ax.set_ylim(bottom=0)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
+    ax.grid(False)
+    ax.tick_params(direction='in', which='both', length=5)
     
     # Add sample size annotation
     n_animals = len(individual_data[0]) if individual_data else 0
@@ -3828,6 +3852,8 @@ def plot_time_to_50pct_by_week_with_lines(
     ax.set_ylim(bottom=0)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
+    ax.grid(False)
+    ax.tick_params(direction='in', which='both', length=5)
     
     # Add sample size annotation
     n_animals = len(animal_trajectories)
@@ -3996,6 +4022,8 @@ def plot_first_5min_by_week_with_lines(
     ax.set_ylim(bottom=0)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
+    ax.grid(False)
+    ax.tick_params(direction='in', which='both', length=5)
     
     # Add sample size annotation
     n_animals = len(animal_trajectories)
@@ -4164,6 +4192,8 @@ def plot_interaction_effects(
         # Remove top and right spines
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
+        ax.grid(False)
+        ax.tick_params(direction='in', which='both', length=5)
         
         plt.tight_layout()
         
