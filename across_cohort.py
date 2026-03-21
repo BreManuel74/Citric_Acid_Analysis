@@ -3263,6 +3263,132 @@ def plot_behavioral_metrics_by_cohort(
     return fig
 
 
+def plot_behavioral_interaction_effects(
+    results: Dict,
+    save_dir: Optional[Path] = None,
+    show: bool = True,
+) -> Dict[str, "plt.Figure"]:
+    """
+    For each behavioral metric in `results` where GEE found at least one
+    significant effect (Week, Cohort, or Cohort×Week; non-degenerate fit),
+    produce a Cohort × Week interaction line plot.
+
+    Parameters
+    ----------
+    results   : return value of perform_behavioral_mixed_analysis()
+    save_dir  : if given, SVG files are saved here
+    show      : whether to call plt.show()
+
+    Returns
+    -------
+    dict of metric_label -> Figure for each plot generated
+    """
+    if not HAS_MATPLOTLIB:
+        print("[WARNING] matplotlib not available \u2014 cannot generate interaction plots")
+        return {}
+
+    _COLORS = ['#2166AC', '#D6604D', '#4DAC26', '#984EA3', '#FF7F00']
+
+    def _stars(p: float) -> str:
+        if np.isnan(p):
+            return 'n/a'
+        return '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
+
+    def _fmt_p(p: float) -> str:
+        if np.isnan(p):
+            return 'N/A'
+        if p < 0.001:
+            return '< 0.001'
+        return f'{p:.3f}'
+
+    figs: Dict[str, plt.Figure] = {}
+
+    for metric_label in ['No Nest', 'Lethargy', 'Anxious']:
+        res = results.get(metric_label)
+        if res is None:
+            continue
+
+        gee = res.get('gee', {})
+        if gee.get('degenerate', False):
+            print(f"  [{metric_label}] Skipping interaction plot \u2014 GEE fit degenerate")
+            continue
+
+        week_p   = gee.get('week',        {}).get('p', float('nan'))
+        cohort_p = gee.get('cohort',      {}).get('p', float('nan'))
+        inter_p  = gee.get('interaction', {}).get('p', float('nan'))
+
+        if not any(not np.isnan(p) and p < 0.05 for p in [week_p, cohort_p, inter_p]):
+            print(f"  [{metric_label}] No significant GEE effects \u2014 skipping plot")
+            continue
+
+        desc          = res.get('descriptives', {})
+        all_weeks     = res.get('all_weeks', sorted({w for cd in desc.values() for w in cd}))
+        cohort_labels = res.get('cohort_labels', list(desc.keys()))
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+
+        for i, label in enumerate(cohort_labels):
+            color = _COLORS[i % len(_COLORS)]
+            pcts_by_week = desc.get(label, {})
+            xs = list(range(len(all_weeks)))
+            ys = [pcts_by_week.get(w, float('nan')) for w in all_weeks]
+            ax.plot(
+                xs, ys,
+                color=color, linewidth=2.2,
+                marker='o', markersize=7,
+                markerfacecolor='white',
+                markeredgecolor=color, markeredgewidth=2,
+                label=label,
+            )
+
+        ax.set_xticks(range(len(all_weeks)))
+        ax.set_xticklabels([f"Week {w}" for w in all_weeks], fontsize=10)
+        ax.set_xlabel('Week', fontsize=12, weight='bold')
+        ax.set_ylabel('% Observations', fontsize=12, weight='bold')
+        ax.set_ylim(bottom=0)
+        ax.set_title(f"Cohort \u00d7 Week Interaction \u2014 {metric_label}",
+                     fontsize=13, weight='bold')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.tick_params(direction='in', which='both', length=5)
+        ax.legend(fontsize=10, frameon=False)
+
+        ann = (
+            f"GEE (n={gee.get('n_subjects', '?')} subjects)\n"
+            f"Week: p {_fmt_p(week_p)} {_stars(week_p)}\n"
+            f"Cohort: p {_fmt_p(cohort_p)} {_stars(cohort_p)}\n"
+            f"Cohort\u00d7Week: p {_fmt_p(inter_p)} {_stars(inter_p)}"
+        )
+        ax.text(
+            0.98, 0.97, ann,
+            transform=ax.transAxes,
+            fontsize=9,
+            verticalalignment='top',
+            horizontalalignment='right',
+            bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
+                      alpha=0.85, edgecolor='#cccccc'),
+        )
+
+        fig.tight_layout()
+
+        if save_dir is not None:
+            _sdir = Path(save_dir)
+            _sdir.mkdir(parents=True, exist_ok=True)
+            fname = f"behavioral_interaction_{metric_label.lower().replace(' ', '_')}.svg"
+            fig.savefig(str(_sdir / fname), bbox_inches='tight')
+            print(f"  Saved interaction plot: {_sdir / fname}")
+
+        if show:
+            plt.show()
+
+        figs[metric_label] = fig
+
+    if not figs:
+        print("  No significant non-degenerate GEE effects found \u2014 no interaction plots generated.")
+
+    return figs
+
+
 # =============================================================================
 # BEHAVIORAL BINARY OUTCOME ANALYSIS
 # Two-way repeated-measures analysis for binary behavioral outcomes:
@@ -3442,7 +3568,13 @@ def perform_behavioral_mixed_analysis(
                 family=Binomial(),
                 cov_struct=Exchangeable(),
             )
-            fit = model.fit(maxiter=100, ddof_scale=None)
+            _n_clusters = int(gee_df['ID'].nunique())
+            try:
+                fit = model.fit(cov_type='bias_reduced', maxiter=100, ddof_scale=None)
+                _se_label = f'Mancl-DeRouen bias-reduced (BC; n={_n_clusters} clusters)'
+            except Exception:
+                fit = model.fit(cov_type='robust', maxiter=100, ddof_scale=None)
+                _se_label = 'robust (BC correction failed)'
 
             pvals = fit.pvalues
             params = fit.params
@@ -3475,6 +3607,15 @@ def perform_behavioral_mixed_analysis(
             def _stars(p):
                 return '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
 
+            _gee_degenerate = all(
+                not np.isnan(p) and p >= 0.99
+                for p in [p_week, p_cohort, p_inter]
+                if not np.isnan(p)
+            )
+            print(f"    SE correction: {_se_label}")
+            if _gee_degenerate:
+                print(f"    ⚠️  DEGENERATE FIT: all Wald p ≈ 1.0 — likely near-complete separation")
+                print(f"        (outcome near-uniform; GEE p-values unreliable — use Cochran's Q [B])")
             print(f"    Week effect  : Wald p = {p_week:.4f} {_stars(p_week)}")
             print(f"    Cohort effect: Wald p = {p_cohort:.4f} {_stars(p_cohort)}  "
                   f"(OR = {or_cohort:.3f}, 95% CI [{or_lo:.3f}, {or_hi:.3f}])")
@@ -3486,6 +3627,8 @@ def perform_behavioral_mixed_analysis(
                 'formula': 'Response ~ C(Week) + C(Cohort) + C(Week):C(Cohort)',
                 'n_subjects': int(gee_df['ID'].nunique()),
                 'n_obs': int(len(gee_df)),
+                'se_correction': _se_label,
+                'degenerate': _gee_degenerate,
                 'week': {
                     'p': float(p_week),
                     'significant': bool(p_week < 0.05),
@@ -3538,13 +3681,44 @@ def perform_behavioral_mixed_analysis(
                 q_stat = float(q_res.statistic)
                 p_q    = float(q_res.pvalue)
                 df_q   = n_weeks - 1
-                stars  = '***' if p_q < 0.001 else '**' if p_q < 0.01 else '*' if p_q < 0.05 else 'ns'
-                print(f"    Q({df_q}) = {q_stat:.3f}, p = {p_q:.4f} {stars}  "
-                      f"(n = {len(wide)} complete subjects)")
-                cochran_result = {
-                    'test': "Cochran's Q", 'statistic': q_stat, 'df': df_q,
-                    'p': p_q, 'significant': bool(p_q < 0.05), 'n': int(len(wide)),
-                }
+                if np.isnan(q_stat):
+                    # Happens when all responses are uniform (0/0 in Q formula)
+                    print(f"    Not computable — all responses uniform across weeks (no variation)")
+                    cochran_result = {
+                        'test': "Cochran's Q", 'statistic': np.nan, 'p': np.nan,
+                        'significant': False, 'n': int(len(wide)),
+                        'note': 'Not computable — responses uniform across weeks (no variation to test)',
+                    }
+                else:
+                    stars  = '***' if p_q < 0.001 else '**' if p_q < 0.01 else '*' if p_q < 0.05 else 'ns'
+                    print(f"    Q({df_q}) = {q_stat:.3f}, p = {p_q:.4f} {stars}  "
+                          f"(n = {len(wide)} complete subjects)")
+                    cochran_result = {
+                        'test': "Cochran's Q", 'statistic': q_stat, 'df': df_q,
+                        'p': p_q, 'significant': bool(p_q < 0.05), 'n': int(len(wide)),
+                    }
+                    # Permutation test: 5000 within-subject shuffles
+                    try:
+                        _n_perm = 5000
+                        _rng = np.random.default_rng(42)
+                        _wide_arr = wide.values.astype(float)
+                        _perm_qs = []
+                        for _ in range(_n_perm):
+                            _shuffled = _wide_arr.copy()
+                            for _row_i in range(len(_shuffled)):
+                                _rng.shuffle(_shuffled[_row_i])
+                            _perm_q = float(cochrans_q(pd.DataFrame(_shuffled, columns=wide.columns)).statistic)
+                            _perm_qs.append(_perm_q)
+                        _p_perm = float(np.mean([q >= q_stat for q in _perm_qs]))
+                        cochran_result['p_permutation'] = _p_perm
+                        cochran_result['significant_permutation'] = bool(_p_perm < 0.05)
+                        _perm_stars = ('***' if _p_perm < 0.001 else '**' if _p_perm < 0.01
+                                       else '*' if _p_perm < 0.05 else 'ns')
+                        print(f"    Permutation p (5000 shuffles): {_p_perm:.4f} {_perm_stars}")
+                    except Exception as _pe:
+                        print(f"    [WARNING] Permutation test failed: {_pe}")
+                        cochran_result['p_permutation'] = float('nan')
+                        cochran_result['significant_permutation'] = False
             except Exception as e:
                 print(f"    [WARNING] Cochran's Q failed: {e}")
                 cochran_result = {'test': "Cochran's Q", 'statistic': np.nan, 'p': np.nan,
@@ -3642,6 +3816,31 @@ def perform_behavioral_mixed_analysis(
             'posthoc': posthoc,
         }
 
+    # BH-FDR correction on GEE week p-values across the 3 primary behavioral measures
+    _primary_labels = ['No Nest', 'Lethargy', 'Anxious']
+    _gee_week_ps = [
+        all_results.get(_ml, {}).get('gee', {}).get('week', {}).get('p', float('nan'))
+        for _ml in _primary_labels
+    ]
+    _fdr_adj = [float('nan')] * len(_gee_week_ps)
+    _valid_idx = [i for i, p in enumerate(_gee_week_ps) if not np.isnan(p)]
+    if _valid_idx:
+        _valid_ps = [_gee_week_ps[i] for i in _valid_idx]
+        _m_fdr = len(_valid_ps)
+        _order = sorted(range(_m_fdr), key=lambda i: _valid_ps[i])
+        _sorted_ps = [_valid_ps[i] for i in _order]
+        _bh_sorted = [min(1.0, _sorted_ps[k] * _m_fdr / (k + 1)) for k in range(_m_fdr)]
+        for _k in range(_m_fdr - 2, -1, -1):
+            _bh_sorted[_k] = min(_bh_sorted[_k], _bh_sorted[_k + 1])
+        _bh_orig = [0.0] * _m_fdr
+        for _spos, _opos in enumerate(_order):
+            _bh_orig[_opos] = _bh_sorted[_spos]
+        for _vpos, _orig_idx in enumerate(_valid_idx):
+            _fdr_adj[_orig_idx] = _bh_orig[_vpos]
+    for _i, _ml in enumerate(_primary_labels):
+        if _ml in all_results:
+            all_results[_ml]['gee_week_fdr'] = _fdr_adj[_i]
+
     print("\n" + "=" * 80)
     return all_results
 
@@ -3693,15 +3892,19 @@ def generate_behavioral_report(
     lines.append("    Model: Response ~ C(Week) + C(Cohort) + C(Week):C(Cohort)")
     lines.append("    Family: Binomial (logit link)   Corr. structure: Exchangeable")
     lines.append("    Groups: Animal ID")
+    lines.append("    SE: Mancl-DeRouen bias-reduced (BC) correction when available (n_clusters<30)")
     lines.append("    Provides: Wald p-values for Week, Cohort, and Cohort×Week interaction")
     lines.append("    Effect size: Odds Ratios with 95% Wald CIs for Cohort terms")
     lines.append("")
     lines.append("  SENSITIVITY CHECK : Cochran's Q (non-parametric; complete subjects only)")
     lines.append("    Non-parametric analog of RM-ANOVA for binary data.")
     lines.append("    Subjects missing any week excluded; use as robustness check.")
+    lines.append("    + permutation p-value (5000 within-subject shuffles; no asymptotic assumptions)")
     lines.append("")
     lines.append("  POST-HOC          : Pairwise McNemar tests (if GEE Week or interaction")
     lines.append("    p < 0.05), Bonferroni-corrected. Effect size: phi coefficient.")
+    lines.append("  FDR NOTE          : BH-FDR corrected GEE Week p-values across the 3")
+    lines.append("    primary behavioral measures shown in table below.")
     lines.append("")
 
     if cohort_dfs:
@@ -3711,6 +3914,26 @@ def generate_behavioral_report(
             n_sub = df['ID'].nunique() if 'ID' in df.columns else '?'
             lines.append(f"  {label:<35} n = {n_sub} subjects")
         lines.append("")
+
+    # BH-FDR summary table
+    if results:
+        _primary = ['No Nest', 'Lethargy', 'Anxious']
+        _any_fdr = any(
+            _ml in results and 'gee_week_fdr' in results[_ml]
+            for _ml in _primary
+        )
+        if _any_fdr:
+            lines.append("BH-FDR CORRECTED GEE WEEK P-VALUES (across primary behavioral measures)")
+            lines.append("-" * W)
+            for _ml in _primary:
+                if _ml in results:
+                    _raw_p = results[_ml].get('gee', {}).get('week', {}).get('p', float('nan'))
+                    _fdr_p = results[_ml].get('gee_week_fdr', float('nan'))
+                    _fdr_s = _stars(_fdr_p) if not np.isnan(_fdr_p) else 'na'
+                    _raw_s = f"{_raw_p:.4f}" if not np.isnan(_raw_p) else 'N/A'
+                    _fdr_s2 = f"{_fdr_p:.4f}" if not np.isnan(_fdr_p) else 'N/A'
+                    lines.append(f"  {_ml:<25}: raw p = {_raw_s}  \u2192  BH-FDR p = {_fdr_s2} {_fdr_s}")
+            lines.append("")
 
     if not results:
         lines.append("[No results available]")
@@ -3767,6 +3990,11 @@ def generate_behavioral_report(
             conv = "yes" if gee.get('converged', False) else "no"
             lines.append(f"  Model: {gee.get('formula', 'Response ~ C(Week) + C(Cohort) + C(Week):C(Cohort)')}")
             lines.append(f"  n = {n_s} subjects, {n_o} observations   Converged: {conv}")
+            if gee.get('se_correction'):
+                lines.append(f"    SE correction: {gee['se_correction']}")
+            if gee.get('degenerate', False):
+                lines.append(f"  ⚠️  DEGENERATE FIT: all Wald p ≈ 1.0 — likely near-complete separation")
+                lines.append(f"      (outcome is near-uniform; GEE p-values unreliable — use Cochran's Q [B] instead)")
             lines.append("")
 
             # Week
@@ -3821,10 +4049,23 @@ def generate_behavioral_report(
         elif not np.isnan(q_stat):
             lines.append(f"  Q({int(df_q) if not np.isnan(df_q) else '?'}) = {q_stat:.3f},  "
                          f"{_fmt_p(p_q)}  {_stars(p_q)}  (n = {n_q} complete subjects)")
-            lines.append(f"  Interpretation: "
-                         + ("Corroborates GEE week effect."
-                            if cq.get('significant') else
-                            "Consistent with GEE (no week effect)."))
+            _p_perm = cq.get('p_permutation', float('nan'))
+            if not np.isnan(_p_perm):
+                lines.append(f"  Permutation p (5000 shuffles): {_p_perm:.4f}  {_stars(_p_perm)}")
+            _gee_week_p = res.get('gee', {}).get('week', {}).get('p', float('nan'))
+            _gee_week_sig = not np.isnan(_gee_week_p) and _gee_week_p < 0.05
+            _cq_sig = cq.get('significant', False)
+            if _cq_sig and _gee_week_sig:
+                _interp = "Corroborates GEE week effect."
+            elif _cq_sig and not _gee_week_sig:
+                _interp = "Diverges from GEE — Q significant but GEE week ns; interpret with caution."
+            elif not _cq_sig and _gee_week_sig:
+                _interp = ("Diverges from GEE — GEE week p < 0.05 but Q ns. "
+                           "Likely reflects complete-case restriction, low power, or "
+                           "separation inflating GEE significance.")
+            else:
+                _interp = "Consistent with GEE — no significant week effect in either test."
+            lines.append(f"  Interpretation: {_interp}")
         else:
             lines.append("  Not computed.")
         lines.append("")
@@ -3868,11 +4109,16 @@ def generate_behavioral_report(
     lines.append("  GEE: Generalized Estimating Equations with Binomial family (logit link) and")
     lines.append("    Exchangeable working correlation structure. Accounts for within-subject")
     lines.append("    correlation across repeated weekly observations. Population-averaged")
-    lines.append("    interpretation. Wald z-tests for each term. Small-sample Wald CIs are")
-    lines.append("    asymptotic; interpret with caution when group n < 10.")
+    lines.append("    interpretation. Wald z-tests for each term.")
+    lines.append("    SE: Mancl-DeRouen bias-reduced (BC) correction applied when n_clusters<30;")
+    lines.append("    falls back to robust SE if BC fails. Recommended for small animal studies.")
     lines.append("  Cochran's Q: Non-parametric test for within-subjects binary proportions.")
     lines.append("    Complete-case only; subjects missing any week excluded. Use as")
     lines.append("    robustness check alongside GEE.")
+    lines.append("    Permutation p: 5000 within-subject label shuffles; no asymptotic assumptions.")
+    lines.append("  BH-FDR: Benjamini-Hochberg corrected GEE Week p-values across the 3 primary")
+    lines.append("    behavioral measures (No Nest, Lethargy, Anxious). Correct sort-in-sorted-space")
+    lines.append("    step-up procedure used.")
     lines.append("  McNemar: Paired chi-square with continuity correction (exact=False).")
     lines.append("    P-values multiplied by number of pairs (Bonferroni). Phi coefficient")
     lines.append("    = sqrt(chi2 / n) provides standardised effect size.")
@@ -8221,6 +8467,25 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             )
         except Exception as e:
             print(f"  [WARNING] Behavioral report generation failed: {e}")
+
+        if beh_results and HAS_MATPLOTLIB:
+            print("\nGenerating interaction plots for significant behavioral effects...")
+            beh_plot_dir = Path(f"0v2_behavioral_plots_{timestamp}")
+            try:
+                beh_figs = plot_behavioral_interaction_effects(
+                    beh_results,
+                    save_dir=beh_plot_dir,
+                    show=False,
+                )
+                if beh_figs:
+                    print(f"[OK] {len(beh_figs)} interaction plot(s) saved -> {beh_plot_dir}")
+                    show_now = input("\nDisplay interaction plots now? (y/n): ").strip().lower()
+                    if show_now == 'y':
+                        plt.show()
+                    else:
+                        plt.close('all')
+            except Exception as e:
+                print(f"  [WARNING] Interaction plot generation failed: {e}")
 
     print("\n" + "=" * 80)
     print("0% vs 2% analysis complete.")
