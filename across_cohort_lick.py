@@ -371,6 +371,31 @@ def compute_lick_bouts(events_df: pd.DataFrame, sensor_cols: List[str], ili_cuto
     return bout_results
 
 
+def calculate_time_to_50_percent_licks(events_df: pd.DataFrame, sensor_col: str) -> float:
+    """Calculate the time (in minutes) when a sensor reaches 50% of its total licks.
+
+    Parameters:
+        events_df: DataFrame with Time_sec and event columns
+        sensor_col: Sensor column name (e.g., 'Sensor_1')
+
+    Returns:
+        Time in minutes when 50% of total licks is reached, or np.nan if no licks
+    """
+    event_col = f"{sensor_col}_event"
+    if event_col not in events_df.columns:
+        return np.nan
+
+    event_times = events_df[events_df[event_col]]['Time_sec'].values
+    if len(event_times) == 0:
+        return np.nan
+
+    event_times = np.sort(event_times)
+    total_licks = len(event_times)
+    idx_50 = int(np.ceil(total_licks / 2.0)) - 1  # 0-indexed midpoint
+    idx_50 = min(idx_50, total_licks - 1)
+    return float(event_times[idx_50]) / 60.0
+
+
 def process_capacitive_file(
     capacitive_file: Path,
     fixed_threshold: float = 0.01,
@@ -644,7 +669,19 @@ def process_cohort_capacitive_files(
                 
                 # Calculate licks per bout
                 licks_per_bout = animal_licks / animal_bouts if animal_bouts > 0 else 0.0
-                
+
+                # Compute first-5-minute lick percentage
+                _evdf = result['events_df']
+                _ecol = f"{sensor_col}_event"
+                if _ecol in _evdf.columns and animal_licks > 0:
+                    _f5 = int((_evdf[_ecol] & (_evdf['Time_sec'] < 300)).sum())
+                    first_5min_pct = _f5 / animal_licks * 100.0
+                else:
+                    first_5min_pct = 0.0
+
+                # Compute time (minutes) to reach 50% of total licks
+                time_50pct = calculate_time_to_50_percent_licks(_evdf, sensor_col)
+
                 # Extract optional weight/fecal data if available
                 bottle_weight = animal_row.get('bottle_weight_change', np.nan)
                 total_weight = animal_row.get('total_weight_change', np.nan)
@@ -663,14 +700,18 @@ def process_cohort_capacitive_files(
                     'Licks_Per_Bout': licks_per_bout,
                     'Avg_Bout_Duration': animal_bout_dur,
                     'Avg_ILI': animal_ili,
+                    'First_5min_Lick_Pct': first_5min_pct,
+                    'Time_to_50pct_Licks': time_50pct,
                     'Bottle_Weight_Change': bottle_weight,
                     'Total_Weight_Change': total_weight,
                     'Fecal_Count': fecal_count
                 }
                 
                 all_animal_records.append(animal_record)
-                
-                print(f"      {animal_id} (Sensor {sensor_num}): {animal_licks} licks, {animal_bouts} bouts")
+
+                _t50_str = f"{time_50pct:.1f} min" if np.isfinite(time_50pct) else "N/A"
+                print(f"      {animal_id} (Sensor {sensor_num}): {animal_licks} licks, "
+                      f"{animal_bouts} bouts, First5min={first_5min_pct:.1f}%, T50%={_t50_str}")
             
         except Exception as e:
             print(f"    [ERROR] Failed to process {cap_file.name}: {e}")
@@ -1882,6 +1923,214 @@ def generate_lick_cohort_report(
 
 
 # =============================================================================
+# FRONTLOADING / TEMPORAL DISTRIBUTION REPORTS
+# =============================================================================
+
+def generate_lick_frontloading_descriptives_report(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    save_path: Optional[Path] = None,
+) -> str:
+    """Generate a plain-text descriptive statistics report for:
+
+    - % of licks in the first 5 minutes (First_5min_Lick_Pct)
+    - Time to reach 50 % of total licks in minutes (Time_to_50pct_Licks)
+
+    Statistics are broken down by Cohort × Week, then by Cohort × Week × Sex.
+    No statistical tests are performed — this is purely descriptive so you can
+    verify the calculations before running inferential analyses.
+
+    Parameters
+    ----------
+    cohort_dfs : dict from load_lick_cohorts()
+    save_path  : if given, write the report text to this file
+
+    Returns
+    -------
+    str  the full report text
+    """
+    METRICS = [
+        ('First_5min_Lick_Pct',   '% of Licks in First 5 Minutes'),
+        ('Time_to_50pct_Licks',   'Time to 50% of Total Licks (minutes)'),
+    ]
+
+    lines = []
+    lines.append("=" * 80)
+    lines.append("LICK FRONTLOADING — DESCRIPTIVE STATISTICS")
+    lines.append("=" * 80)
+    lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("")
+    lines.append("Metrics")
+    lines.append("  First_5min_Lick_Pct  : % of licks detected in the first 300 s of the session")
+    lines.append("  Time_to_50pct_Licks  : Time (min) at which cumulative lick count reaches 50% of")
+    lines.append("                         the session total (a measure of frontloading)")
+    lines.append("")
+    lines.append("Note: data are from the loaded cohorts; re-run the script to refresh.")
+    lines.append("")
+
+    # Combine and check
+    combined_dfs = []
+    for label, df in cohort_dfs.items():
+        d = df.copy()
+        if 'Cohort' not in d.columns:
+            d['Cohort'] = label
+        combined_dfs.append(d)
+
+    if not combined_dfs:
+        lines.append("[ERROR] No cohort data available.")
+        report = "\n".join(lines)
+        if save_path:
+            Path(save_path).write_text(report, encoding='utf-8')
+        return report
+
+    combined = pd.concat(combined_dfs, ignore_index=True)
+
+    missing_cols = [m for m, _ in METRICS if m not in combined.columns]
+    if missing_cols:
+        lines.append(f"[ERROR] The following metric columns are not present in the loaded data:")
+        for col in missing_cols:
+            lines.append(f"  - {col}")
+        lines.append("")
+        lines.append("  These columns are computed during data loading.  Please re-run the script")
+        lines.append("  so that the new metrics are calculated when the files are processed.")
+        report = "\n".join(lines)
+        if save_path:
+            Path(save_path).write_text(report, encoding='utf-8')
+        return report
+
+    def _desc_stats(series: 'pd.Series') -> dict:
+        s = series.dropna()
+        n = len(s)
+        if n == 0:
+            return dict(n=0, mean=np.nan, sem=np.nan, sd=np.nan, median=np.nan,
+                        min=np.nan, max=np.nan)
+        mean = s.mean()
+        sd   = s.std(ddof=1) if n > 1 else 0.0
+        sem  = sd / np.sqrt(n)
+        return dict(n=n, mean=mean, sem=sem, sd=sd,
+                    median=s.median(), min=s.min(), max=s.max())
+
+    def _fmt(v) -> str:
+        return 'N/A' if (v is None or (isinstance(v, float) and np.isnan(v))) else f"{v:.2f}"
+
+    cohort_labels = list(cohort_dfs.keys())
+    has_week = 'Week' in combined.columns
+    has_sex  = 'Sex' in combined.columns
+
+    for (col, label_long) in METRICS:
+        lines.append("=" * 80)
+        lines.append(f"METRIC: {label_long}")
+        lines.append("=" * 80)
+        lines.append("")
+
+        # ---- Overall cohort summary (collapsed over weeks & sex) ----
+        lines.append("-" * 60)
+        lines.append("Overall summary by cohort (all weeks combined)")
+        lines.append("-" * 60)
+        lines.append(f"  {'Cohort':<20} {'N':>5} {'Mean':>8} {'SEM':>8} {'SD':>8} "
+                     f"{'Median':>8} {'Min':>8} {'Max':>8}")
+        lines.append("  " + "-" * 75)
+        for coh in cohort_labels:
+            s = _desc_stats(combined.loc[combined['Cohort'] == coh, col])
+            lines.append(f"  {coh:<20} {s['n']:>5} {_fmt(s['mean']):>8} "
+                         f"{_fmt(s['sem']):>8} {_fmt(s['sd']):>8} "
+                         f"{_fmt(s['median']):>8} {_fmt(s['min']):>8} {_fmt(s['max']):>8}")
+        lines.append("")
+
+        # ---- By cohort × week ----
+        if has_week:
+            all_weeks = sorted(combined['Week'].dropna().unique())
+            lines.append("-" * 60)
+            lines.append("By cohort × week")
+            lines.append("-" * 60)
+            lines.append(f"  {'Cohort':<20} {'Week':>5} {'N':>5} {'Mean':>8} "
+                         f"{'SEM':>8} {'SD':>8} {'Median':>8}")
+            lines.append("  " + "-" * 65)
+            for coh in cohort_labels:
+                sub = combined[combined['Cohort'] == coh]
+                for wk in all_weeks:
+                    s = _desc_stats(sub.loc[sub['Week'] == wk, col])
+                    wk_label = f"Week {int(wk) + 1}"  # 0-indexed → display 1-indexed
+                    lines.append(f"  {coh:<20} {wk_label:>5} {s['n']:>5} "
+                                 f"{_fmt(s['mean']):>8} {_fmt(s['sem']):>8} "
+                                 f"{_fmt(s['sd']):>8} {_fmt(s['median']):>8}")
+            lines.append("")
+
+        # ---- By cohort × sex (if available) ----
+        if has_sex:
+            sex_vals = [v for v in combined['Sex'].dropna().unique()
+                        if str(v).upper() not in ('UNKNOWN', 'NAN', '')]
+            if sex_vals:
+                lines.append("-" * 60)
+                lines.append("By cohort × sex (all weeks combined)")
+                lines.append("-" * 60)
+                lines.append(f"  {'Cohort':<20} {'Sex':>5} {'N':>5} {'Mean':>8} "
+                             f"{'SEM':>8} {'SD':>8} {'Median':>8}")
+                lines.append("  " + "-" * 65)
+                for coh in cohort_labels:
+                    sub = combined[combined['Cohort'] == coh]
+                    for sx in sorted(sex_vals):
+                        s = _desc_stats(sub.loc[sub['Sex'] == sx, col])
+                        lines.append(f"  {coh:<20} {sx:>5} {s['n']:>5} "
+                                     f"{_fmt(s['mean']):>8} {_fmt(s['sem']):>8} "
+                                     f"{_fmt(s['sd']):>8} {_fmt(s['median']):>8}")
+                lines.append("")
+
+        # ---- By cohort × week × sex ----
+        if has_week and has_sex and sex_vals:
+            lines.append("-" * 60)
+            lines.append("By cohort × week × sex")
+            lines.append("-" * 60)
+            lines.append(f"  {'Cohort':<20} {'Week':>5} {'Sex':>5} {'N':>5} "
+                         f"{'Mean':>8} {'SEM':>8} {'SD':>8}")
+            lines.append("  " + "-" * 65)
+            for coh in cohort_labels:
+                sub = combined[combined['Cohort'] == coh]
+                for wk in all_weeks:
+                    for sx in sorted(sex_vals):
+                        s = _desc_stats(
+                            sub.loc[(sub['Week'] == wk) & (sub['Sex'] == sx), col])
+                        wk_label = f"Week {int(wk) + 1}"
+                        lines.append(f"  {coh:<20} {wk_label:>5} {sx:>5} {s['n']:>5} "
+                                     f"{_fmt(s['mean']):>8} {_fmt(s['sem']):>8} "
+                                     f"{_fmt(s['sd']):>8}")
+            lines.append("")
+
+        # ---- Per-animal raw values ----
+        lines.append("-" * 60)
+        lines.append("Per-animal values (all sessions)")
+        lines.append("-" * 60)
+        id_col  = 'ID'   if 'ID'   in combined.columns else None
+        wk_col  = 'Week' if has_week else None
+        sex_col = 'Sex'  if has_sex  else None
+        header_parts = ['Cohort', 'ID', 'Week', 'Sex']
+        lines.append("  " + "  ".join(f"{p:<10}" for p in header_parts) + f"  {col}")
+        lines.append("  " + "-" * 65)
+        for coh in cohort_labels:
+            sub = combined[combined['Cohort'] == coh].sort_values(
+                [c for c in ['ID', 'Week'] if c in combined.columns]
+            )
+            for _, row in sub.iterrows():
+                val = row.get(col, np.nan)
+                _id  = str(row[id_col])  if id_col  else '-'
+                _wk  = f"Week {int(row[wk_col]) + 1}" if wk_col else '-'
+                _sx  = str(row[sex_col]) if sex_col  else '-'
+                lines.append(f"  {coh:<10}  {_id:<10}  {_wk:<10}  {_sx:<10}  {_fmt(val)}")
+        lines.append("")
+
+    lines.append("=" * 80)
+    lines.append("END OF FRONTLOADING DESCRIPTIVES REPORT")
+    lines.append("=" * 80)
+
+    report = "\n".join(lines)
+
+    if save_path is not None:
+        Path(save_path).write_text(report, encoding='utf-8')
+        print(f"[OK] Frontloading descriptives report saved -> {save_path}")
+
+    return report
+
+
+# =============================================================================
 # PLOTTING FUNCTIONS
 # =============================================================================
 
@@ -2088,15 +2337,16 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  3. CA%-stratified       -- Week  x  Sex separately for 0% and 2%")
     print("  4. Lick plots           -- Mean lick measure by cohort over weeks")
     print("  5. Sex-split plots      -- Mean lick measure split by cohort x sex")
-    print("  6. Run all (1-5)")
+    print("  6. Frontloading report  -- Descriptive stats for % licks in first 5 min & time to 50%")
+    print("  7. Run all (1-6)")
     print()
 
-    user_input = input("Select option (1-6) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-7) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '6')
+    run_all = (user_input == '7')
 
     # ------------------------------------------------------------------ #
     # Option 1: Full mixed ANOVA (CA% x Week x Sex)
@@ -2270,6 +2520,26 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     _plt.close('all')
                 except Exception:
                     pass
+
+    # ------------------------------------------------------------------ #
+    # Option 6: Frontloading descriptives report
+    # ------------------------------------------------------------------ #
+    if user_input == '6' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: Frontloading descriptives — % licks in first 5 min & time to 50%")
+        print("=" * 80)
+
+        rpt_path = Path(f"0v2_lick_frontloading_descriptives_{timestamp}.txt")
+        try:
+            report_text = generate_lick_frontloading_descriptives_report(
+                cohorts,
+                save_path=rpt_path,
+            )
+            print(report_text)
+        except Exception as e:
+            print(f"  [WARNING] Frontloading descriptives report failed: {e}")
+            import traceback
+            traceback.print_exc()
 
     print("\n" + "=" * 80)
     print("0% vs 2% lick analysis complete.")
