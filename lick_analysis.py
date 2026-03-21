@@ -2580,7 +2580,440 @@ def display_frontloading_bonferroni_results(bonferroni_results: Dict) -> str:
     return formatted_output
 
 
-def save_frontloading_analysis_to_file(weekly_averages: Dict, anova_output: str, save_path: Path, bonferroni_output: str = "") -> Path:
+def perform_frontloading_mixed_anova(weekly_averages: Dict) -> Dict:
+    """
+    Perform a TWO-WAY MIXED ANOVA (Sex × Week/CA%) for each front-loading measure:
+    - % of licks in first 5 minutes
+    - % of bouts in first 5 minutes
+    - Time to 50% of total licks (minutes)
+
+    Between-subjects factor: Sex
+    Within-subjects factor:  Week (nonramp) or CA_Percent (ramp)
+
+    If sex data are unavailable or only one sex is present, the function
+    logs a warning and returns an empty dict (the existing one-way RM-ANOVA
+    already covers that case).
+
+    Parameters:
+        weekly_averages: Dictionary from compute_weekly_averages
+
+    Returns:
+        Dictionary of mixed ANOVA results keyed by measure name, or {} if
+        sex data are insufficient.
+    """
+    if not HAS_PINGOUIN:
+        print("\nWARNING: Mixed ANOVA requires pingouin. Skipping frontloading mixed ANOVA.")
+        return {}
+
+    within_col = _MLB['factor_col']
+
+    if EXPERIMENT_MODE == 'ramp':
+        sorted_dates = sorted(weekly_averages.keys(),
+                              key=lambda d: weekly_averages[d]['ca_percent'])
+    else:
+        sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+
+    # Build long-format data (same as one-way version but include Sex)
+    long_data = []
+    animal_sex_map: Dict[str, str] = {}
+
+    for week_idx, date in enumerate(sorted_dates, 1):
+        data = weekly_averages[date]
+        animal_ids   = data.get('animal_ids', [])
+        animal_sexes = data.get('animal_sexes', [])
+
+        if not animal_ids:
+            animal_ids = [f"Animal_{i+1}" for i in range(
+                len(data.get('first_5min_lick_pcts_per_animal', [])))]
+        if not animal_sexes or len(animal_sexes) != len(animal_ids):
+            animal_sexes = ['Unknown'] * len(animal_ids)
+
+        for i, animal_id in enumerate(animal_ids):
+            if animal_id not in animal_sex_map:
+                animal_sex_map[animal_id] = animal_sexes[i]
+
+        first_5min_lick_pcts = data.get('first_5min_lick_pcts_per_animal', [])
+        first_5min_bout_pcts = data.get('first_5min_bout_pcts_per_animal', [])
+        time_to_50pct        = data.get('time_to_50pct_licks_per_animal', [])
+        group_val = (weekly_averages[date]['ca_percent']
+                     if EXPERIMENT_MODE == 'ramp' else week_idx)
+
+        for i, animal_id in enumerate(animal_ids):
+            long_data.append({
+                'Animal':    animal_id,
+                'Sex':       animal_sex_map[animal_id],
+                within_col:  group_val,
+                'first_5min_lick_pct': first_5min_lick_pcts[i] if i < len(first_5min_lick_pcts) else np.nan,
+                'first_5min_bout_pct': first_5min_bout_pcts[i] if i < len(first_5min_bout_pcts) else np.nan,
+                'time_to_50pct':       time_to_50pct[i]        if i < len(time_to_50pct)        else np.nan,
+            })
+
+    df_long = pd.DataFrame(long_data)
+
+    has_sex_data = (
+        'Sex' in df_long.columns
+        and df_long['Sex'].nunique() > 1
+        and 'Unknown' not in df_long['Sex'].values
+    )
+
+    if not has_sex_data:
+        print("\n" + "=" * 80)
+        print("WARNING: Sex data not found or only one sex present — "
+              "skipping frontloading mixed ANOVA.")
+        print("=" * 80 + "\n")
+        return {}
+
+    measures = ['first_5min_lick_pct', 'first_5min_bout_pct', 'time_to_50pct']
+    measure_names = {
+        'first_5min_lick_pct': '% Licks in First 5 Minutes',
+        'first_5min_bout_pct': '% Bouts in First 5 Minutes',
+        'time_to_50pct':       'Time to 50% of Total Licks (min)',
+    }
+
+    print("\n" + "=" * 80)
+    print(f"PERFORMING TWO-WAY MIXED ANOVA: Sex × {_MLB['factor']} — Front-Loading Measures")
+    print("Between-subjects factor: Sex")
+    print(f"Within-subjects factor:  {_MLB['factor']} (repeated measures)")
+    print("=" * 80)
+
+    mixed_results: Dict = {}
+
+    for measure in measures:
+        measure_name = measure_names[measure]
+        print(f"\nAnalyzing: {measure_name}")
+        print("-" * 40)
+
+        df_measure = df_long[['Animal', 'Sex', within_col, measure]].dropna()
+
+        if len(df_measure) == 0:
+            print(f"  ERROR: No valid data for {measure_name}")
+            mixed_results[measure] = {'measure_name': measure_name,
+                                      'error': 'No valid data available'}
+            continue
+
+        # Keep only animals with complete observations across all within-factor levels
+        n_levels = df_measure[within_col].nunique()
+        animals_per_level = df_measure.groupby('Animal')[within_col].nunique()
+        complete_animals  = animals_per_level[animals_per_level == n_levels]
+
+        if len(complete_animals) < len(animals_per_level):
+            missing = len(animals_per_level) - len(complete_animals)
+            print(f"  WARNING: {missing} animal(s) missing data at some levels — excluded.")
+            df_measure = df_measure[df_measure['Animal'].isin(complete_animals.index)]
+
+        n_animals = df_measure['Animal'].nunique()
+        print(f"  Valid animals: {n_animals}, {_MLB['factor']} levels: {n_levels}")
+
+        if n_animals < 2 or n_levels < 2:
+            print(f"  ERROR: Insufficient data for mixed ANOVA")
+            mixed_results[measure] = {'measure_name': measure_name,
+                                      'error': 'Insufficient data'}
+            continue
+
+        try:
+            result_table = pg.mixed_anova(
+                dv=measure,
+                within=within_col,
+                between='Sex',
+                subject='Animal',
+                data=df_measure,
+            )
+
+            sex_row         = result_table[result_table['Source'] == 'Sex']
+            factor_row      = result_table[result_table['Source'] == within_col]
+            interaction_row = result_table[result_table['Source'] == 'Interaction']
+
+            # Sex (between-subjects)
+            f_sex   = sex_row['F'].values[0]     if len(sex_row) > 0     else np.nan
+            p_sex   = sex_row['p-unc'].values[0] if len(sex_row) > 0     else np.nan
+            np2_sex = (sex_row['np2'].values[0]
+                       if len(sex_row) > 0 and 'np2' in sex_row.columns else np.nan)
+
+            # Within-factor (with optional GG correction)
+            f_factor    = factor_row['F'].values[0]     if len(factor_row) > 0     else np.nan
+            p_factor    = factor_row['p-unc'].values[0] if len(factor_row) > 0     else np.nan
+            np2_factor  = (factor_row['np2'].values[0]
+                           if len(factor_row) > 0 and 'np2' in factor_row.columns else np.nan)
+            if 'p-GG-corr' in factor_row.columns and len(factor_row) > 0:
+                p_gg_factor         = factor_row['p-GG-corr'].values[0]
+                sphericity_violated = (p_gg_factor != p_factor)
+            else:
+                p_gg_factor         = p_factor
+                sphericity_violated = False
+
+            # Interaction
+            f_inter   = (interaction_row['F'].values[0]
+                         if len(interaction_row) > 0 else np.nan)
+            p_inter   = (interaction_row['p-unc'].values[0]
+                         if len(interaction_row) > 0 else np.nan)
+            np2_inter = (interaction_row['np2'].values[0]
+                         if len(interaction_row) > 0
+                         and 'np2' in interaction_row.columns else np.nan)
+            if 'p-GG-corr' in interaction_row.columns and len(interaction_row) > 0:
+                p_gg_inter              = interaction_row['p-GG-corr'].values[0]
+                sphericity_violated_int = (p_gg_inter != p_inter)
+            else:
+                p_gg_inter              = p_inter
+                sphericity_violated_int = False
+
+            mixed_results[measure] = {
+                'measure_name':                      measure_name,
+                'anova_table':                       result_table,
+                'df_long':                           df_measure,
+                # Within-factor
+                'f_statistic':                       f_factor,
+                'p_value':                           p_factor,
+                'p_value_gg_corrected':              p_gg_factor,
+                'sphericity_violated':               sphericity_violated,
+                'effect_size':                       np2_factor,
+                'significant':                       p_gg_factor < 0.05,
+                # Sex (between)
+                'f_statistic_sex':                   f_sex,
+                'p_value_sex':                       p_sex,
+                'effect_size_sex':                   np2_sex,
+                'significant_sex':                   (p_sex < 0.05 if not np.isnan(p_sex) else False),
+                # Interaction
+                'f_statistic_interaction':           f_inter,
+                'p_value_interaction':               p_inter,
+                'p_value_gg_corrected_interaction':  p_gg_inter,
+                'sphericity_violated_interaction':   sphericity_violated_int,
+                'effect_size_interaction':           np2_inter,
+                'significant_interaction':           (p_gg_inter < 0.05
+                                                      if not np.isnan(p_gg_inter) else False),
+                'n_animals':    n_animals,
+                'n_levels':     n_levels,
+                'is_mixed_anova': True,
+            }
+
+            sig_s = "***" if p_sex < 0.05            else ""
+            sig_f = "***" if p_gg_factor < 0.05      else ""
+            sig_i = "***" if p_gg_inter < 0.05       else ""
+            print(f"  Sex: F = {f_sex:.3f}, p = {p_sex:.4f} {sig_s}, partial η² = {np2_sex:.3f}")
+            print(f"  {_MLB['factor']}: F = {f_factor:.3f}, p = {p_gg_factor:.4f} {sig_f}, "
+                  f"partial η² = {np2_factor:.3f}")
+            if sphericity_violated:
+                print("    (Greenhouse-Geisser corrected)")
+            print(f"  {_MLB['interaction_label']}: F = {f_inter:.3f}, "
+                  f"p = {p_gg_inter:.4f} {sig_i}, partial η² = {np2_inter:.3f}")
+            if sphericity_violated_int:
+                print("    (Greenhouse-Geisser corrected)")
+
+        except Exception as e:
+            print(f"  ERROR: {e}")
+            mixed_results[measure] = {
+                'measure_name': measure_name,
+                'error': str(e),
+            }
+
+    return mixed_results
+
+
+def display_frontloading_mixed_anova_results(mixed_results: Dict) -> str:
+    """Format two-way mixed ANOVA (Sex × Week/CA%) results for front-loading measures.
+
+    Parameters:
+        mixed_results: Dictionary from perform_frontloading_mixed_anova
+
+    Returns:
+        Formatted string with results
+    """
+    lines = []
+    lines.append("\n" + "=" * 80)
+    lines.append("FRONT-LOADING ANALYSIS: TWO-WAY MIXED ANOVA (Sex × "
+                 f"{_MLB['factor']}) RESULTS")
+    lines.append("=" * 80)
+    lines.append("")
+
+    if not mixed_results:
+        lines.append("No mixed ANOVA results available (insufficient sex data or "
+                     "pingouin not installed).")
+        lines.append("=" * 80)
+        return "\n".join(lines)
+
+    lines.append(f"Between-subjects factor: Sex")
+    lines.append(f"Within-subjects factor:  {_MLB['factor_display']}")
+    lines.append("")
+
+    for measure, results in mixed_results.items():
+        lines.append(f"MEASURE: {results['measure_name']}")
+        lines.append("-" * 80)
+
+        if 'error' in results:
+            lines.append(f"  ERROR: {results['error']}")
+            lines.append("")
+            continue
+
+        n_str = (f"  N = {results['n_animals']} animals × "
+                 f"{results['n_levels']} {_MLB['factor']} levels")
+        lines.append(n_str)
+        lines.append("")
+
+        # Sex main effect
+        lines.append(f"  {_MLB['main_effect'].replace('WEEK', 'FACTOR').split()[0]} SEX MAIN EFFECT:")
+        lines.append(f"    F = {results['f_statistic_sex']:.4f}, "
+                     f"p = {results['p_value_sex']:.6f}, "
+                     f"partial η² = {results['effect_size_sex']:.4f}")
+        if results['significant_sex']:
+            lines.append("    *** SIGNIFICANT ***")
+        else:
+            lines.append("    Not significant (p >= 0.05)")
+        lines.append("")
+
+        # Within-factor main effect
+        lines.append(f"  {_MLB['fl_effect'].rstrip(':').upper()} MAIN EFFECT:")
+        lines.append(f"    F = {results['f_statistic']:.4f}, "
+                     f"p = {results['p_value_gg_corrected']:.6f}, "
+                     f"partial η² = {results['effect_size']:.4f}")
+        if results.get('sphericity_violated'):
+            lines.append(f"    (Greenhouse-Geisser corrected; uncorrected p = "
+                         f"{results['p_value']:.6f})")
+        if results['significant']:
+            lines.append(f"    *** {_MLB['fl_sig']} ***")
+        else:
+            lines.append("    Not significant (p >= 0.05)")
+        lines.append("")
+
+        # Interaction
+        lines.append(f"  {_MLB['interaction']} INTERACTION:")
+        lines.append(f"    F = {results['f_statistic_interaction']:.4f}, "
+                     f"p = {results['p_value_gg_corrected_interaction']:.6f}, "
+                     f"partial η² = {results['effect_size_interaction']:.4f}")
+        if results.get('sphericity_violated_interaction'):
+            lines.append(f"    (Greenhouse-Geisser corrected; uncorrected p = "
+                         f"{results['p_value_interaction']:.6f})")
+        if results['significant_interaction']:
+            lines.append("    *** SIGNIFICANT INTERACTION ***")
+        else:
+            lines.append("    Not significant (p >= 0.05)")
+        lines.append("")
+
+    # Summary
+    lines.append("=" * 80)
+    lines.append("SUMMARY:")
+    sig_within = [r['measure_name'] for r in mixed_results.values()
+                  if r.get('significant', False) and 'error' not in r]
+    sig_sex    = [r['measure_name'] for r in mixed_results.values()
+                  if r.get('significant_sex', False) and 'error' not in r]
+    sig_inter  = [r['measure_name'] for r in mixed_results.values()
+                  if r.get('significant_interaction', False) and 'error' not in r]
+    lines.append(f"  Significant {_MLB['factor']} main effects: "
+                 f"{', '.join(sig_within) if sig_within else 'None'}")
+    lines.append(f"  Significant Sex main effects:             "
+                 f"{', '.join(sig_sex) if sig_sex else 'None'}")
+    lines.append(f"  Significant {_MLB['interaction_label']} interactions: "
+                 f"{', '.join(sig_inter) if sig_inter else 'None'}")
+    lines.append("=" * 80)
+    lines.append("")
+
+    formatted_output = "\n".join(lines)
+    print(formatted_output)
+    return formatted_output
+
+
+def perform_frontloading_mixed_posthoc(mixed_results: Dict) -> Dict:
+    """
+    Perform post-hoc tests for significant effects in the frontloading mixed ANOVA.
+
+    For each measure with at least one significant effect, calls
+    perform_mixed_anova_posthoc() which provides:
+      1. Within-subjects pairwise (Week/CA% comparisons, Bonferroni-corrected)
+      2. Between-subjects pairwise (Sex comparison)
+      3. Simple effects (within-factor effect at each Sex level)
+
+    Only runs when either the within-factor, Sex, or interaction effect is
+    significant (p < 0.05).
+
+    Parameters:
+        mixed_results: Dictionary from perform_frontloading_mixed_anova
+
+    Returns:
+        Dictionary keyed by measure with posthoc result sub-dicts
+    """
+    if not mixed_results:
+        return {}
+
+    within_col = _MLB['factor_col']
+    posthoc_all: Dict = {}
+
+    for measure, results in mixed_results.items():
+        if 'error' in results:
+            continue
+
+        any_sig = (results.get('significant', False)
+                   or results.get('significant_sex', False)
+                   or results.get('significant_interaction', False))
+
+        if not any_sig:
+            print(f"\n  {results['measure_name']}: No significant effects — "
+                  "post-hoc tests not performed.")
+            continue
+
+        df_measure = results.get('df_long')
+        if df_measure is None or df_measure.empty:
+            continue
+
+        print(f"\nPost-hoc tests for: {results['measure_name']}")
+        try:
+            ph = perform_mixed_anova_posthoc(
+                data=df_measure,
+                dv=measure,
+                within=within_col,
+                between='Sex',
+                subject='Animal',
+                alpha=0.05,
+                correction='bonferroni',
+            )
+            posthoc_all[measure] = {
+                'measure_name': results['measure_name'],
+                'posthoc':      ph,
+            }
+        except Exception as e:
+            print(f"  ERROR in post-hoc for {results['measure_name']}: {e}")
+            posthoc_all[measure] = {
+                'measure_name': results['measure_name'],
+                'error':        str(e),
+            }
+
+    return posthoc_all
+
+
+def display_frontloading_mixed_posthoc_results(posthoc_all: Dict) -> str:
+    """Format mixed-ANOVA post-hoc results for all significant frontloading measures.
+
+    Parameters:
+        posthoc_all: Dictionary from perform_frontloading_mixed_posthoc
+
+    Returns:
+        Formatted string
+    """
+    if not posthoc_all:
+        return (f"\nNo mixed-ANOVA post-hoc results to display "
+                f"(no significant effects found).\n")
+
+    lines = []
+    lines.append("\n" + "=" * 80)
+    lines.append("POST-HOC TESTS — FRONTLOADING MIXED ANOVA (Sex × "
+                 f"{_MLB['factor']})")
+    lines.append("Correction: Bonferroni")
+    lines.append("=" * 80)
+
+    all_output_parts: list = []
+    for measure, entry in posthoc_all.items():
+        if 'error' in entry:
+            lines.append(f"\n{entry['measure_name']}: ERROR — {entry['error']}")
+            continue
+        # display_posthoc_results prints + returns; collect the returned string
+        ph_str = display_posthoc_results(entry['posthoc'], entry['measure_name'])
+        all_output_parts.append(ph_str)
+
+    formatted_output = "\n".join(lines) + "\n" + "\n".join(all_output_parts)
+    return formatted_output
+
+
+def save_frontloading_analysis_to_file(weekly_averages: Dict, anova_output: str, save_path: Path,
+                                       bonferroni_output: str = "",
+                                       mixed_anova_output: str = "",
+                                       mixed_posthoc_output: str = "") -> Path:
     """Save front-loading behavior analysis to a separate report file.
     
     This report focuses specifically on front-loading metrics:
@@ -2588,13 +3021,16 @@ def save_frontloading_analysis_to_file(weekly_averages: Dict, anova_output: str,
     - % of bouts in first 5 minutes
     - Time to 50% of total licks (minutes)
     
-    Also includes ANOVA and Bonferroni post-hoc results for these metrics.
+    Also includes one-way RM-ANOVA, Bonferroni post-hoc, two-way mixed ANOVA,
+    and mixed ANOVA post-hoc results for these metrics.
     
     Parameters:
         weekly_averages: Dictionary from compute_weekly_averages
-        anova_output: Formatted ANOVA results string
+        anova_output: Formatted one-way RM-ANOVA results string
         save_path: Path where to save the text file
         bonferroni_output: Formatted Bonferroni post-hoc results string (optional)
+        mixed_anova_output: Formatted two-way mixed ANOVA results string (optional)
+        mixed_posthoc_output: Formatted mixed ANOVA post-hoc results string (optional)
         
     Returns:
         Path to the saved text file
@@ -2691,6 +3127,16 @@ def save_frontloading_analysis_to_file(weekly_averages: Dict, anova_output: str,
         if bonferroni_output:
             f.write("\n\n")
             f.write(bonferroni_output)
+
+        # Add two-way mixed ANOVA results
+        if mixed_anova_output:
+            f.write("\n\n")
+            f.write(mixed_anova_output)
+
+        # Add mixed ANOVA post-hoc results
+        if mixed_posthoc_output:
+            f.write("\n\n")
+            f.write(mixed_posthoc_output)
         
         f.write("=" * 80 + "\n")
         f.write("END OF FRONT-LOADING ANALYSIS REPORT\n")
@@ -4694,7 +5140,22 @@ def main():
     
     frontloading_bonferroni_results = perform_frontloading_bonferroni_posthoc(frontloading_anova_results, weekly_averages)
     frontloading_bonferroni_output = display_frontloading_bonferroni_results(frontloading_bonferroni_results)
-    
+
+    # Perform two-way mixed ANOVA (Sex × Week/CA%) for front-loading measures
+    fl_step_c = '6e' if EXPERIMENT_MODE == 'ramp' else '6d'
+    fl_step_d = '6f' if EXPERIMENT_MODE == 'ramp' else '6e'
+    print(f"\nStep {fl_step_c}: Performing Front-Loading Mixed ANOVA (Sex × {_MLB['factor']})")
+    print("-" * 40)
+
+    frontloading_mixed_anova_results = perform_frontloading_mixed_anova(weekly_averages)
+    frontloading_mixed_anova_output = display_frontloading_mixed_anova_results(frontloading_mixed_anova_results)
+
+    print(f"\nStep {fl_step_d}: Performing Post-Hoc Tests for Front-Loading Mixed ANOVA")
+    print("-" * 40)
+
+    frontloading_mixed_posthoc_results = perform_frontloading_mixed_posthoc(frontloading_mixed_anova_results)
+    frontloading_mixed_posthoc_output = display_frontloading_mixed_posthoc_results(frontloading_mixed_posthoc_results)
+
     # Compute and plot lick rate histograms (5-minute bins over 30 minutes)
     print("\nStep 7: Computing Lick Rate Averages (5-Minute Bins)")
     print("-" * 40)
@@ -4764,7 +5225,14 @@ def main():
     
     # Always save front-loading analysis to separate report
     frontloading_path = master_csv.parent / "frontloading_analysis_report.txt"
-    save_frontloading_analysis_to_file(weekly_averages, frontloading_anova_output, frontloading_path, frontloading_bonferroni_output)
+    save_frontloading_analysis_to_file(
+        weekly_averages,
+        frontloading_anova_output,
+        frontloading_path,
+        frontloading_bonferroni_output,
+        frontloading_mixed_anova_output,
+        frontloading_mixed_posthoc_output,
+    )
     print(f"Front-loading analysis report saved to: {frontloading_path}")
     
     # Always save brief lick summary
