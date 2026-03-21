@@ -1213,25 +1213,21 @@ def plot_nest_made_pie_chart(
 	if "Nest Made?" not in cdf.columns:
 		raise ValueError("'Nest Made?' column not found in DataFrame")
 	
-	# Count Yes and No values (the column is now boolean after cleaning)
-	nest_counts = cdf["Nest Made?"].value_counts()
-	
-	# Map boolean to labels
-	labels = []
-	values = []
-	for val, count in nest_counts.items():
-		if pd.isna(val):
-			continue
-		label = "Yes" if val else "No"
-		labels.append(label)
-		values.append(count)
-	
-	if not values:
+	# Per-animal mean % Yes and % No (each animal weighted equally)
+	animal_yes_pcts = []
+	for _, adf in cdf.groupby('ID'):
+		valid = adf["Nest Made?"].dropna()
+		if len(valid) > 0:
+			animal_yes_pcts.append(100.0 * valid.sum() / len(valid))
+
+	if not animal_yes_pcts:
 		raise ValueError("No valid data found in 'Nest Made?' column")
-	
-	# Calculate percentages for display
-	total = sum(values)
-	percentages = [v / total * 100 for v in values]
+
+	n_animals = len(animal_yes_pcts)
+	mean_yes = float(np.mean(animal_yes_pcts))
+	mean_no  = 100.0 - mean_yes
+	labels = ["Yes", "No"]
+	values = [mean_yes, mean_no]
 	
 	# Create pie chart
 	fig, ax = plt.subplots(figsize=(8, 8))
@@ -1262,7 +1258,7 @@ def plot_nest_made_pie_chart(
 	ax.axis('equal')
 	
 	if title is None:
-		title = f"Nest Made? Distribution (n={total})"
+		title = f"Nest Made? Distribution (n={n_animals} animals)"
 	ax.set_title(title, fontsize=14, weight='bold', pad=20)
 	
 	fig.tight_layout()
@@ -1314,25 +1310,21 @@ def plot_lethargy_pie_chart(
 	if "Lethargy?" not in cdf.columns:
 		raise ValueError("'Lethargy?' column not found in DataFrame")
 	
-	# Count Yes and No values (the column is now boolean after cleaning)
-	lethargy_counts = cdf["Lethargy?"].value_counts()
-	
-	# Map boolean to labels
-	labels = []
-	values = []
-	for val, count in lethargy_counts.items():
-		if pd.isna(val):
-			continue
-		label = "Yes" if val else "No"
-		labels.append(label)
-		values.append(count)
-	
-	if not values:
+	# Per-animal mean % Yes and % No (each animal weighted equally)
+	animal_yes_pcts = []
+	for _, adf in cdf.groupby('ID'):
+		valid = adf["Lethargy?"].dropna()
+		if len(valid) > 0:
+			animal_yes_pcts.append(100.0 * valid.sum() / len(valid))
+
+	if not animal_yes_pcts:
 		raise ValueError("No valid data found in 'Lethargy?' column")
-	
-	# Calculate percentages for display
-	total = sum(values)
-	percentages = [v / total * 100 for v in values]
+
+	n_animals = len(animal_yes_pcts)
+	mean_yes = float(np.mean(animal_yes_pcts))
+	mean_no  = 100.0 - mean_yes
+	labels = ["Yes", "No"]
+	values = [mean_yes, mean_no]
 	
 	# Create pie chart
 	fig, ax = plt.subplots(figsize=(8, 8))
@@ -1363,7 +1355,7 @@ def plot_lethargy_pie_chart(
 	ax.axis('equal')
 	
 	if title is None:
-		title = f"Lethargy? Distribution (n={total})"
+		title = f"Lethargy? Distribution (n={n_animals} animals)"
 	ax.set_title(title, fontsize=14, weight='bold', pad=20)
 	
 	fig.tight_layout()
@@ -1516,25 +1508,21 @@ def plot_anxious_behaviors_pie_chart(
 	if "Anxious Behaviors?" not in cdf.columns:
 		raise ValueError("'Anxious Behaviors?' column not found in DataFrame")
 	
-	# Count Yes and No values (the column is now boolean after cleaning)
-	anxious_counts = cdf["Anxious Behaviors?"].value_counts()
-	
-	# Map boolean to labels
-	labels = []
-	values = []
-	for val, count in anxious_counts.items():
-		if pd.isna(val):
-			continue
-		label = "Yes" if val else "No"
-		labels.append(label)
-		values.append(count)
-	
-	if not values:
+	# Per-animal mean % Yes and % No (each animal weighted equally)
+	animal_yes_pcts = []
+	for _, adf in cdf.groupby('ID'):
+		valid = adf["Anxious Behaviors?"].dropna()
+		if len(valid) > 0:
+			animal_yes_pcts.append(100.0 * valid.sum() / len(valid))
+
+	if not animal_yes_pcts:
 		raise ValueError("No valid data found in 'Anxious Behaviors?' column")
-	
-	# Calculate percentages for display
-	total = sum(values)
-	percentages = [v / total * 100 for v in values]
+
+	n_animals = len(animal_yes_pcts)
+	mean_yes = float(np.mean(animal_yes_pcts))
+	mean_no  = 100.0 - mean_yes
+	labels = ["Yes", "No"]
+	values = [mean_yes, mean_no]
 	
 	# Create pie chart
 	fig, ax = plt.subplots(figsize=(8, 8))
@@ -1565,7 +1553,7 @@ def plot_anxious_behaviors_pie_chart(
 	ax.axis('equal')
 	
 	if title is None:
-		title = f"Anxious Behaviors? Distribution (n={total})"
+		title = f"Anxious Behaviors? Distribution (n={n_animals} animals)"	
 	ax.set_title(title, fontsize=14, weight='bold', pad=20)
 	
 	fig.tight_layout()
@@ -1625,8 +1613,8 @@ def plot_all_pie_charts(
 		("Anxious Behaviors?", axes[1, 1])
 	]
 	
-	# Track total n (should be same for all)
-	total_n = None
+	# n animals for legend
+	n_animals = cdf['ID'].nunique()
 	
 	for col_name, ax in columns:
 		if col_name not in cdf.columns:
@@ -1634,27 +1622,22 @@ def plot_all_pie_charts(
 			ax.axis('off')
 			continue
 		
-		# Count Yes and No values
-		counts = cdf[col_name].value_counts()
+		# Per-animal mean % Yes and % No (each animal weighted equally)
+		animal_yes_pcts = []
+		for _, adf in cdf.groupby('ID'):
+			valid = adf[col_name].dropna()
+			if len(valid) > 0:
+				animal_yes_pcts.append(100.0 * valid.sum() / len(valid))
 		
-		# Map boolean to labels
-		labels = []
-		values = []
-		for val, count in counts.items():
-			if pd.isna(val):
-				continue
-			label = "Yes" if val else "No"
-			labels.append(label)
-			values.append(count)
-		
-		if not values:
+		if not animal_yes_pcts:
 			ax.text(0.5, 0.5, f"No valid data in '{col_name}'", ha='center', va='center')
 			ax.axis('off')
 			continue
 		
-		total = sum(values)
-		if total_n is None:
-			total_n = total
+		mean_yes = float(np.mean(animal_yes_pcts))
+		mean_no  = 100.0 - mean_yes
+		labels = ["Yes", "No"]
+		values = [mean_yes, mean_no]
 		
 		# Use blue for Yes and orange for No
 		colors = []
@@ -1697,7 +1680,7 @@ def plot_all_pie_charts(
 		ncol=2,
 		fontsize=12,
 		frameon=True,
-		title=f'n = {total_n}' if total_n else None,
+		title=f'n = {n_animals} animals',
 		title_fontsize=12
 	)
 	
@@ -1778,8 +1761,8 @@ def plot_pie_charts_by_ca_percent(
 		fig, axes = plt.subplots(2, 2, figsize=(14, 12))
 		fig.suptitle(f"Behavioral Observations at {int(ca_level)}% CA", fontsize=16, weight='bold', y=0.995)
 		
-		# Track total n for this CA% level
-		total_n = len(ca_data)
+		# n animals for legend
+		total_n = ca_data['ID'].nunique()
 		
 		# Position each behavioral column in the 2x2 grid
 		positions = [(0, 0), (0, 1), (1, 0), (1, 1)]
@@ -1792,23 +1775,22 @@ def plot_pie_charts_by_ca_percent(
 				ax.axis('off')
 				continue
 			
-			# Count Yes and No values for this CA% level
-			counts = ca_data[col_name].value_counts()
+			# Per-animal mean % Yes within this CA% level
+			animal_yes_pcts = []
+			for _, adf in ca_data.groupby('ID'):
+				valid = adf[col_name].dropna()
+				if len(valid) > 0:
+					animal_yes_pcts.append(100.0 * valid.sum() / len(valid))
 			
-			# Map boolean to labels
-			labels = []
-			values = []
-			for val, count in counts.items():
-				if pd.isna(val):
-					continue
-				label = "Yes" if val else "No"
-				labels.append(label)
-				values.append(count)
-			
-			if not values:
+			if not animal_yes_pcts:
 				ax.text(0.5, 0.5, f"No valid data in '{col_name}'", ha='center', va='center')
 				ax.axis('off')
 				continue
+			
+			mean_yes = float(np.mean(animal_yes_pcts))
+			mean_no  = 100.0 - mean_yes
+			labels = ["Yes", "No"]
+			values = [mean_yes, mean_no]
 			
 			# Use blue for Yes and orange for No
 			colors = []
@@ -1851,7 +1833,7 @@ def plot_pie_charts_by_ca_percent(
 			ncol=2,
 			fontsize=12,
 			frameon=True,
-			title=f'n = {total_n}',
+			title=f'n = {total_n} animals',
 			title_fontsize=12
 		)
 		
@@ -1925,7 +1907,7 @@ def plot_pie_charts_by_week(
 		week_data = cdf[cdf["Week"] == week]
 		fig, axes = plt.subplots(2, 2, figsize=(14, 12))
 		fig.suptitle(f"Behavioral Observations at Week {int(week)}", fontsize=16, weight='bold', y=0.995)
-		total_n = len(week_data)
+		total_n = week_data['ID'].nunique()
 		positions = [(0, 0), (0, 1), (1, 0), (1, 1)]
 		
 		for (col_name, (row, col)) in zip(behavioral_cols, positions):
@@ -1936,20 +1918,22 @@ def plot_pie_charts_by_week(
 				ax.axis('off')
 				continue
 			
-			counts = week_data[col_name].value_counts()
-			labels = []
-			values = []
-			for val, count in counts.items():
-				if pd.isna(val):
-					continue
-				label = "Yes" if val else "No"
-				labels.append(label)
-				values.append(count)
+			# Per-animal mean % Yes within this week
+			animal_yes_pcts = []
+			for _, adf in week_data.groupby('ID'):
+				valid = adf[col_name].dropna()
+				if len(valid) > 0:
+					animal_yes_pcts.append(100.0 * valid.sum() / len(valid))
 			
-			if not values:
+			if not animal_yes_pcts:
 				ax.text(0.5, 0.5, f"No valid data in '{col_name}'", ha='center', va='center')
 				ax.axis('off')
 				continue
+			
+			mean_yes = float(np.mean(animal_yes_pcts))
+			mean_no  = 100.0 - mean_yes
+			labels = ["Yes", "No"]
+			values = [mean_yes, mean_no]
 			
 			colors = []
 			for label in labels:
@@ -1979,7 +1963,7 @@ def plot_pie_charts_by_week(
 			ncol=2,
 			fontsize=12,
 			frameon=True,
-			title=f'n = {total_n}',
+			title=f'n = {total_n} animals',
 			title_fontsize=12
 		)
 		plt.tight_layout(rect=[0, 0.03, 1, 0.96])
@@ -2059,12 +2043,16 @@ def plot_aberrant_behaviors_lines(
 		pcts = []
 		for g in groups:
 			grp = cdf[cdf[within_col] == g]
-			n = len(grp)
-			if col not in grp.columns or n == 0:
-				pcts.append(0.0)
+			if col not in grp.columns or len(grp) == 0:
+				pcts.append(float('nan'))
 			else:
-				valid = grp[col].dropna()
-				pcts.append(100.0 * (valid == pos_val).sum() / n)
+				# Per-animal proportion, then mean across animals
+				animal_pcts = []
+				for _, animal_data in grp.groupby('ID'):
+					valid = animal_data[col].dropna()
+					if len(valid) > 0:
+						animal_pcts.append(100.0 * (valid == pos_val).sum() / len(valid))
+				pcts.append(float(np.mean(animal_pcts)) if animal_pcts else float('nan'))
 
 		ax.plot(x, pcts, color=color, linewidth=2.2, marker='o',
 		        markersize=7, markerfacecolor='white',
@@ -2079,7 +2067,7 @@ def plot_aberrant_behaviors_lines(
 		ax.spines['right'].set_visible(False)
 		ax.tick_params(direction='in', which='both', length=5)
 
-	axes[0].set_ylabel('% of Observations', fontsize=12, weight='bold')
+	axes[0].set_ylabel('Mean % per Animal', fontsize=12, weight='bold')
 	fig.tight_layout()
 
 	if save_path is not None:
@@ -2153,10 +2141,16 @@ def plot_aberrant_behaviors_load_bar(
 	pct_matrix = {lbl: [] for lbl in load_labels}
 	for g in groups:
 		grp = cdf[cdf[within_col] == g]
-		n = len(grp)
+		# Per-animal load distribution, then average across animals
+		animal_load = {i: [] for i in range(4)}
+		for _, adf in grp.groupby('ID'):
+			n_obs = len(adf)
+			if n_obs == 0:
+				continue
+			for i in range(4):
+				animal_load[i].append(100.0 * (adf['_aberrant_count'] == i).sum() / n_obs)
 		for i, lbl in enumerate(load_labels):
-			count = (grp['_aberrant_count'] == i).sum()
-			pct_matrix[lbl].append(100.0 * count / n if n > 0 else 0.0)
+			pct_matrix[lbl].append(float(np.mean(animal_load[i])) if animal_load[i] else 0.0)
 
 	x = np.arange(len(groups))
 	bar_width = 0.55
@@ -2173,7 +2167,7 @@ def plot_aberrant_behaviors_load_bar(
 	ax.set_xticks(x)
 	ax.set_xticklabels(x_labels_display, fontsize=10)
 	ax.set_xlabel(x_label, fontsize=12, weight='bold')
-	ax.set_ylabel('% of Observations', fontsize=12, weight='bold')
+	ax.set_ylabel('Mean % per Animal', fontsize=12, weight='bold')
 	ax.set_ylim(0, 100)
 	ax.set_xlim(-bar_width / 2, len(groups) - 1 + bar_width / 2)
 	ax.set_title('Aberrant Behavior Load per Observation — ' + _MLB.get('plot_suffix', ''),
@@ -3210,6 +3204,9 @@ def perform_mcnemar_posthoc_behavioral(behavioral_results: dict, df: pd.DataFram
 				# Calculate proportions for each level
 				prop_lv1 = paired_df[cl1].mean()
 				prop_lv2 = paired_df[cl2].mean()
+
+				# Phi coefficient as effect size: sqrt(chi2 / n)
+				phi_coef = float(np.sqrt(result.statistic / len(paired_df))) if len(paired_df) > 0 else float('nan')
 				
 				pairwise_comparisons.append({
 					k1: lv1,
@@ -3219,6 +3216,7 @@ def perform_mcnemar_posthoc_behavioral(behavioral_results: dict, df: pd.DataFram
 					pk2: prop_lv2,
 					'statistic': result.statistic,
 					'p_value': result.pvalue,
+					'phi': phi_coef,
 					'table': table
 				})
 			except Exception as e:
@@ -3287,21 +3285,22 @@ def display_mcnemar_results(mcnemar_results: dict) -> str:
 		formatted_output += f"Bonferroni-corrected alpha: {bonferroni_alpha:.4f}\n\n"
 		
 		# Create table header
-		formatted_output += f"{c1:<8} {c2:<8} {'N Paired':<10} {p1:<10} {p2:<10} {'Chi²':<10} {'p-value':<12} {'p-adj':<12} {'Sig?':<6}\n"
-		formatted_output += "-"*90 + "\n"
+		formatted_output += f"{c1:<8} {c2:<8} {'N Paired':<10} {p1:<10} {p2:<10} {'Chi²':<10} {'p-value':<12} {'p-adj':<12} {'phi':<7} {'Sig?':<6}\n"
+		formatted_output += "-"*97 + "\n"
 		
 		# Sort comparisons
 		comparisons_sorted = sorted(comparisons, key=lambda x: (x[k1], x[k2]))
 		
 		for comp in comparisons_sorted:
 			sig_marker = "***" if comp['significant'] else ""
+			phi_str = f"{comp.get('phi', float('nan')):.3f}" if not np.isnan(comp.get('phi', float('nan'))) else " N/A"
 			if EXPERIMENT_MODE == 'ramp':
 				formatted_output += f"{comp[k1]:<8.1f} {comp[k2]:<8.1f} {comp['n_paired']:<10} "
 			else:
 				formatted_output += f"{comp[k1]:<8} {comp[k2]:<8} {comp['n_paired']:<10} "
 			formatted_output += f"{comp[pk1]:<10.3f} {comp[pk2]:<10.3f} "
 			formatted_output += f"{comp['statistic']:<10.3f} {comp['p_value']:<12.4f} "
-			formatted_output += f"{comp['p_adjusted']:<12.4f} {sig_marker:<6}\n"
+			formatted_output += f"{comp['p_adjusted']:<12.4f} {phi_str:<7} {sig_marker:<6}\n"
 		
 		# Summary of significant comparisons
 		significant = [c for c in comparisons if c['significant']]
@@ -3704,15 +3703,141 @@ def perform_two_way_chi_square_behavioral(df: pd.DataFrame) -> dict:
 						'error': 'statsmodels not installed',
 						'note': 'Install statsmodels for GEE analysis'
 					}
-		
-		# === 2. Within-Factor EFFECT (Within-Subjects): Cochran's Q Test ===
-		print(f"\n[2] {fl} Effect (within-subjects, repeated measures): Cochran's Q Test")
+
+		# === 1c. FULL GEE MODEL: Sex + Within-Factor + Interaction ===
+		# Primary joint test for all three effects simultaneously.
+		print(f"\n[1c] Full GEE Model: Sex × {fl} (joint model for all effects)")
 		print("-" * 50)
-		
+		print(f"Model: Response ~ Sex + C({fl}) + Sex:C({fl})")
+		print(f"       Family=Binomial, Corr=Exchangeable, groups=ID")
+
+		gee_full_result = None
+		if HAS_STATSMODELS and len(measure_df) > 0 and measure_df['Sex'].nunique() >= 2:
+			try:
+				from statsmodels.genmod.generalized_estimating_equations import GEE
+				from statsmodels.genmod.families import Binomial
+				from statsmodels.genmod.cov_struct import Exchangeable
+
+				gee_full_df = measure_df[['ID', 'Sex', wc, 'Response']].copy()
+				gee_full_df = gee_full_df.rename(columns={wc: 'Within'})
+				gee_full_df['Within'] = gee_full_df['Within'].astype('category')
+				gee_full_df = gee_full_df.sort_values('ID').reset_index(drop=True)
+
+				gee_full_formula = "Response ~ Sex + C(Within) + Sex:C(Within)"
+				gee_full_model = GEE.from_formula(
+					gee_full_formula,
+					groups=gee_full_df['ID'],
+					data=gee_full_df,
+					family=Binomial(),
+					cov_struct=Exchangeable(),
+				)
+				gee_full_fit = gee_full_model.fit(maxiter=100, ddof_scale=None)
+
+				full_pvals  = gee_full_fit.pvalues
+				full_params = gee_full_fit.params
+				full_bse    = gee_full_fit.bse
+
+				def _term_p(keyword):
+					matches = [p for k, p in full_pvals.items()
+					           if keyword.lower() in k.lower()]
+					return float(np.nanmin(matches)) if matches else float('nan')
+
+				def _term_or(keyword):
+					for k in full_params.index:
+						if keyword.lower() in k.lower():
+							coef = full_params[k]
+							se   = full_bse[k]
+							return (float(np.exp(coef)),
+							        float(np.exp(coef - 1.96 * se)),
+							        float(np.exp(coef + 1.96 * se)))
+					return (float('nan'), float('nan'), float('nan'))
+
+				p_sex_full   = _term_p('sex[t.')
+				# fallback: any Sex param that is NOT an interaction
+				if np.isnan(p_sex_full):
+					sex_main_terms = [p for k, p in full_pvals.items()
+					                  if 'sex' in k.lower() and ':' not in k]
+					p_sex_full = float(np.nanmin(sex_main_terms)) if sex_main_terms else float('nan')
+
+				p_within_full = _term_p('c(within)')
+				if np.isnan(p_within_full):
+					within_main_terms = [p for k, p in full_pvals.items()
+					                     if 'within' in k.lower() and 'sex' not in k.lower()]
+					p_within_full = float(np.nanmin(within_main_terms)) if within_main_terms else float('nan')
+
+				p_inter_full = _term_p(':')
+
+				or_sex, or_sex_lo, or_sex_hi = _term_or('sex[t.')
+				if np.isnan(or_sex):
+					or_sex, or_sex_lo, or_sex_hi = _term_or('sex')
+
+				def _s(p):
+					return '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
+
+				print(f"\nFull GEE results (Wald tests):")
+				print(f"  Sex main effect      : p = {p_sex_full:.4f} {_s(p_sex_full)}  "
+				      f"(OR = {or_sex:.3f}, 95% CI [{or_sex_lo:.3f}–{or_sex_hi:.3f}])")
+				print(f"  {fl} main effect   : p = {p_within_full:.4f} {_s(p_within_full)}")
+				print(f"  Sex × {fl} interaction: p = {p_inter_full:.4f} {_s(p_inter_full)}")
+				print(f"  n = {gee_full_df['ID'].nunique()} subjects, {len(gee_full_df)} observations")
+				print(f"  NOTE: These formal Wald p-values from the joint model should be")
+				print(f"  cited in the paper.  Cochran's Q below serves as sensitivity check.")
+
+				gee_full_result = {
+					'model': f'GEE Binomial Exchangeable — full model',
+					'formula': gee_full_formula,
+					'n_subjects': int(gee_full_df['ID'].nunique()),
+					'n_obs': int(len(gee_full_df)),
+					'converged': bool(gee_full_fit.converged),
+					'sex': {
+						'p': float(p_sex_full),
+						'significant': bool(not np.isnan(p_sex_full) and p_sex_full < 0.05),
+						'odds_ratio': or_sex,
+						'or_ci_lower': or_sex_lo,
+						'or_ci_upper': or_sex_hi,
+					},
+					'within': {
+						'p': float(p_within_full),
+						'significant': bool(not np.isnan(p_within_full) and p_within_full < 0.05),
+					},
+					'interaction': {
+						'p': float(p_inter_full),
+						'significant': bool(not np.isnan(p_inter_full) and p_inter_full < 0.05),
+					},
+					'pvalues': {k: float(v) for k, v in full_pvals.items()},
+					'params':  {k: float(v) for k, v in full_params.items()},
+				}
+
+			except Exception as e:
+				print(f"\n✗ Full GEE model failed: {type(e).__name__}: {e}")
+				import traceback
+				traceback.print_exc()
+				gee_full_result = {
+					'model': 'GEE full model',
+					'error': f'{type(e).__name__}: {str(e)}',
+					'sex':        {'p': float('nan'), 'significant': False},
+					'within':     {'p': float('nan'), 'significant': False},
+					'interaction':{'p': float('nan'), 'significant': False},
+				}
+		else:
+			reason = 'statsmodels not available' if not HAS_STATSMODELS else 'Insufficient sex groups or data'
+			print(f"  Skipped: {reason}")
+			gee_full_result = {
+				'model': 'GEE full model',
+				'error': reason,
+				'sex':        {'p': float('nan'), 'significant': False},
+				'within':     {'p': float('nan'), 'significant': False},
+				'interaction':{'p': float('nan'), 'significant': False},
+			}
+
+		# === 2. Within-Factor EFFECT (Within-Subjects): Cochran's Q Test ===
+		print(f"\n[2] {fl} Effect (sensitivity — Cochran's Q, complete subjects only)")
+		print("-" * 50)
+
 		# Prepare data in wide format for Cochran's Q (rows = subjects, columns = CA% levels)
 		# Filter to only complete subjects
 		complete_df = measure_df[measure_df['ID'].isin(complete_subjects)].copy()
-		
+
 		if len(complete_subjects) < 3:
 			print("ERROR: Need at least 3 subjects with complete data for Cochran's Q test")
 			q_stat_ca = np.nan
@@ -3828,7 +3953,7 @@ def perform_two_way_chi_square_behavioral(df: pd.DataFrame) -> dict:
 				'p': sex_result.get('p', np.nan),
 				'significant': sex_result.get('significant', False),
 				'table': sex_table if not sex_table.empty else pd.DataFrame(),
-				'note': 'Between-subjects factor',
+				'note': 'Between-subjects factor (chi-square; see sex_gee and gee_full for GEE estimates)',
 				'error': sex_result.get('error', None)
 			},
 			'sex_gee': glmm_result if glmm_result is not None else {
@@ -3836,8 +3961,15 @@ def perform_two_way_chi_square_behavioral(df: pd.DataFrame) -> dict:
 				'note': 'Not computed - sex comparison skipped',
 				'error': 'Only one sex or no variation in responses'
 			},
+			'gee_full': gee_full_result if gee_full_result is not None else {
+				'model': 'GEE full model',
+				'error': 'Not computed',
+				'sex':        {'p': float('nan'), 'significant': False},
+				'within':     {'p': float('nan'), 'significant': False},
+				'interaction':{'p': float('nan'), 'significant': False},
+			},
 			wk: {
-				'test': "Cochran's Q",
+				'test': "Cochran's Q (sensitivity; see gee_full for primary test)",
 				'statistic': q_stat_ca,
 				'Q': q_stat_ca,
 				'df': df_ca,
@@ -3845,17 +3977,25 @@ def perform_two_way_chi_square_behavioral(df: pd.DataFrame) -> dict:
 				'significant': p_ca < 0.05 if not np.isnan(p_ca) else False,
 				'n_complete': len(complete_subjects),
 				'n_incomplete': len(incomplete_subjects),
-				'note': 'Within-subjects repeated measures'
+				'note': 'Sensitivity check — complete subjects only; primary test is GEE full model [1c]'
 			},
 			'interaction': {
-				'test': 'Stratified Cochran\'s Q',
+				'test': 'Stratified Cochran\'s Q (sensitivity; see gee_full for primary test)',
 				'by_sex': interaction_results,
-				'note': 'Compare Q statistics across sexes to assess interaction'
+				'note': 'Sensitivity check — compare Q stats across sexes; formal interaction p-value in gee_full'
 			},
 			'total_n': len(measure_df),
 			'yes_count': int(measure_df['Response'].sum()),
 			'no_count': int(len(measure_df) - measure_df['Response'].sum())
 		}
+		# Per-animal mean % Yes (for reporting)
+		_animal_yes = [
+			100.0 * float(adf['Response'].sum()) / len(adf)
+			for _, adf in measure_df.groupby('ID')
+			if len(adf) > 0
+		]
+		results[measure_name]['n_subjects'] = len(_animal_yes)
+		results[measure_name]['mean_yes_pct'] = float(np.mean(_animal_yes)) if _animal_yes else float('nan')
 	
 	print("\n" + "="*80)
 	return results
@@ -3937,6 +4077,14 @@ def _perform_chi_square_fallback(df: pd.DataFrame) -> dict:
 			'yes_count': int(measure_df['Response'].sum()),
 			'no_count': int(len(measure_df) - measure_df['Response'].sum())
 		}
+		# Per-animal mean % Yes (for reporting)
+		_animal_yes = [
+			100.0 * float(adf['Response'].sum()) / len(adf)
+			for _, adf in measure_df.groupby('ID')
+			if len(adf) > 0
+		]
+		results[measure_name]['n_subjects'] = len(_animal_yes)
+		results[measure_name]['mean_yes_pct'] = float(np.mean(_animal_yes)) if _animal_yes else float('nan')
 	
 	return results
 
@@ -4081,11 +4229,14 @@ def display_two_way_anova_results(weight_results: dict, behavioral_results: dict
 		lines.append("")
 	
 	# Behavioral measures (Cochran's Q and Chi-square)
-	lines.append("CATEGORICAL MEASURES (Repeated Measures Analysis)")
+	lines.append("CATEGORICAL MEASURES (Repeated Measures Analysis — Binary Outcomes)")
 	lines.append("-"*80)
-	lines.append("Sex effect: Chi-square test (between-subjects)")
-	lines.append(f"{fl} effect: Cochran's Q test (within-subjects, repeated measures)")
-	lines.append("Interaction: Stratified Cochran's Q tests by sex")
+	lines.append("PRIMARY   : GEE full model [1c] — Response ~ Sex + C(Within) + Sex:C(Within)")
+	lines.append("            Binomial family, Exchangeable correlation, groups = animal ID")
+	lines.append("            Provides formal Wald p-values for Sex, Within, and interaction")
+	lines.append("SUPPLEMENT: Chi-square for Sex [1], Sex-only GEE [1b]")
+	lines.append("SENSITIVITY: Cochran's Q for within-subjects effect [2] (complete cases only)")
+	lines.append("POST-HOC  : Pairwise McNemar (Bonferroni-corrected) with phi effect size")
 	lines.append("")
 	
 	for measure_name, results in behavioral_results.items():
@@ -4098,58 +4249,92 @@ def display_two_way_anova_results(weight_results: dict, behavioral_results: dict
 			lines.append("")
 			continue
 		
-		lines.append(f"Total observations: {results['total_n']}")
-		lines.append(f"  Yes: {results['yes_count']} ({100*results['yes_count']/results['total_n']:.1f}%)" if results['total_n'] > 0 else "  Yes: 0")
-		lines.append(f"  No: {results['no_count']} ({100*results['no_count']/results['total_n']:.1f}%)" if results['total_n'] > 0 else "  No: 0")
+		_n_subj = results.get('n_subjects', results['total_n'])
+		_mean_yes = results.get('mean_yes_pct', float('nan'))
+		lines.append(f"n = {_n_subj} animals, {results['total_n']} total observations")
+		if not np.isnan(float(_mean_yes)):
+			lines.append(f"  Mean % Yes per animal: {_mean_yes:.1f}%  |  Mean % No: {100.0 - _mean_yes:.1f}%")
+		else:
+			lines.append(f"  Yes: {results['yes_count']}   No: {results['no_count']}")
 		lines.append("")
-		
-		# Sex effect (between-subjects - chi-square is appropriate)
+
+		# --- [A] PRIMARY: Full GEE model ---
+		gee_full = results.get('gee_full', {})
+		lines.append(f"[A] PRIMARY — Full GEE Model (Sex + {fl} + Sex×{fl}):")
+		if gee_full and 'error' not in gee_full:
+			n_s = gee_full.get('n_subjects', '?')
+			n_o = gee_full.get('n_obs', '?')
+			conv = "yes" if gee_full.get('converged', False) else "no"
+			lines.append(f"  Model: {gee_full.get('formula', '?')}   Converged: {conv}")
+			lines.append(f"  n = {n_s} subjects, {n_o} observations")
+			lines.append("")
+			# Sex
+			sg = gee_full.get('sex', {})
+			p_s = sg.get('p', float('nan'))
+			or_s = sg.get('odds_ratio', float('nan'))
+			or_lo = sg.get('or_ci_lower', float('nan'))
+			or_hi = sg.get('or_ci_upper', float('nan'))
+			sig_s = '***' if p_s < 0.001 else '**' if p_s < 0.01 else '*' if p_s < 0.05 else 'ns'
+			lines.append(f"  Sex main effect: p = {p_s:.4f} {sig_s}")
+			if not np.isnan(or_s):
+				lines.append(f"    OR (Male/Female) = {or_s:.3f} (95% CI: {or_lo:.3f}–{or_hi:.3f})")
+			lines.append(f"    Interpretation: {'SIGNIFICANT' if sg.get('significant') else 'Not significant'}")
+			lines.append("")
+			# Within
+			wg = gee_full.get('within', {})
+			p_w = wg.get('p', float('nan'))
+			sig_w = '***' if p_w < 0.001 else '**' if p_w < 0.01 else '*' if p_w < 0.05 else 'ns'
+			lines.append(f"  {fl} main effect (within-subjects): p = {p_w:.4f} {sig_w}")
+			lines.append(f"    Interpretation: {'SIGNIFICANT' if wg.get('significant') else 'Not significant'}")
+			lines.append("")
+			# Interaction
+			ig = gee_full.get('interaction', {})
+			p_i = ig.get('p', float('nan'))
+			sig_i = '***' if p_i < 0.001 else '**' if p_i < 0.01 else '*' if p_i < 0.05 else 'ns'
+			lines.append(f"  Sex × {fl} interaction: p = {p_i:.4f} {sig_i}")
+			lines.append(f"    Interpretation: {'SIGNIFICANT — sex differences vary across ' + fl + ' levels.' if ig.get('significant') else 'Not significant — sex differences stable across ' + fl + ' levels.'}")
+		elif gee_full and 'error' in gee_full:
+			lines.append(f"  [MODEL FAILED] {gee_full['error']}")
+			lines.append(f"  Rely on chi-square and Cochran's Q results below.")
+		else:
+			lines.append(f"  Not computed.")
+		lines.append("")
+
+		# --- [B] SUPPLEMENT: Chi-square sex effect ---
 		sex = results['sex']
-		lines.append(f"Main Effect of Sex ({sex.get('test', 'Chi-square')}):")
-		
-		# Check if there's an error in sex results
+		lines.append(f"[B] SUPPLEMENT — Sex Effect (Chi-square, between-subjects):")
 		if 'error' in sex and sex['error'] is not None:
 			lines.append(f"  ERROR: {sex['error']}")
-			lines.append(f"  Could not perform chi-square test")
 		elif 'chi2' in sex and not np.isnan(sex['chi2']):
 			lines.append(f"  χ²({sex['df']}) = {sex['chi2']:.3f}, p = {sex['p']:.4f} {'***' if sex['p'] < 0.001 else '**' if sex['p'] < 0.01 else '*' if sex['p'] < 0.05 else 'ns'}")
 			lines.append(f"  Interpretation: {'SIGNIFICANT' if sex['significant'] else 'Not significant'}")
-		elif 'statistic' in sex and not np.isnan(sex['statistic']):
+		elif 'statistic' in sex and not np.isnan(sex.get('statistic', float('nan'))):
 			lines.append(f"  χ²({sex['df']}) = {sex['statistic']:.3f}, p = {sex['p']:.4f} {'***' if sex['p'] < 0.001 else '**' if sex['p'] < 0.01 else '*' if sex['p'] < 0.05 else 'ns'}")
 			lines.append(f"  Interpretation: {'SIGNIFICANT' if sex['significant'] else 'Not significant'}")
 		else:
 			lines.append(f"  Could not be computed")
-			
-		if 'note' in sex:
-			lines.append(f"  Note: {sex['note']}")
 		if 'test' in sex and 'INVALID' in sex['test']:
 			lines.append(f"  WARNING: {sex['test']}")
 		lines.append("")
-		
-		# GEE/Mixed-effects results (more appropriate for unbalanced designs)
+
+		# Sex-only GEE [1b]
 		if 'sex_gee' in results:
 			gee = results['sex_gee']
-			lines.append(f"Sex Effect - GEE Model (accounts for repeated measures & unbalanced design):")
-			if 'p' in gee and not np.isnan(gee.get('p', np.nan)):
-				lines.append(f"  Coefficient: {gee['coefficient']:.3f} (SE = {gee['se']:.3f})")
+			lines.append(f"[B2] Sex-only GEE (accounts for within-subject correlation):")
+			if 'p' in gee and not np.isnan(gee.get('p', float('nan'))):
 				lines.append(f"  Z = {gee['z']:.3f}, p = {gee['p']:.4f} {'***' if gee['p'] < 0.001 else '**' if gee['p'] < 0.01 else '*' if gee['p'] < 0.05 else 'ns'}")
-				lines.append(f"  Odds Ratio (Male/Female): {gee['odds_ratio']:.3f} (95% CI: {gee['or_ci_lower']:.3f}-{gee['or_ci_upper']:.3f})")
+				lines.append(f"  OR (Male/Female): {gee['odds_ratio']:.3f} (95% CI: {gee['or_ci_lower']:.3f}–{gee['or_ci_upper']:.3f})")
 				lines.append(f"  Interpretation: {'SIGNIFICANT' if gee['significant'] else 'Not significant'}")
-				lines.append(f"  Note: More reliable than chi-square for unbalanced repeated measures")
 			else:
-				# Show detailed error information
 				if 'error' in gee:
 					lines.append(f"  ERROR: {gee['error']}")
-				else:
-					lines.append(f"  Could not be computed")
 				if 'note' in gee:
 					lines.append(f"  Note: {gee['note']}")
 			lines.append("")
 		
-		# Within-factor effect (within-subjects - Cochran's Q)
+		# --- [C] SENSITIVITY: Cochran's Q within-factor ---
 		wf_behav = results[wk]
-		test_name_wf = wf_behav.get('test', "Cochran's Q")
-		lines.append(f"Main Effect of {fl} ({test_name_wf}):")
+		lines.append(f"[C] SENSITIVITY — {fl} Effect (Cochran's Q, complete subjects only):")
 		if 'Q' in wf_behav and not np.isnan(wf_behav['Q']):
 			lines.append(f"  Q({wf_behav['df']}) = {wf_behav['Q']:.3f}, p = {wf_behav['p']:.4f} {'***' if wf_behav['p'] < 0.001 else '**' if wf_behav['p'] < 0.01 else '*' if wf_behav['p'] < 0.05 else 'ns'}")
 			if 'n_complete' in wf_behav and wf_behav['n_complete'] > 0:
@@ -4159,23 +4344,20 @@ def display_two_way_anova_results(weight_results: dict, behavioral_results: dict
 		lines.append(f"  Interpretation: {'SIGNIFICANT' if wf_behav['significant'] else 'Not significant'}")
 		if 'note' in wf_behav:
 			lines.append(f"  Note: {wf_behav['note']}")
-		if 'test' in wf_behav and 'INVALID' in wf_behav['test']:
-			lines.append(f"  WARNING: {wf_behav['test']}")
 		lines.append("")
 		
-		# Interaction effect (stratified Cochran's Q)
+		# --- [D] SENSITIVITY: Stratified Cochran's Q interaction ---
 		interaction = results['interaction']
-		lines.append(f"{_MLB['interaction_label']} Interaction ({interaction.get('test', 'Stratified analysis')}):")
+		lines.append(f"[D] SENSITIVITY — {_MLB['interaction_label']} Interaction (Stratified Cochran's Q):")
+		lines.append(f"  Note: Formal interaction p-value from full GEE model [A] above.")
 		if 'by_sex' in interaction and interaction['by_sex']:
 			for sex_label, sex_results in sorted(interaction['by_sex'].items()):
-				if not np.isnan(sex_results['Q']):
+				if not np.isnan(sex_results.get('Q', float('nan'))):
 					lines.append(f"  {sex_label}: Q({sex_results['df']}) = {sex_results['Q']:.3f}, p = {sex_results['p']:.4f} {'***' if sex_results['p'] < 0.001 else '**' if sex_results['p'] < 0.01 else '*' if sex_results['p'] < 0.05 else 'ns'} (n={sex_results['n']})")
 				else:
-					lines.append(f"  {sex_label}: Could not compute (n={sex_results['n']} subjects)")
+					lines.append(f"  {sex_label}: Could not compute (n={sex_results.get('n', '?')} subjects)")
 			if 'note' in interaction:
-				lines.append(f"  Note: {interaction['note']}")
-		elif 'chi2' in interaction and not np.isnan(interaction['chi2']):
-			lines.append(f"  χ²({interaction['df']}) = {interaction['chi2']:.3f}, p = {interaction['p']:.4f} {'***' if interaction['p'] < 0.001 else '**' if interaction['p'] < 0.01 else '*' if interaction['p'] < 0.05 else 'ns'}")
+				lines.append(f"  Sensitivity note: {interaction['note']}")
 		else:
 			lines.append(f"  Could not be computed")
 		lines.append("")
@@ -4199,15 +4381,29 @@ def display_two_way_anova_results(weight_results: dict, behavioral_results: dict
 			sig_interaction.append(f"{measure_name} (ANOVA)")
 	
 	for measure_name, results in behavioral_results.items():
-		if results['sex']['significant']:
-			sig_sex.append(f"{measure_name} ({results['sex'].get('test', 'χ²')})")
-		if results[wk]['significant']:
-			sig_ca.append(f"{measure_name} ({results[wk].get('test', 'Q')})")
-		# For interaction, check if any stratified test was significant
-		if 'by_sex' in results['interaction'] and results['interaction']['by_sex']:
+		# Sex: prefer GEE full model; fall back to chi-square
+		gee_full = results.get('gee_full', {})
+		sex_sig_gee = gee_full.get('sex', {}).get('significant', False)
+		sex_sig_chi = results['sex']['significant']
+		if sex_sig_gee:
+			sig_sex.append(f"{measure_name} (GEE p={gee_full['sex']['p']:.4f})")
+		elif sex_sig_chi:
+			sig_sex.append(f"{measure_name} (χ², sensitivity)")
+		# Within-factor: prefer GEE full model; fall back to Cochran's Q
+		within_sig_gee = gee_full.get('within', {}).get('significant', False)
+		within_sig_q   = results[wk]['significant']
+		if within_sig_gee:
+			sig_ca.append(f"{measure_name} (GEE p={gee_full['within']['p']:.4f})")
+		elif within_sig_q:
+			sig_ca.append(f"{measure_name} (Cochran's Q, sensitivity)")
+		# Interaction: prefer GEE full model; fall back to stratified Q
+		inter_sig_gee = gee_full.get('interaction', {}).get('significant', False)
+		if inter_sig_gee:
+			sig_interaction.append(f"{measure_name} (GEE p={gee_full['interaction']['p']:.4f})")
+		elif 'by_sex' in results['interaction'] and results['interaction']['by_sex']:
 			for sex_label, sex_results in results['interaction']['by_sex'].items():
 				if sex_results.get('p', 1.0) < 0.05:
-					sig_interaction.append(f"{measure_name} ({sex_label} subgroup)")
+					sig_interaction.append(f"{measure_name} ({sex_label} subgroup, Cochran's Q sensitivity)")
 					break
 	
 	lines.append(f"Significant Sex effects ({len(sig_sex)}):")

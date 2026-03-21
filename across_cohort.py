@@ -42,6 +42,18 @@ except ImportError:
     print("Warning: pingouin not installed. Mixed ANOVA will not be available.")
     print("Install with: pip install pingouin")
 
+# Try to import statsmodels for Cochran's Q, McNemar, and GEE tests
+try:
+    from statsmodels.stats.contingency_tables import cochrans_q, mcnemar
+    from statsmodels.genmod.generalized_estimating_equations import GEE
+    from statsmodels.genmod.families import Binomial
+    from statsmodels.genmod.cov_struct import Exchangeable
+    HAS_STATSMODELS = True
+except ImportError:
+    HAS_STATSMODELS = False
+    print("Warning: statsmodels not installed. Behavioral repeated-measures tests will not be available.")
+    print("Install with: pip install statsmodels")
+
 # Try to import tkinter for GUI file selection
 try:
     import tkinter as tk
@@ -3126,6 +3138,754 @@ def plot_all_significant_interactions(
         print("  No significant interactions found to plot")
     
     return figures
+
+
+def plot_behavioral_metrics_by_cohort(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    title: Optional[str] = None,
+    save_path: Optional[Path] = None,
+    show: bool = True,
+) -> Optional["plt.Figure"]:
+    """
+    3-panel line plot comparing behavioral metric prevalence across cohorts over weeks.
+
+    One panel per metric: No Nest (Nest Made? == No), Anxious (Anxious Behaviors? == Yes),
+    Lethargy (Lethargy? == Yes).  Each cohort is a separate colored line.
+    Y-axis: % of observations (0-100%).  X-axis: Week (1-indexed).
+    """
+    if not HAS_MATPLOTLIB:
+        print("[WARNING] matplotlib not available -- cannot generate behavioral plot")
+        return None
+
+    _COLORS = ['#2166AC', '#D6604D', '#4DAC26', '#984EA3', '#FF7F00']
+
+    # (column, aberrant_value, panel_title)
+    BEHAVIORS = [
+        ('Nest Made?',         False, 'No Nest'),
+        ('Anxious Behaviors?', True,  'Anxious'),
+        ('Lethargy?',          True,  'Lethargy'),
+    ]
+
+    def _to_bool(series: pd.Series) -> pd.Series:
+        """Coerce Yes/No/True/False strings and booleans to bool, else None."""
+        _T = {'yes', 'true', '1'}
+        _F = {'no', 'false', '0'}
+        def _cv(v):
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, str):
+                ls = v.strip().lower()
+                if ls in _T:
+                    return True
+                if ls in _F:
+                    return False
+            return None
+        return series.map(_cv)
+
+    # Build per-cohort weekly percentages
+    cohort_data: Dict[str, Dict] = {}
+    all_weeks_set: set = set()
+
+    for label, df in cohort_dfs.items():
+        cdf = clean_cohort(df.copy())
+        if 'Date' in cdf.columns:
+            cdf['Date'] = pd.to_datetime(cdf['Date'], errors='coerce')
+        cdf = cdf.sort_values(['ID', 'Date']).reset_index(drop=True)
+        first_dates = cdf.groupby('ID')['Date'].transform('min')
+        cdf['_Day'] = (cdf['Date'] - first_dates).dt.days - 1
+        cdf = cdf[cdf['_Day'] >= 0].copy()
+        cdf['_Week'] = (cdf['_Day'] // 7) + 1
+
+        weeks = sorted(cdf['_Week'].dropna().unique().astype(int))
+        all_weeks_set.update(weeks)
+
+        pcts_by_col: Dict[str, List[float]] = {}
+        for col, aberrant_val, _ in BEHAVIORS:
+            pcts = []
+            for w in weeks:
+                grp = cdf[cdf['_Week'] == w]
+                if col not in grp.columns or len(grp) == 0:
+                    pcts.append(float('nan'))
+                    continue
+                # Per-animal proportion, then mean across animals
+                animal_pcts = []
+                for _, animal_data in grp.groupby('ID'):
+                    valid = _to_bool(animal_data[col]).dropna()
+                    if len(valid) > 0:
+                        animal_pcts.append(100.0 * (valid == aberrant_val).sum() / len(valid))
+                pcts.append(float(np.mean(animal_pcts)) if animal_pcts else float('nan'))
+            pcts_by_col[col] = pcts
+
+        cohort_data[label] = {'weeks': weeks, 'pcts': pcts_by_col}
+
+    all_weeks_sorted = sorted(all_weeks_set)
+    x_pos = {w: i for i, w in enumerate(all_weeks_sorted)}
+    x_labels = [f"Week {w}" for w in all_weeks_sorted]
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 5), sharey=True)
+    plot_title = title or "Behavioral Metrics by Cohort — Across Weeks"
+    fig.suptitle(plot_title, fontsize=16, weight='bold', y=0.98)
+
+    for ax, (col, _, panel_title) in zip(axes, BEHAVIORS):
+        for i, (label, data) in enumerate(cohort_data.items()):
+            color = _COLORS[i % len(_COLORS)]
+            xs = [x_pos[w] for w in data['weeks']]
+            ys = data['pcts'][col]
+            ax.plot(
+                xs, ys,
+                color=color, linewidth=2.2,
+                marker='o', markersize=7,
+                markerfacecolor='white',
+                markeredgecolor=color, markeredgewidth=2,
+                label=label,
+            )
+        ax.set_xticks(range(len(all_weeks_sorted)))
+        ax.set_xticklabels(x_labels, fontsize=10)
+        ax.set_xlabel('Week', fontsize=12, weight='bold')
+        ax.set_ylim(0, 100)
+        ax.set_title(panel_title, fontsize=13, weight='bold', pad=10)
+        ax.grid(False)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.tick_params(direction='in', which='both', length=5)
+
+    axes[0].set_ylabel('% of Observations', fontsize=12, weight='bold')
+    axes[-1].legend(fontsize=10, loc='upper right', frameon=False)
+    fig.tight_layout()
+
+    if save_path is not None:
+        fig.savefig(str(save_path), bbox_inches='tight')
+        print(f"Saved figure to: {save_path}")
+
+    if show:
+        plt.show()
+
+    return fig
+
+
+# =============================================================================
+# BEHAVIORAL BINARY OUTCOME ANALYSIS
+# Two-way repeated-measures analysis for binary behavioral outcomes:
+#   Cohort (between) x Week (within)
+# Uses Cochran's Q for within-subjects (Week) and Cohort effects, with pairwise
+# McNemar post-hoc tests (Bonferroni-corrected) for any significant effects.
+# =============================================================================
+
+def _coerce_to_binary(series: pd.Series) -> pd.Series:
+    """Convert Yes/No/True/False strings or booleans to 1/0, else NaN."""
+    _TRUE  = {'yes', 'true', '1'}
+    _FALSE = {'no', 'false', '0'}
+    def _cv(v):
+        if isinstance(v, bool):
+            return int(v)
+        if isinstance(v, (int, float)):
+            if v == 1:
+                return 1
+            if v == 0:
+                return 0
+        if isinstance(v, str):
+            ls = v.strip().lower()
+            if ls in _TRUE:
+                return 1
+            if ls in _FALSE:
+                return 0
+        return float('nan')
+    return series.map(_cv)
+
+
+def perform_behavioral_mixed_analysis(
+    cohort_dfs: Dict[str, pd.DataFrame],
+) -> Dict:
+    """
+    Two-way repeated-measures analysis for binary behavioral outcomes.
+
+    Design:
+        - Cohort  (between-subjects): e.g. 0% vs 2%
+        - Week    (within-subjects):  weeks 1-N, same animals measured each week
+
+    For each behavioral metric (No Nest, Lethargy, Anxious Behaviors):
+
+      PRIMARY — GEE (Generalized Estimating Equations):
+        Single model: Response ~ C(Week) + C(Cohort) + C(Week):C(Cohort)
+        groups = animal ID, family = Binomial(), cov_struct = Exchangeable()
+        Provides formal p-values for Week, Cohort, and Cohort×Week interaction
+        from one joint model, properly accounting for within-subject correlation.
+        Reports Wald p-values and Odds Ratios with 95% CIs.
+
+      SENSITIVITY — Cochran's Q (non-parametric, complete-cases only):
+        Non-parametric analog of repeated-measures ANOVA for binary data.
+        Requires complete data across all weeks; included as a robustness check.
+
+      POST-HOC (if GEE Week or interaction p < 0.05):
+        Pairwise McNemar tests within each cohort, Bonferroni-corrected.
+        Reports chi2, adjusted p, and phi coefficient (effect size).
+
+    Parameters:
+        cohort_dfs: dict mapping cohort label -> DataFrame with columns
+                    ID, Date, Nest Made?, Lethargy?, Anxious Behaviors?
+
+    Returns:
+        Nested dict keyed by metric name, then sub-keys:
+          'gee', 'cochrans_q', 'posthoc', 'descriptives', 'n_weeks'
+    """
+    print("\n" + "=" * 80)
+    print("BEHAVIORAL BINARY OUTCOME ANALYSIS: COHORT x WEEK")
+    print("=" * 80)
+
+    if not HAS_STATSMODELS:
+        print("\n[ERROR] statsmodels is required for this analysis.")
+        print("  Install with: pip install statsmodels")
+        return {}
+
+    BEHAVIORS = [
+        ('Nest Made?',         False, 'No Nest',  'no_nest'),
+        ('Anxious Behaviors?', True,  'Anxious',  'anxious'),
+        ('Lethargy?',          True,  'Lethargy', 'lethargy'),
+    ]
+
+    # ------------------------------------------------------------------
+    # Step 1: clean + add Week per cohort, build combined long-form df
+    # ------------------------------------------------------------------
+    long_frames: List[pd.DataFrame] = []
+    for label, df in cohort_dfs.items():
+        cdf = clean_cohort(df.copy())
+        if 'Date' in cdf.columns:
+            cdf['Date'] = pd.to_datetime(cdf['Date'], errors='coerce')
+        cdf = cdf.sort_values(['ID', 'Date']).reset_index(drop=True)
+        first_dates = cdf.groupby('ID')['Date'].transform('min')
+        cdf['_Day'] = (cdf['Date'] - first_dates).dt.days - 1
+        cdf = cdf[cdf['_Day'] >= 0].copy()
+        cdf['_Week'] = (cdf['_Day'] // 7) + 1
+        cdf['_Cohort'] = label
+        for col, _, _, _ in BEHAVIORS:
+            if col in cdf.columns:
+                cdf[col] = _coerce_to_binary(cdf[col])
+        long_frames.append(cdf)
+
+    combined = pd.concat(long_frames, ignore_index=True)
+    all_weeks = sorted(combined['_Week'].dropna().unique().astype(int))
+    n_weeks = len(all_weeks)
+    cohort_labels = list(cohort_dfs.keys())
+
+    print(f"\n  Cohorts : {cohort_labels}")
+    print(f"  Weeks   : {all_weeks}")
+    print(f"  Subjects: {combined['ID'].nunique()} total")
+
+    all_results: Dict = {}
+
+    for col, aberrant_val, metric_label, metric_key in BEHAVIORS:
+        print(f"\n{'=' * 60}")
+        print(f"Metric: {metric_label}  (column: '{col}', aberrant = {aberrant_val})")
+        print(f"{'=' * 60}")
+
+        if col not in combined.columns:
+            print(f"  [SKIP] Column not found in data.")
+            all_results[metric_label] = {'error': f"Column '{col}' not found"}
+            continue
+
+        # Aggregate to one row per (ID, Week): take first non-null (one behavioral
+        # observation per animal per week is expected)
+        agg = (
+            combined[['ID', '_Cohort', '_Week', col]]
+            .dropna(subset=[col])
+            .groupby(['ID', '_Cohort', '_Week'], as_index=False)[col]
+            .first()
+        )
+        agg['Response'] = (agg[col] == int(aberrant_val)).astype(int)
+
+        # ------------------------------------------------------------------
+        # Descriptive statistics — raw daily observations (consistent with plot)
+        # ------------------------------------------------------------------
+        # Descriptive statistics — per-animal proportions averaged across animals
+        # For each animal: (# yes in week) / (# obs in week)  → mean across animals
+        # n reported = number of animals contributing data that week
+        # ------------------------------------------------------------------
+        desc: Dict = {}
+        desc_n: Dict = {}
+        print(f"\n  Descriptive statistics (mean % aberrant per animal per week):")
+        print(f"  {'Cohort':<30} " + "  ".join(f"Wk{w}" for w in all_weeks))
+        for label in cohort_labels:
+            row_pcts = []
+            row_ns = []
+            cohort_sub = combined[combined['_Cohort'] == label]
+            for w in all_weeks:
+                w_sub = cohort_sub[cohort_sub['_Week'] == w].dropna(subset=[col])
+                animal_pcts = []
+                for _, animal_data in w_sub.groupby('ID'):
+                    n_obs = len(animal_data)
+                    n_yes = (animal_data[col] == int(aberrant_val)).sum()
+                    animal_pcts.append(100.0 * n_yes / n_obs)
+                n_animals = len(animal_pcts)
+                pct = float(np.mean(animal_pcts)) if n_animals > 0 else float('nan')
+                row_pcts.append(pct)
+                row_ns.append(n_animals)
+            desc[label] = {w: p for w, p in zip(all_weeks, row_pcts)}
+            desc_n[label] = {w: n for w, n in zip(all_weeks, row_ns)}
+            pct_str = "  ".join(f"{p:5.1f}%" if not np.isnan(p) else "   N/A" for p in row_pcts)
+            print(f"  {label:<30} {pct_str}")
+
+        # ------------------------------------------------------------------
+        # PRIMARY [A] — GEE: joint Cohort + Week + Cohort×Week model
+        # ------------------------------------------------------------------
+        print(f"\n  [A] PRIMARY: GEE (Binomial, Exchangeable) — joint Cohort × Week model")
+        gee_result: Dict = {}
+        try:
+            gee_df = agg[['ID', '_Cohort', '_Week', 'Response']].copy()
+            gee_df['_Week'] = gee_df['_Week'].astype('category')
+            gee_df['_Cohort'] = gee_df['_Cohort'].astype('category')
+            gee_df = gee_df.sort_values('ID').reset_index(drop=True)
+
+            model = GEE.from_formula(
+                "Response ~ C(_Week) + C(_Cohort) + C(_Week):C(_Cohort)",
+                groups=gee_df['ID'],
+                data=gee_df,
+                family=Binomial(),
+                cov_struct=Exchangeable(),
+            )
+            fit = model.fit(maxiter=100, ddof_scale=None)
+
+            pvals = fit.pvalues
+            params = fit.params
+            bse   = fit.bse
+
+            # Extract p-values by scanning parameter names for key terms
+            def _gee_term_p(keyword: str) -> float:
+                """Return the smallest p-value for parameters matching keyword."""
+                matches = [p for k, p in pvals.items()
+                           if keyword.lower() in k.lower()]
+                return float(np.nanmin(matches)) if matches else float('nan')
+
+            def _gee_term_or(keyword: str):
+                """Return (OR, CI_lo, CI_hi) for the first param matching keyword."""
+                for k in params.index:
+                    if keyword.lower() in k.lower():
+                        coef = params[k]
+                        se   = bse[k]
+                        return (float(np.exp(coef)),
+                                float(np.exp(coef - 1.96 * se)),
+                                float(np.exp(coef + 1.96 * se)))
+                return (float('nan'), float('nan'), float('nan'))
+
+            p_week    = _gee_term_p('_Week')
+            p_cohort  = _gee_term_p('_Cohort')
+            p_inter   = _gee_term_p(':')
+
+            or_cohort, or_lo, or_hi = _gee_term_or('_Cohort')
+
+            def _stars(p):
+                return '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
+
+            print(f"    Week effect  : Wald p = {p_week:.4f} {_stars(p_week)}")
+            print(f"    Cohort effect: Wald p = {p_cohort:.4f} {_stars(p_cohort)}  "
+                  f"(OR = {or_cohort:.3f}, 95% CI [{or_lo:.3f}, {or_hi:.3f}])")
+            print(f"    Interaction  : Wald p = {p_inter:.4f} {_stars(p_inter)}")
+            print(f"    n = {len(gee_df['ID'].unique())} subjects, {len(gee_df)} observations")
+
+            gee_result = {
+                'model': 'GEE Binomial Exchangeable',
+                'formula': 'Response ~ C(Week) + C(Cohort) + C(Week):C(Cohort)',
+                'n_subjects': int(gee_df['ID'].nunique()),
+                'n_obs': int(len(gee_df)),
+                'week': {
+                    'p': float(p_week),
+                    'significant': bool(p_week < 0.05),
+                },
+                'cohort': {
+                    'p': float(p_cohort),
+                    'significant': bool(p_cohort < 0.05),
+                    'odds_ratio': or_cohort,
+                    'or_ci_lower': or_lo,
+                    'or_ci_upper': or_hi,
+                },
+                'interaction': {
+                    'p': float(p_inter),
+                    'significant': bool(p_inter < 0.05),
+                },
+                'converged': bool(fit.converged),
+                'params': {k: float(v) for k, v in params.items()},
+                'pvalues': {k: float(v) for k, v in pvals.items()},
+            }
+
+        except Exception as e:
+            print(f"    [WARNING] GEE failed: {type(e).__name__}: {e}")
+            gee_result = {
+                'model': 'GEE Binomial Exchangeable',
+                'error': f"{type(e).__name__}: {e}",
+                'week': {'p': float('nan'), 'significant': False},
+                'cohort': {'p': float('nan'), 'significant': False},
+                'interaction': {'p': float('nan'), 'significant': False},
+            }
+
+        # ------------------------------------------------------------------
+        # SENSITIVITY [B] — Cochran's Q (complete cases only)
+        # ------------------------------------------------------------------
+        print(f"\n  [B] SENSITIVITY: Cochran's Q (non-parametric, complete subjects only)")
+        subjects_nweeks = agg.groupby('ID')['_Week'].nunique()
+        complete_ids = subjects_nweeks[subjects_nweeks == n_weeks].index
+        complete_agg = agg[agg['ID'].isin(complete_ids)].copy()
+
+        cochran_result: Dict = {}
+        if len(complete_ids) < 3:
+            print(f"    [WARNING] Only {len(complete_ids)} subjects with all {n_weeks} weeks — need ≥3")
+            cochran_result = {'test': "Cochran's Q", 'statistic': np.nan, 'p': np.nan,
+                              'significant': False, 'n': int(len(complete_ids)),
+                              'note': 'Insufficient complete subjects'}
+        else:
+            week_agg = complete_agg.groupby(['ID', '_Week'], as_index=False)['Response'].first()
+            wide = week_agg.pivot(index='ID', columns='_Week', values='Response').dropna()
+            try:
+                q_res = cochrans_q(wide)
+                q_stat = float(q_res.statistic)
+                p_q    = float(q_res.pvalue)
+                df_q   = n_weeks - 1
+                stars  = '***' if p_q < 0.001 else '**' if p_q < 0.01 else '*' if p_q < 0.05 else 'ns'
+                print(f"    Q({df_q}) = {q_stat:.3f}, p = {p_q:.4f} {stars}  "
+                      f"(n = {len(wide)} complete subjects)")
+                cochran_result = {
+                    'test': "Cochran's Q", 'statistic': q_stat, 'df': df_q,
+                    'p': p_q, 'significant': bool(p_q < 0.05), 'n': int(len(wide)),
+                }
+            except Exception as e:
+                print(f"    [WARNING] Cochran's Q failed: {e}")
+                cochran_result = {'test': "Cochran's Q", 'statistic': np.nan, 'p': np.nan,
+                                  'significant': False, 'n': int(len(complete_ids)),
+                                  'error': str(e)}
+
+        # ------------------------------------------------------------------
+        # POST-HOC [C] — pairwise McNemar with effect size (if GEE Week/interaction sig)
+        # ------------------------------------------------------------------
+        posthoc: Dict = {}
+        gee_week_sig   = gee_result.get('week', {}).get('significant', False)
+        gee_inter_sig  = gee_result.get('interaction', {}).get('significant', False)
+
+        if gee_week_sig or gee_inter_sig:
+            print(f"\n  [C] Post-hoc: pairwise McNemar (Bonferroni-corrected, phi effect size)")
+            from itertools import combinations
+
+            for label in cohort_labels:
+                c_agg = agg[agg['_Cohort'] == label].copy()
+                c_nweeks = c_agg.groupby('ID')['_Week'].nunique()
+                c_complete = c_nweeks[c_nweeks >= 2].index
+                c_sub = c_agg[c_agg['ID'].isin(c_complete)].groupby(
+                    ['ID', '_Week'], as_index=False)['Response'].first()
+                weeks_present = sorted(c_sub['_Week'].unique().astype(int))
+                pairs = list(combinations(weeks_present, 2))
+                if not pairs:
+                    continue
+
+                comparisons = []
+                for w1, w2 in pairs:
+                    df_w1 = c_sub[c_sub['_Week'] == w1][['ID', 'Response']].rename(columns={'Response': 'R1'})
+                    df_w2 = c_sub[c_sub['_Week'] == w2][['ID', 'Response']].rename(columns={'Response': 'R2'})
+                    paired = pd.merge(df_w1, df_w2, on='ID')
+                    if len(paired) < 5:
+                        continue
+                    ct = pd.crosstab(paired['R1'], paired['R2'])
+                    for v in [0, 1]:
+                        if v not in ct.index:
+                            ct.loc[v] = 0
+                        if v not in ct.columns:
+                            ct[v] = 0
+                    ct = ct.sort_index().sort_index(axis=1)
+                    try:
+                        mcn = mcnemar(ct, exact=False, correction=True)
+                        # Phi coefficient: sign from direction of change
+                        b = int(ct.loc[0, 1]) if (0 in ct.index and 1 in ct.columns) else 0
+                        c_ = int(ct.loc[1, 0]) if (1 in ct.index and 0 in ct.columns) else 0
+                        n_disc = b + c_
+                        phi = float(np.sqrt(mcn.statistic / len(paired))) if len(paired) > 0 else float('nan')
+                        comparisons.append({
+                            'week1': int(w1), 'week2': int(w2),
+                            'n_paired': int(len(paired)),
+                            'prop_w1': float(paired['R1'].mean()),
+                            'prop_w2': float(paired['R2'].mean()),
+                            'statistic': float(mcn.statistic),
+                            'p_raw': float(mcn.pvalue),
+                            'phi': phi,
+                        })
+                    except Exception as e:
+                        print(f"      Week {w1} vs {w2}: [WARNING] {e}")
+
+                actual_n = len(comparisons)
+                for comp in comparisons:
+                    comp['p_adj'] = min(comp['p_raw'] * actual_n, 1.0)
+                    comp['significant'] = comp['p_adj'] < 0.05
+
+                posthoc[label] = {
+                    'comparisons': comparisons,
+                    'n_comparisons': actual_n,
+                    'bonferroni_alpha': 0.05 / actual_n if actual_n > 0 else 0.05,
+                }
+
+                print(f"\n    {label} ({actual_n} pairs, Bonferroni α = {0.05/actual_n:.4f}):")
+                for comp in comparisons:
+                    sig = '*' if comp['significant'] else 'ns'
+                    phi_s = f"φ={comp['phi']:.2f}" if not np.isnan(comp['phi']) else ""
+                    print(f"      Week {comp['week1']} vs Week {comp['week2']}: "
+                          f"chi2 = {comp['statistic']:.3f}, "
+                          f"p_adj = {comp['p_adj']:.4f} {sig}  "
+                          f"({100*comp['prop_w1']:.0f}% → {100*comp['prop_w2']:.0f}%)  {phi_s}")
+        else:
+            print(f"\n  [C] Post-hoc: Not needed (GEE Week and Interaction both ns)")
+
+        all_results[metric_label] = {
+            'metric': metric_label,
+            'column': col,
+            'aberrant_value': aberrant_val,
+            'n_weeks': n_weeks,
+            'all_weeks': all_weeks,
+            'cohort_labels': cohort_labels,
+            'descriptives': desc,
+            'descriptives_n': desc_n,
+            'gee': gee_result,
+            'cochrans_q': cochran_result,
+            'posthoc': posthoc,
+        }
+
+    print("\n" + "=" * 80)
+    return all_results
+
+
+def generate_behavioral_report(
+    results: Dict,
+    cohort_dfs: Optional[Dict[str, pd.DataFrame]] = None,
+    save_path: Optional[Path] = None,
+) -> str:
+    """
+    Generate a formatted text report from perform_behavioral_mixed_analysis results.
+
+    Parameters:
+        results: Output of perform_behavioral_mixed_analysis()
+        cohort_dfs: Original cohort dict (used for preamble counts only)
+        save_path: Optional path to write the report
+
+    Returns:
+        Report as a string.
+    """
+    def _fmt_p(p: float) -> str:
+        if np.isnan(p):
+            return "N/A"
+        if p < 0.001:
+            return "p < 0.001"
+        return f"p = {p:.3f}"
+
+    def _stars(p: float) -> str:
+        if np.isnan(p):
+            return ""
+        return "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
+
+    lines: List[str] = []
+    W = 80
+
+    lines.append("=" * W)
+    lines.append("BEHAVIORAL BINARY OUTCOME ANALYSIS: COHORT x WEEK")
+    lines.append("=" * W)
+    lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("")
+    lines.append("DESIGN")
+    lines.append("-" * W)
+    lines.append("  Outcome variables : No Nest (Nest Made? = No), Anxious Behaviors? = Yes,")
+    lines.append("                      Lethargy? = Yes")
+    lines.append("  Between factor    : Cohort (0% CA vs 2% CA)")
+    lines.append("  Within factor     : Week (repeated measures within subjects)")
+    lines.append("")
+    lines.append("  PRIMARY ANALYSIS  : GEE (Generalized Estimating Equations)")
+    lines.append("    Model: Response ~ C(Week) + C(Cohort) + C(Week):C(Cohort)")
+    lines.append("    Family: Binomial (logit link)   Corr. structure: Exchangeable")
+    lines.append("    Groups: Animal ID")
+    lines.append("    Provides: Wald p-values for Week, Cohort, and Cohort×Week interaction")
+    lines.append("    Effect size: Odds Ratios with 95% Wald CIs for Cohort terms")
+    lines.append("")
+    lines.append("  SENSITIVITY CHECK : Cochran's Q (non-parametric; complete subjects only)")
+    lines.append("    Non-parametric analog of RM-ANOVA for binary data.")
+    lines.append("    Subjects missing any week excluded; use as robustness check.")
+    lines.append("")
+    lines.append("  POST-HOC          : Pairwise McNemar tests (if GEE Week or interaction")
+    lines.append("    p < 0.05), Bonferroni-corrected. Effect size: phi coefficient.")
+    lines.append("")
+
+    if cohort_dfs:
+        lines.append("COHORT SUMMARY")
+        lines.append("-" * W)
+        for label, df in cohort_dfs.items():
+            n_sub = df['ID'].nunique() if 'ID' in df.columns else '?'
+            lines.append(f"  {label:<35} n = {n_sub} subjects")
+        lines.append("")
+
+    if not results:
+        lines.append("[No results available]")
+        report = "\n".join(lines)
+        if save_path is not None:
+            Path(save_path).write_text(report, encoding='utf-8')
+        return report
+
+    for metric_label, res in results.items():
+        if 'error' in res:
+            lines.append(f"{'=' * W}")
+            lines.append(f"METRIC: {metric_label}")
+            lines.append(f"  [ERROR] {res['error']}")
+            lines.append("")
+            continue
+
+        lines.append("=" * W)
+        lines.append(f"METRIC: {metric_label.upper()}")
+        lines.append("=" * W)
+        lines.append("")
+
+        cohort_labels = res.get('cohort_labels', [])
+        all_weeks     = res.get('all_weeks', [])
+
+        # ---- Descriptive table ----
+        lines.append("Descriptive Statistics (mean % yes per animal per week; n = animals):")
+        lines.append("-" * W)
+        hdr = f"  {'Cohort':<32}" + "".join(f"  Week {w:>2}" for w in all_weeks)
+        lines.append(hdr)
+        desc   = res.get('descriptives', {})
+        desc_n = res.get('descriptives_n', {})
+        for label in cohort_labels:
+            row = f"  {label:<32}"
+            for w in all_weeks:
+                pct = desc.get(label, {}).get(w, float('nan'))
+                n_w = desc_n.get(label, {}).get(w, '?')
+                if not np.isnan(pct):
+                    row += f"  {pct:>5.1f}% (n={n_w})"
+                else:
+                    row += "         N/A"
+            lines.append(row)
+        lines.append("")
+
+        # ---- PRIMARY: GEE ----
+        gee = res.get('gee', {})
+        lines.append("[A] PRIMARY — GEE (Binomial, Exchangeable working correlation)")
+        lines.append("-" * W)
+        if 'error' in gee:
+            lines.append(f"  [MODEL FAILED] {gee['error']}")
+            lines.append(f"  See sensitivity analysis (Cochran's Q) below.")
+        else:
+            n_s = gee.get('n_subjects', '?')
+            n_o = gee.get('n_obs', '?')
+            conv = "yes" if gee.get('converged', False) else "no"
+            lines.append(f"  Model: {gee.get('formula', 'Response ~ C(Week) + C(Cohort) + C(Week):C(Cohort)')}")
+            lines.append(f"  n = {n_s} subjects, {n_o} observations   Converged: {conv}")
+            lines.append("")
+
+            # Week
+            wg = gee.get('week', {})
+            p_w = wg.get('p', float('nan'))
+            lines.append(f"  Week main effect  : Wald {_fmt_p(p_w)}  {_stars(p_w)}")
+            lines.append(f"    Interpretation  : "
+                         + ("Significant change in prevalence across weeks."
+                            if wg.get('significant') else
+                            "No significant change in prevalence across weeks."))
+            lines.append("")
+
+            # Cohort
+            cg = gee.get('cohort', {})
+            p_c  = cg.get('p', float('nan'))
+            or_c = cg.get('odds_ratio', float('nan'))
+            or_lo = cg.get('or_ci_lower', float('nan'))
+            or_hi = cg.get('or_ci_upper', float('nan'))
+            lines.append(f"  Cohort main effect: Wald {_fmt_p(p_c)}  {_stars(p_c)}")
+            if not np.isnan(or_c):
+                lines.append(f"    Odds Ratio ({cohort_labels[1] if len(cohort_labels) > 1 else 'Coh2'} "
+                              f"vs {cohort_labels[0]}): "
+                              f"OR = {or_c:.3f}  (95% CI: {or_lo:.3f}–{or_hi:.3f})")
+            lines.append(f"    Interpretation  : "
+                         + ("Significant cohort difference in overall prevalence."
+                            if cg.get('significant') else
+                            "No significant overall difference between cohorts."))
+            lines.append("")
+
+            # Interaction
+            ig = gee.get('interaction', {})
+            p_i = ig.get('p', float('nan'))
+            lines.append(f"  Cohort × Week     : Wald {_fmt_p(p_i)}  {_stars(p_i)}")
+            lines.append(f"    Interpretation  : "
+                         + ("Significant interaction — cohort differences vary across weeks."
+                            if ig.get('significant') else
+                            "No significant interaction — cohort differences stable across weeks."))
+        lines.append("")
+
+        # ---- SENSITIVITY: Cochran's Q ----
+        cq = res.get('cochrans_q', {})
+        lines.append("[B] SENSITIVITY — Cochran's Q (non-parametric, complete subjects only)")
+        lines.append("-" * W)
+        q_stat = cq.get('statistic', float('nan'))
+        p_q    = cq.get('p', float('nan'))
+        df_q   = cq.get('df', float('nan'))
+        n_q    = cq.get('n', '?')
+        if 'error' in cq:
+            lines.append(f"  [FAILED] {cq['error']}")
+        elif 'note' in cq:
+            lines.append(f"  {cq['note']}")
+        elif not np.isnan(q_stat):
+            lines.append(f"  Q({int(df_q) if not np.isnan(df_q) else '?'}) = {q_stat:.3f},  "
+                         f"{_fmt_p(p_q)}  {_stars(p_q)}  (n = {n_q} complete subjects)")
+            lines.append(f"  Interpretation: "
+                         + ("Corroborates GEE week effect."
+                            if cq.get('significant') else
+                            "Consistent with GEE (no week effect)."))
+        else:
+            lines.append("  Not computed.")
+        lines.append("")
+
+        # ---- POST-HOC ----
+        ph = res.get('posthoc', {})
+        lines.append("[C] POST-HOC — Pairwise McNemar (Bonferroni-corrected, phi effect size)")
+        lines.append("-" * W)
+        if not ph:
+            lines.append("  Not performed — GEE Week and Interaction both non-significant.")
+        else:
+            for label in cohort_labels:
+                cohort_ph = ph.get(label)
+                if not cohort_ph:
+                    continue
+                comparisons = cohort_ph.get('comparisons', [])
+                n_comp  = cohort_ph.get('n_comparisons', 0)
+                b_alpha = cohort_ph.get('bonferroni_alpha', 0.05)
+                lines.append(f"  {label}  ({n_comp} pair(s), Bonferroni α = {b_alpha:.4f}):")
+                if not comparisons:
+                    lines.append("    No valid pairs found.")
+                    continue
+                lines.append(f"    {'Comparison':<22} {'chi2':>8}  {'p (adj)':>10}  {'Sig':>4}  "
+                              f"{'%Wk1':>7}  {'%Wk2':>7}  {'phi':>6}")
+                lines.append(f"    {'-'*22}  {'-'*8}  {'-'*10}  {'-'*4}  "
+                              f"{'-'*7}  {'-'*7}  {'-'*6}")
+                for comp in comparisons:
+                    comp_lbl = f"Week {comp['week1']} vs Week {comp['week2']}"
+                    sig = '*' if comp['significant'] else 'ns'
+                    phi_s = f"{comp.get('phi', float('nan')):.2f}" if not np.isnan(comp.get('phi', float('nan'))) else " N/A"
+                    lines.append(
+                        f"    {comp_lbl:<22}  {comp['statistic']:8.3f}  {_fmt_p(comp['p_adj']):>10}  "
+                        f"{sig:>4}  {100*comp['prop_w1']:>6.1f}%  {100*comp['prop_w2']:>6.1f}%  {phi_s:>6}"
+                    )
+        lines.append("")
+
+    # Footer
+    lines.append("=" * W)
+    lines.append("STATISTICAL NOTES")
+    lines.append("=" * W)
+    lines.append("  GEE: Generalized Estimating Equations with Binomial family (logit link) and")
+    lines.append("    Exchangeable working correlation structure. Accounts for within-subject")
+    lines.append("    correlation across repeated weekly observations. Population-averaged")
+    lines.append("    interpretation. Wald z-tests for each term. Small-sample Wald CIs are")
+    lines.append("    asymptotic; interpret with caution when group n < 10.")
+    lines.append("  Cochran's Q: Non-parametric test for within-subjects binary proportions.")
+    lines.append("    Complete-case only; subjects missing any week excluded. Use as")
+    lines.append("    robustness check alongside GEE.")
+    lines.append("  McNemar: Paired chi-square with continuity correction (exact=False).")
+    lines.append("    P-values multiplied by number of pairs (Bonferroni). Phi coefficient")
+    lines.append("    = sqrt(chi2 / n) provides standardised effect size.")
+    lines.append("  Alpha = 0.05.  * p<0.05  ** p<0.01  *** p<0.001  ns = not significant")
+    lines.append("=" * W)
+
+    report = "\n".join(lines)
+
+    if save_path is not None:
+        Path(save_path).write_text(report, encoding='utf-8')
+        print(f"\n[OK] Behavioral report saved -> {save_path}")
+
+    return report
 
 
 # =============================================================================
@@ -7165,15 +7925,17 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  4. CA%-stratified       -- Week  x  Sex mixed ANOVA separately for 0% and 2%")
     print("  5. Slope analysis       -- Compare rate of weight change between cohorts")
     print("  6. Weight plots         -- Total/Daily Change by ID, Sex, and CA%")
-    print("  7. Run all (1-6)")
+    print("  7. Behavioral plots     -- Nesting, lethargy, anxiety prevalence across weeks")
+    print("  8. Behavioral stats     -- Cohort x Week analysis of binary behavioral metrics")
+    print("  9. Run all (1-8)")
     print()
 
-    user_input = input("Select option (1-7) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '7')
+    run_all = (user_input == '9')
 
     # ------------------------------------------------------------------ #
     # Option 1 / part of 7: Full weekly omnibus (CA%  x  Week  x  Sex)
@@ -7403,6 +8165,62 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 plt.show()
             else:
                 plt.close('all')
+
+    # ------------------------------------------------------------------ #
+    # Option 7 / part of 9: Behavioral metric plots
+    # ------------------------------------------------------------------ #
+    if user_input == '7' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Behavioral plots (Nesting, Lethargy, Anxiety by week)")
+            print("=" * 80)
+
+            plot_dir = Path(f"0v2_plots_{timestamp}")
+            plot_dir.mkdir(exist_ok=True)
+
+            try:
+                fig = plot_behavioral_metrics_by_cohort(
+                    cohorts,
+                    title="Behavioral Metrics: 0% vs 2% CA \u2014 Across Weeks",
+                    save_path=plot_dir / "behavioral_metrics_by_cohort.svg",
+                    show=False,
+                )
+                if fig:
+                    print(f"\n[OK] Behavioral plot saved -> {plot_dir / 'behavioral_metrics_by_cohort.svg'}")
+            except Exception as e:
+                print(f"  [WARNING] Behavioral plot failed: {e}")
+
+            show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                plt.show()
+            else:
+                plt.close('all')
+
+    # ------------------------------------------------------------------ #
+    # Option 8 / part of 9: Behavioral stats (Cohort x Week)
+    # ------------------------------------------------------------------ #
+    if user_input == '8' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: Behavioral statistics (Cohort x Week for binary metrics)")
+        print("=" * 80)
+
+        beh_results = {}
+        try:
+            beh_results = perform_behavioral_mixed_analysis(cohorts)
+        except Exception as e:
+            print(f"  [WARNING] Behavioral analysis failed: {e}")
+
+        try:
+            rpt_path = Path(f"0v2_behavioral_stats_{timestamp}.txt")
+            generate_behavioral_report(
+                beh_results,
+                cohort_dfs=cohorts,
+                save_path=rpt_path,
+            )
+        except Exception as e:
+            print(f"  [WARNING] Behavioral report generation failed: {e}")
 
     print("\n" + "=" * 80)
     print("0% vs 2% analysis complete.")
