@@ -3389,6 +3389,157 @@ def plot_behavioral_interaction_effects(
     return figs
 
 
+def plot_weight_interaction_effects(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    measures: Optional[List[str]] = None,
+    save_dir: Optional[Path] = None,
+    show: bool = True,
+) -> Dict[str, "plt.Figure"]:
+    """
+    Cohort × Week interaction line plots for continuous weight measures
+    (Daily Change and/or Total Change).
+
+    One plot per measure.  Each cohort becomes one line; x-axis = Week;
+    y-axis = mean ± SEM across animals in that cohort that week.
+
+    Parameters
+    ----------
+    cohort_dfs : return value of load_cohorts() / select_and_load_cohorts()
+    measures   : list of column names to plot (default: ['Total Change', 'Daily Change'])
+    save_dir   : if given, SVG files are saved here
+    show       : whether to call plt.show()
+
+    Returns
+    -------
+    dict of measure_name -> Figure
+    """
+    if not HAS_MATPLOTLIB:
+        print("[WARNING] matplotlib not available — cannot generate weight interaction plots")
+        return {}
+
+    if measures is None:
+        measures = ["Total Change", "Daily Change"]
+
+    _COLORS = ['#2166AC', '#D6604D', '#4DAC26', '#984EA3', '#FF7F00']
+
+    def _fmt_p(p: float) -> str:
+        if p is None or (isinstance(p, float) and np.isnan(p)):
+            return 'N/A'
+        return '< 0.001' if p < 0.001 else f'{p:.3f}'
+
+    def _stars(p: float) -> str:
+        if p is None or (isinstance(p, float) and np.isnan(p)):
+            return 'n/a'
+        return '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
+
+    # Build a week-aggregated combined dataframe
+    try:
+        combined = combine_cohorts_for_analysis(cohort_dfs)
+        combined = clean_cohort(combined)
+        if 'Day' not in combined.columns:
+            combined = add_day_column_across_cohorts(combined)
+        combined = _add_week_column_across_cohorts(combined)
+        combined = combined[combined['Day'] >= 0]
+    except Exception as e:
+        print(f"[ERROR] Could not prepare combined data for weight interaction plots: {e}")
+        return {}
+
+    cohort_labels = list(cohort_dfs.keys())
+
+    figs: Dict[str, "plt.Figure"] = {}
+
+    for measure in measures:
+        if measure not in combined.columns:
+            print(f"  [{measure}] Column not found in combined data — skipping")
+            continue
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+
+        all_weeks = sorted(combined['Week'].dropna().unique())
+
+        for i, label in enumerate(cohort_labels):
+            label_df = combined[combined['Cohort'] == label] if 'Cohort' in combined.columns else None
+
+            # Fall back to CA% matching if no 'Cohort' column
+            if label_df is None or len(label_df) == 0:
+                # Try to extract CA% from the label
+                ca_val = None
+                for part in label.replace('%', '').split():
+                    try:
+                        ca_val = float(part)
+                        break
+                    except ValueError:
+                        continue
+                if ca_val is not None and 'CA (%)' in combined.columns:
+                    label_df = combined[combined['CA (%)'] == ca_val]
+                else:
+                    print(f"  [{measure}] Cannot identify cohort '{label}' in combined data — skipping line")
+                    continue
+
+            color = _COLORS[i % len(_COLORS)]
+
+            week_means = (
+                label_df.groupby(['ID', 'Week'])[measure]
+                .mean()
+                .reset_index()
+                .groupby('Week')[measure]
+                .agg(['mean', 'sem'])
+            )
+            week_means = week_means.reindex(all_weeks)
+
+            xs = list(range(len(all_weeks)))
+            ys = week_means['mean'].values
+            sems = week_means['sem'].values
+
+            ax.plot(
+                xs, ys,
+                color=color, linewidth=2.2,
+                marker='o', markersize=7,
+                markerfacecolor='white',
+                markeredgecolor=color, markeredgewidth=2,
+                label=label,
+            )
+            finite_mask = np.isfinite(ys) & np.isfinite(sems)
+            if finite_mask.any():
+                xs_arr = np.array(xs)
+                ax.fill_between(
+                    xs_arr[finite_mask],
+                    (ys - sems)[finite_mask],
+                    (ys + sems)[finite_mask],
+                    color=color, alpha=0.18,
+                )
+
+        ax.set_xticks(range(len(all_weeks)))
+        ax.set_xticklabels([f"Week {int(w)}" for w in all_weeks], fontsize=10)
+        ax.set_xlabel('Week', fontsize=12, weight='bold')
+        ax.set_ylabel(f'{measure} (Mean ± SEM)', fontsize=12, weight='bold')
+        ax.set_title(f"Cohort × Week — {measure}", fontsize=13, weight='bold')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.tick_params(direction='in', which='both', length=5)
+        ax.axhline(0, color='gray', linewidth=0.8, linestyle='--', alpha=0.6)
+        ax.legend(fontsize=10, frameon=False)
+
+        fig.tight_layout()
+
+        if save_dir is not None:
+            _sdir = Path(save_dir)
+            _sdir.mkdir(parents=True, exist_ok=True)
+            fname = f"weight_interaction_{measure.lower().replace(' ', '_')}.svg"
+            fig.savefig(str(_sdir / fname), bbox_inches='tight')
+            print(f"  Saved weight interaction plot: {_sdir / fname}")
+
+        if show:
+            plt.show()
+
+        figs[measure] = fig
+
+    if not figs:
+        print("  No weight interaction plots generated.")
+
+    return figs
+
+
 # =============================================================================
 # BEHAVIORAL BINARY OUTCOME ANALYSIS
 # Two-way repeated-measures analysis for binary behavioral outcomes:
@@ -8403,6 +8554,19 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         figs[fname] = fig
                 except Exception as e:
                     print(f"  [WARNING] Plot {fname} failed: {e}")
+
+            # Cohort x Week interaction line plots (weekly means ± SEM per cohort)
+            print("\n  Generating Cohort x Week interaction plots (by week)...")
+            try:
+                w_figs = plot_weight_interaction_effects(
+                    cohorts,
+                    measures=available_measures,
+                    save_dir=plot_dir,
+                    show=False,
+                )
+                figs.update(w_figs)
+            except Exception as e:
+                print(f"  [WARNING] Weight interaction plots failed: {e}")
 
             print(f"\n[OK] {len(figs)} plots saved -> {plot_dir}")
 
