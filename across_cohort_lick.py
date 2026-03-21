@@ -506,12 +506,32 @@ def process_cohort_capacitive_files(
     
     # Standardize column names (case-insensitive)
     master_df.columns = master_df.columns.str.strip().str.lower()
-    
+
+    # Quick sanity check: detect if user accidentally selected the behavioral master
+    # (master_data_*.csv) instead of the lick master (e.g. 0%_lick_data.csv)
+    _behavioral_cols = {'daily change', 'total change', 'nest made?', 'lethargy?', 'anxious behaviors?'}
+    _found = set(master_df.columns)
+    if _behavioral_cols & _found:
+        raise ValueError(
+            f"Wrong file selected for '{cohort_label}'.\n"
+            f"  You chose: {master_csv.name}\n"
+            f"  This looks like a behavioral master CSV (has columns: "
+            f"{sorted(_behavioral_cols & _found)}).\n"
+            f"  Please select the LICK data CSV instead "
+            f"(e.g. '0%_lick_data.csv', '2%_lick_data.csv', '5_week_lick_data.csv')."
+        )
+
     # Check for required columns
     required_cols = ['date', 'animal_id', 'selected_sensors']
     missing_cols = [col for col in required_cols if col not in master_df.columns]
     if missing_cols:
-        raise ValueError(f"Master CSV missing required columns: {missing_cols}. Found: {list(master_df.columns)}")
+        raise ValueError(
+            f"Master CSV missing required columns: {missing_cols}.\n"
+            f"  File: {master_csv.name}\n"
+            f"  Found columns: {list(master_df.columns)}\n"
+            f"  Make sure you selected the LICK data CSV "
+            f"(e.g. '0%_lick_data.csv'), not the behavioral master."
+        )
     
     # Check if sex column exists
     has_sex = 'sex' in master_df.columns
@@ -2016,53 +2036,436 @@ def plot_lick_measure_by_cohort(
 # MAIN EXECUTION
 # =============================================================================
 
-if __name__ == "__main__":
-    print("="*80)
-    print("CROSS-COHORT LICK ANALYSIS")
-    print("="*80)
-    print("\nThis module analyzes lick data across multiple cohorts (e.g., 0% vs 2% CA).")
-    print("\nUsage:")
-    print("  1. Load cohorts: cohorts = load_lick_cohorts(cohort_specs)")
-    print("  2. Run analyses: results = perform_cross_cohort_lick_anova(cohorts)")
-    print("  3. Generate report: report = generate_lick_cohort_report(results)")
-    print("\nExample cohort_specs structure (with capacitive files):")
-    print("""
-    from pathlib import Path
-    
-    cohort_specs = {
-        "0% CA": {
-            "master_csv": Path("0%_files/0%_lick_data.csv"),
-            "capacitive_logs": [
-                Path("0%_files/capacitive_log_2026-1-21.csv"),
-                Path("0%_files/capacitive_log_2026-1-28.csv"),
-                Path("0%_files/capacitive_log_2026-2-4.csv"),
-                Path("0%_files/capacitive_log_2026-2-11.csv"),
-                Path("0%_files/capacitive_log_2026-2-18.csv")
-            ],
-            "ca_percent": 0.0,
-            "fixed_threshold": 0.01,  # Optional (default 0.01, same as lick_detection.py)
-            "ili_cutoff": 0.3         # Optional
-        },
-        "2% CA": {
-            "master_csv": Path("2%_files/2%_lick_data.csv"),
-            "capacitive_logs": [
-                Path("2%_files/capacitive_log_2026-1-28.csv"),
-                Path("2%_files/capacitive_log_2026-2-4.csv"),
-                Path("2%_files/capacitive_log_2026-2-11.csv"),
-                Path("2%_files/capacitive_log_2026-2-18.csv"),
-                Path("2%_files/capacitive_log_2026-2-25.csv")
-            ],
-            "ca_percent": 2.0
-        }
+def _detect_lick_comparison_type(cohorts: Dict[str, pd.DataFrame]) -> str:
+    """
+    Inspect loaded cohort labels and return a comparison-type tag:
+      '0v2'    -- 0% vs 2% nonramp only
+      '0vramp' -- 0% nonramp vs ramp
+      '2vramp' -- 2% nonramp vs ramp
+      'all3'   -- all three cohorts
+      'unknown'-- cannot determine
+    """
+    labels_lower = [lbl.lower() for lbl in cohorts.keys()]
+
+    has_zero = any('0%' in l and 'ramp' not in l for l in labels_lower)
+    has_two  = any('2%' in l and 'ramp' not in l for l in labels_lower)
+    has_ramp = any('ramp' in l for l in labels_lower)
+
+    n = len(cohorts)
+    if n == 3 and has_zero and has_two and has_ramp:
+        return 'all3'
+    if n == 2 and has_zero and has_two and not has_ramp:
+        return '0v2'
+    if n == 2 and has_zero and has_ramp and not has_two:
+        return '0vramp'
+    if n == 2 and has_two and has_ramp and not has_zero:
+        return '2vramp'
+    return 'unknown'
+
+
+def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
+    """
+    Interactive analysis menu for 0% vs 2% nonramp lick comparison.
+    Reports are auto-saved with timestamps.
+    """
+    from datetime import datetime
+
+    MEASURES = ["Total_Licks", "Total_Bouts", "Avg_ILI", "Avg_Bout_Duration", "Licks_Per_Bout"]
+    combined_temp = combine_lick_cohorts(cohorts)
+    available_measures = [m for m in MEASURES if m in combined_temp.columns]
+    if not available_measures:
+        available_measures = MEASURES  # fall back; ANOVA will handle missing
+
+    print("\n" + "=" * 80)
+    print("0% vs 2% NONRAMP — LICK ANALYSIS MENU")
+    print("=" * 80)
+    print("\nAll analyses use Week as the time axis (Week 1 = first measurement week).")
+    print("Reports are automatically saved to the current directory.")
+    print(f"\nAvailable measures : {available_measures}")
+    print()
+    print("  1. Full mixed ANOVA     -- CA%  x  Week  x  Sex (all lick measures)")
+    print("  2. Sex-stratified       -- CA%  x  Week separately for Males and Females")
+    print("  3. CA%-stratified       -- Week  x  Sex separately for 0% and 2%")
+    print("  4. Lick plots           -- Mean lick measure by cohort over weeks")
+    print("  5. Sex-split plots      -- Mean lick measure split by cohort x sex")
+    print("  6. Run all (1-5)")
+    print()
+
+    user_input = input("Select option (1-6) or 'n' to skip: ").strip()
+    if user_input.lower() == 'n':
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_all = (user_input == '6')
+
+    # ------------------------------------------------------------------ #
+    # Option 1: Full mixed ANOVA (CA% x Week x Sex)
+    # ------------------------------------------------------------------ #
+    if user_input == '1' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: Full mixed ANOVA — CA%  x  Week  x  Sex (all lick measures)")
+        print("=" * 80)
+
+        all_sections = []
+        for i, measure in enumerate(available_measures):
+            result = None
+            try:
+                result = perform_cross_cohort_lick_anova(cohorts, measure=measure)
+            except Exception as e:
+                print(f"  [WARNING] Full ANOVA failed for {measure}: {e}")
+
+            section = generate_lick_cohort_report(
+                mixed_results=result,
+                cohort_dfs=cohorts if i == 0 else None,
+            )
+            all_sections.append(section)
+
+        combined_report = "\n\n".join(all_sections)
+        rpt_path = Path(f"0v2_lick_full_anova_{timestamp}.txt")
+        rpt_path.write_text(combined_report, encoding='utf-8')
+        print(f"\n[OK] Report saved -> {rpt_path}")
+
+    # ------------------------------------------------------------------ #
+    # Option 2: Sex-stratified
+    # ------------------------------------------------------------------ #
+    if user_input == '2' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: Sex-stratified lick ANOVA — CA%  x  Week (Males and Females separately)")
+        print("=" * 80)
+
+        all_sections = []
+        for i, measure in enumerate(available_measures):
+            r_males = r_females = None
+            try:
+                r_males = perform_lick_anova_sex_stratified(cohorts, sex="M", measure=measure)
+            except Exception as e:
+                print(f"  [WARNING] Sex-stratified (Males) failed for {measure}: {e}")
+            try:
+                r_females = perform_lick_anova_sex_stratified(cohorts, sex="F", measure=measure)
+            except Exception as e:
+                print(f"  [WARNING] Sex-stratified (Females) failed for {measure}: {e}")
+
+            section = generate_lick_cohort_report(
+                results_males=r_males,
+                results_females=r_females,
+                cohort_dfs=cohorts if i == 0 else None,
+            )
+            all_sections.append(section)
+
+        combined_report = "\n\n".join(all_sections)
+        rpt_path = Path(f"0v2_lick_sex_stratified_{timestamp}.txt")
+        rpt_path.write_text(combined_report, encoding='utf-8')
+        print(f"\n[OK] Report saved -> {rpt_path}")
+
+    # ------------------------------------------------------------------ #
+    # Option 3: CA%-stratified
+    # ------------------------------------------------------------------ #
+    if user_input == '3' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: CA%-stratified lick ANOVA — Week  x  Sex (0% and 2% separately)")
+        print("=" * 80)
+
+        all_sections = []
+        for i, measure in enumerate(available_measures):
+            r_ca0 = r_ca2 = None
+            try:
+                r_ca0 = perform_lick_anova_ca_stratified(cohorts, ca_percent=0.0, measure=measure)
+            except Exception as e:
+                print(f"  [WARNING] CA%-stratified (0%) failed for {measure}: {e}")
+            try:
+                r_ca2 = perform_lick_anova_ca_stratified(cohorts, ca_percent=2.0, measure=measure)
+            except Exception as e:
+                print(f"  [WARNING] CA%-stratified (2%) failed for {measure}: {e}")
+
+            section = generate_lick_cohort_report(
+                results_ca0=r_ca0,
+                results_ca2=r_ca2,
+                cohort_dfs=cohorts if i == 0 else None,
+            )
+            all_sections.append(section)
+
+        combined_report = "\n\n".join(all_sections)
+        rpt_path = Path(f"0v2_lick_ca_stratified_{timestamp}.txt")
+        rpt_path.write_text(combined_report, encoding='utf-8')
+        print(f"\n[OK] Report saved -> {rpt_path}")
+
+    # ------------------------------------------------------------------ #
+    # Option 4: Lick plots (cohort lines)
+    # ------------------------------------------------------------------ #
+    if user_input == '4' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Lick measure plots by cohort (collapsed across sex)")
+            print("=" * 80)
+
+            plot_dir = Path(f"0v2_lick_plots_{timestamp}")
+            plot_dir.mkdir(exist_ok=True)
+
+            for measure in available_measures:
+                try:
+                    fig = plot_lick_measure_by_cohort(
+                        cohorts,
+                        measure=measure,
+                        group_by_sex=False,
+                        save_path=plot_dir / f"lick_{measure.lower()}_by_cohort.svg",
+                        show=False,
+                    )
+                    if fig:
+                        import matplotlib.pyplot as _plt
+                        _plt.close(fig)
+                except Exception as e:
+                    print(f"  [WARNING] Plot for {measure} failed: {e}")
+
+            print(f"\n[OK] Plots saved -> {plot_dir}")
+            show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                import matplotlib.pyplot as _plt
+                _plt.show()
+            else:
+                try:
+                    import matplotlib.pyplot as _plt
+                    _plt.close('all')
+                except Exception:
+                    pass
+
+    # ------------------------------------------------------------------ #
+    # Option 5: Sex-split plots
+    # ------------------------------------------------------------------ #
+    if user_input == '5' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Lick measure plots by cohort × sex")
+            print("=" * 80)
+
+            plot_dir = Path(f"0v2_lick_plots_{timestamp}")
+            plot_dir.mkdir(exist_ok=True)
+
+            for measure in available_measures:
+                try:
+                    fig = plot_lick_measure_by_cohort(
+                        cohorts,
+                        measure=measure,
+                        group_by_sex=True,
+                        save_path=plot_dir / f"lick_{measure.lower()}_by_cohort_sex.svg",
+                        show=False,
+                    )
+                    if fig:
+                        import matplotlib.pyplot as _plt
+                        _plt.close(fig)
+                except Exception as e:
+                    print(f"  [WARNING] Sex-split plot for {measure} failed: {e}")
+
+            print(f"\n[OK] Sex-split plots saved -> {plot_dir}")
+            show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                import matplotlib.pyplot as _plt
+                _plt.show()
+            else:
+                try:
+                    import matplotlib.pyplot as _plt
+                    _plt.close('all')
+                except Exception:
+                    pass
+
+    print("\n" + "=" * 80)
+    print("0% vs 2% lick analysis complete.")
+    print("=" * 80)
+
+
+def _run_lick_unknown_menu(cohorts: Dict[str, pd.DataFrame], comparison: str) -> None:
+    """Placeholder menu for comparison types beyond 0v2 (ramp comparisons)."""
+    label_map = {
+        '0vramp': '0% nonramp vs Ramp',
+        '2vramp': '2% nonramp vs Ramp',
+        'all3':   '0% nonramp vs 2% nonramp vs Ramp',
+        'unknown': 'Unknown cohort combination',
     }
-    
-    # Load cohorts (automatically assigns sequential week numbers 0-4)
-    cohorts = load_lick_cohorts(cohort_specs)
-    
-    # Plot licks across weeks (EXACT style from lick_nonramp.py)
-    fig = plot_lick_measure_by_cohort(cohorts, measure="Total_Licks", use_std=False, show=True)
-    
-    # Now Week 0-4 for each cohort represents sequential time order
-    # Week 0 of 0% CA aligns with Week 0 of 2% CA (first week for each)
-    """)
-    print("\n" + "="*80)
+    cohort_labels = list(cohorts.keys())
+    print("\n" + "=" * 80)
+    print(f"COMPARISON TYPE: {label_map.get(comparison, comparison)}")
+    print("=" * 80)
+    print(f"\nLoaded cohorts: {cohort_labels}")
+    print("\nAvailable functions for this comparison:")
+    print("  combine_lick_cohorts(cohorts)          -- combine into one DataFrame")
+    print("  perform_cross_cohort_lick_anova(cohorts, measure)")
+    print("  perform_lick_anova_sex_stratified(cohorts, sex, measure)")
+    print("  perform_lick_anova_ca_stratified(cohorts, ca_percent, measure)")
+    print("  plot_lick_measure_by_cohort(cohorts, measure, group_by_sex=True/False)")
+    print()
+    print("Running basic lick plots for all cohorts...")
+
+    if HAS_MATPLOTLIB:
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        plot_dir = Path(f"lick_plots_{timestamp}")
+        plot_dir.mkdir(exist_ok=True)
+        combined_temp = combine_lick_cohorts(cohorts)
+        available_measures = [m for m in
+                               ["Total_Licks", "Total_Bouts", "Avg_ILI", "Avg_Bout_Duration"]
+                               if m in combined_temp.columns]
+        for measure in available_measures:
+            try:
+                fig = plot_lick_measure_by_cohort(
+                    cohorts,
+                    measure=measure,
+                    save_path=plot_dir / f"lick_{measure.lower()}_by_cohort.svg",
+                    show=False,
+                )
+                if fig:
+                    import matplotlib.pyplot as _plt
+                    _plt.close(fig)
+            except Exception as e:
+                print(f"  [WARNING] Plot for {measure} failed: {e}")
+        print(f"[OK] Plots saved -> {plot_dir}")
+    print()
+
+
+def _select_lick_cohorts_interactively(n_cohorts: int) -> Dict[str, pd.DataFrame]:
+    """
+    Prompt user to select master CSV + capacitive log files for each cohort via GUI.
+
+    For each cohort the user will:
+      1. Optionally enter a label (or accept the auto-generated one)
+      2. Select the master lick CSV (e.g. 0%_lick_data.csv)
+      3. Select one or more capacitive log CSVs for that cohort
+
+    Returns a dict of {label: DataFrame} ready for analysis.
+    """
+    if not HAS_TKINTER:
+        print("[ERROR] tkinter not available — cannot use GUI file picker.")
+        print("         Build cohort_specs manually and call load_lick_cohorts() directly.")
+        return {}
+
+    import tkinter as tk
+    from tkinter import filedialog, simpledialog
+
+    root = tk.Tk()
+    root.withdraw()
+
+    cohort_specs: Dict[str, dict] = {}
+
+    default_labels = ["0% CA", "2% CA", "Ramp"]
+
+    for i in range(n_cohorts):
+        default_label = default_labels[i] if i < len(default_labels) else f"Cohort {i + 1}"
+        label = simpledialog.askstring(
+            "Cohort Label",
+            f"Enter a label for cohort {i + 1} (default: {default_label}):",
+            initialvalue=default_label,
+            parent=root,
+        )
+        if label is None:
+            label = default_label
+        label = label.strip() or default_label
+
+        print(f"\n  Cohort '{label}': select LICK master CSV...")
+        print(f"         (choose the lick_data CSV, e.g. '0%_lick_data.csv' — NOT master_data_*.csv)")
+        master_path = filedialog.askopenfilename(
+            title=f"Select LICK master CSV for '{label}' (e.g. 0%_lick_data.csv)",
+            filetypes=[("Lick data CSV", "*lick_data*.csv"), ("CSV files", "*.csv"), ("All files", "*.*")],
+            parent=root,
+        )
+        if not master_path:
+            print(f"  [WARNING] No master CSV selected for '{label}' — skipping cohort.")
+            continue
+
+        print(f"  Cohort '{label}': select capacitive log CSVs (hold Ctrl/Shift to pick multiple)...")
+        cap_paths = filedialog.askopenfilenames(
+            title=f"Select capacitive log CSV(s) for '{label}'",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            parent=root,
+        )
+        if not cap_paths:
+            print(f"  [WARNING] No capacitive logs selected for '{label}' — skipping cohort.")
+            continue
+
+        # Try to infer ca_percent from the label
+        ca_pct = 0.0
+        import re as _re
+        _ca_match = _re.search(r'(\d+\.?\d*)\s*%', label)
+        if _ca_match:
+            try:
+                ca_pct = float(_ca_match.group(1))
+            except ValueError:
+                ca_pct = 0.0
+
+        cohort_specs[label] = {
+            "master_csv":       Path(master_path),
+            "capacitive_logs":  [Path(p) for p in cap_paths],
+            "ca_percent":       ca_pct,
+        }
+
+    root.destroy()
+
+    if not cohort_specs:
+        print("[ERROR] No cohorts were configured.")
+        return {}
+
+    return load_lick_cohorts(cohort_specs)
+
+
+if __name__ == "__main__":
+    # ------------------------------------------------------------------ #
+    # Step 1 -- choose number of cohorts and load files via GUI
+    # ------------------------------------------------------------------ #
+    print("\n" + "=" * 80)
+    print("CROSS-COHORT LICK ANALYSIS")
+    print("=" * 80)
+    print("\nHow many cohorts would you like to compare?")
+    print("  2 -- compare two cohorts  (e.g. 0% vs 2%, 0% vs Ramp, 2% vs Ramp)")
+    print("  3 -- compare three cohorts (0% vs 2% vs Ramp)")
+
+    n_input = input("\nEnter 2 or 3: ").strip()
+    try:
+        n_cohorts = int(n_input)
+        if n_cohorts not in (2, 3):
+            raise ValueError
+    except ValueError:
+        print("[ERROR] Please enter 2 or 3. Exiting.")
+        raise SystemExit(1)
+
+    cohorts = _select_lick_cohorts_interactively(n_cohorts=n_cohorts)
+
+    if not cohorts or len(cohorts) < n_cohorts:
+        print("[ERROR] Not enough cohorts loaded. Exiting.")
+        raise SystemExit(1)
+
+    # ------------------------------------------------------------------ #
+    # Step 2 -- auto-detect comparison type and route to the right menu
+    # ------------------------------------------------------------------ #
+    comparison = _detect_lick_comparison_type(cohorts)
+
+    label_map = {
+        '0v2':    '0% nonramp  vs  2% nonramp',
+        '0vramp': '0% nonramp  vs  Ramp',
+        '2vramp': '2% nonramp  vs  Ramp',
+        'all3':   '0% nonramp  vs  2% nonramp  vs  Ramp',
+        'unknown': 'Unknown combination',
+    }
+    print("\n" + "=" * 80)
+    print(f"Detected comparison type: {label_map.get(comparison, comparison)}")
+    print("=" * 80)
+
+    if comparison == 'unknown':
+        print("\n[WARNING] Could not auto-detect comparison type from cohort labels.")
+        print("  Loaded labels:", list(cohorts.keys()))
+        print("\nManually select comparison type:")
+        print("  1. 0% nonramp vs 2% nonramp")
+        print("  2. 0% nonramp vs Ramp")
+        print("  3. 2% nonramp vs Ramp")
+        print("  4. All three cohorts")
+        manual = input("\nSelect (1-4): ").strip()
+        comparison = {'1': '0v2', '2': '0vramp', '3': '2vramp', '4': 'all3'}.get(manual, 'unknown')
+
+    # ------------------------------------------------------------------ #
+    # Step 3 -- dispatch to comparison-specific menu
+    # ------------------------------------------------------------------ #
+    if comparison == '0v2':
+        _run_lick_0v2_menu(cohorts)
+    else:
+        _run_lick_unknown_menu(cohorts, comparison)
+
