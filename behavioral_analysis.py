@@ -3731,7 +3731,18 @@ def perform_two_way_chi_square_behavioral(df: pd.DataFrame) -> dict:
 					family=Binomial(),
 					cov_struct=Exchangeable(),
 				)
-				gee_full_fit = gee_full_model.fit(maxiter=100, ddof_scale=None)
+				# Use Mancl-DeRouen bias-reduced SE (recommended for n_clusters < 30)
+				# Falls back to standard robust sandwich SE if BC correction is unavailable
+				n_clusters = gee_full_df['ID'].nunique()
+				_bc_warning = ''
+				try:
+					gee_full_fit = gee_full_model.fit(maxiter=100, ddof_scale=None, cov_type='bias_reduced')
+					_bc_warning = f'  SE correction: Mancl-DeRouen bias-reduced (n={n_clusters} clusters)'
+				except Exception:
+					gee_full_fit = gee_full_model.fit(maxiter=100, ddof_scale=None)
+					_bc_warning = f'  SE correction: robust sandwich (BC failed; n={n_clusters} clusters — interpret cautiously)'
+				if n_clusters < 30:
+					print(f"  ⚠️  Small cluster warning: n={n_clusters} animals; {_bc_warning}")
 
 				full_pvals  = gee_full_fit.pvalues
 				full_params = gee_full_fit.params
@@ -3786,6 +3797,7 @@ def perform_two_way_chi_square_behavioral(df: pd.DataFrame) -> dict:
 				gee_full_result = {
 					'model': f'GEE Binomial Exchangeable — full model',
 					'formula': gee_full_formula,
+					'se_correction': _bc_warning,
 					'n_subjects': int(gee_full_df['ID'].nunique()),
 					'n_obs': int(len(gee_full_df)),
 					'converged': bool(gee_full_fit.converged),
@@ -3857,15 +3869,16 @@ def perform_two_way_chi_square_behavioral(df: pd.DataFrame) -> dict:
 			print(wide_df.head())
 			
 			# Compute Cochran's Q
+			p_ca_perm = float('nan')
 			try:
 				# cochrans_q returns (statistic, pvalue)
 				q_result = cochrans_q(wide_df)
 				q_stat_ca = q_result.statistic
 				p_ca = q_result.pvalue
 				df_ca = len(wide_df.columns) - 1  # k - 1 where k = number of time points
-				
+
 				print(f"\nCochran's Q test: Q({df_ca}) = {q_stat_ca:.3f}, p = {p_ca:.4f} {'***' if p_ca < 0.001 else '**' if p_ca < 0.01 else '*' if p_ca < 0.05 else 'ns'}")
-				
+
 				# Show proportions per within-factor level
 				print(f"\nProportion 'Yes' by {fl}:")
 				for lvl in sorted(wide_df.columns):
@@ -3873,7 +3886,29 @@ def perform_two_way_chi_square_behavioral(df: pd.DataFrame) -> dict:
 					count = wide_df[lvl].sum()
 					total = len(wide_df)
 					print(f"  {_group_label(lvl)}: {count}/{total} ({100*prop:.1f}%)")
-				
+
+				# --- Permutation test for within-subjects effect ---
+				# Permutes condition labels within each subject → empirical null for Q
+				# Appropriate for small n where chi² asymptotics may be poor
+				if not np.isnan(q_stat_ca):
+					try:
+						_rng = np.random.default_rng(42)
+						_n_perm = 5000
+						_perm_q = np.empty(_n_perm)
+						_wide_arr = wide_df.values.astype(float)
+						for _i in range(_n_perm):
+							_shuffled = np.apply_along_axis(_rng.permutation, axis=1, arr=_wide_arr)
+							_perm_wide = pd.DataFrame(_shuffled, columns=wide_df.columns)
+							try:
+								_perm_q[_i] = cochrans_q(_perm_wide).statistic
+							except Exception:
+								_perm_q[_i] = q_stat_ca  # conservative: tie with observed
+						p_ca_perm = float(np.mean(_perm_q >= q_stat_ca))
+						print(f"  Permutation p (5000 within-subject shuffles): p = {p_ca_perm:.4f} "
+						      f"{'***' if p_ca_perm < 0.001 else '**' if p_ca_perm < 0.01 else '*' if p_ca_perm < 0.05 else 'ns'}")
+					except Exception as _pe:
+						print(f"  Permutation test error: {_pe}")
+
 			except Exception as e:
 				print(f"ERROR computing Cochran's Q: {e}")
 				import traceback
@@ -3974,7 +4009,9 @@ def perform_two_way_chi_square_behavioral(df: pd.DataFrame) -> dict:
 				'Q': q_stat_ca,
 				'df': df_ca,
 				'p': p_ca,
+				'p_permutation': p_ca_perm,
 				'significant': p_ca < 0.05 if not np.isnan(p_ca) else False,
+				'significant_permutation': (not np.isnan(p_ca_perm) and p_ca_perm < 0.05),
 				'n_complete': len(complete_subjects),
 				'n_incomplete': len(incomplete_subjects),
 				'note': 'Sensitivity check — complete subjects only; primary test is GEE full model [1c]'
@@ -4233,10 +4270,52 @@ def display_two_way_anova_results(weight_results: dict, behavioral_results: dict
 	lines.append("-"*80)
 	lines.append("PRIMARY   : GEE full model [1c] — Response ~ Sex + C(Within) + Sex:C(Within)")
 	lines.append("            Binomial family, Exchangeable correlation, groups = animal ID")
+	lines.append("            SE: Mancl-DeRouen bias-reduced (BC) correction when available (n_clusters<30)")
 	lines.append("            Provides formal Wald p-values for Sex, Within, and interaction")
 	lines.append("SUPPLEMENT: Chi-square for Sex [1], Sex-only GEE [1b]")
 	lines.append("SENSITIVITY: Cochran's Q for within-subjects effect [2] (complete cases only)")
+	lines.append("            + permutation p-value (5000 within-subject shuffles; no asymptotic assumptions)")
 	lines.append("POST-HOC  : Pairwise McNemar (Bonferroni-corrected) with phi effect size")
+	lines.append("FDR NOTE  : p-values marked with (FDR) below are Benjamini-Hochberg corrected")
+	lines.append("            across the 3 primary behavioral measures (Nest Made, Lethargy, Anxious)")
+	if len(behavioral_results) >= 2:
+		_fdr_measures = ['Nest Made', 'Lethargy', 'Anxious Behaviors']
+		_fdr_raw = []
+		_fdr_keys = []
+		for _m in _fdr_measures:
+			if _m in behavioral_results:
+				_gf = behavioral_results[_m].get('gee_full', {})
+				_wf = behavioral_results[_m].get(wk, {})
+				# Prefer GEE within p, fall back to Cochran's Q permutation, then Cochran's Q asymptotic
+				_p = _gf.get('within', {}).get('p', float('nan'))
+				if np.isnan(_p):
+					_p = _wf.get('p_permutation', float('nan'))
+				if np.isnan(_p):
+					_p = _wf.get('p', float('nan'))
+				_fdr_raw.append(_p)
+				_fdr_keys.append(_m)
+		if _fdr_keys:
+			_fdr_adj = [float('nan')] * len(_fdr_raw)
+			_valid_idx = [i for i, p in enumerate(_fdr_raw) if not np.isnan(p)]
+			if _valid_idx:
+				_valid_ps = [_fdr_raw[i] for i in _valid_idx]
+				_m_fdr = len(_valid_ps)
+				# Sort ascending, compute BH, enforce step-up monotonicity in sorted space, map back
+				_order = sorted(range(_m_fdr), key=lambda i: _valid_ps[i])
+				_sorted_ps = [_valid_ps[i] for i in _order]
+				_bh_sorted = [min(1.0, _sorted_ps[k] * _m_fdr / (k + 1)) for k in range(_m_fdr)]
+				for _k in range(_m_fdr - 2, -1, -1):
+					_bh_sorted[_k] = min(_bh_sorted[_k], _bh_sorted[_k + 1])
+				_bh_orig = [0.0] * _m_fdr
+				for _spos, _opos in enumerate(_order):
+					_bh_orig[_opos] = _bh_sorted[_spos]
+				for _vpos, _orig_idx in enumerate(_valid_idx):
+					_fdr_adj[_orig_idx] = _bh_orig[_vpos]
+			lines.append("")
+			lines.append("  BH-FDR corrected within-subjects p-values across behavioral measures:")
+			for _mk, _pr, _pa in zip(_fdr_keys, _fdr_raw, _fdr_adj):
+				_sig = '***' if (not np.isnan(_pa) and _pa < 0.001) else '**' if (not np.isnan(_pa) and _pa < 0.01) else '*' if (not np.isnan(_pa) and _pa < 0.05) else 'ns'
+				lines.append(f"    {_mk:<20}: raw p = {_pr:.4f}  →  BH-FDR p = {_pa:.4f} {_sig}")
 	lines.append("")
 	
 	for measure_name, results in behavioral_results.items():
@@ -4265,8 +4344,18 @@ def display_two_way_anova_results(weight_results: dict, behavioral_results: dict
 			n_s = gee_full.get('n_subjects', '?')
 			n_o = gee_full.get('n_obs', '?')
 			conv = "yes" if gee_full.get('converged', False) else "no"
+			# Detect degenerate fit: all Wald p-values ≈ 1.0 (near-complete separation)
+			_all_pvals = [gee_full.get('sex', {}).get('p', float('nan')),
+			             gee_full.get('within', {}).get('p', float('nan')),
+			             gee_full.get('interaction', {}).get('p', float('nan'))]
+			_gee_degenerate = all(not np.isnan(p) and p >= 0.99 for p in _all_pvals)
 			lines.append(f"  Model: {gee_full.get('formula', '?')}   Converged: {conv}")
 			lines.append(f"  n = {n_s} subjects, {n_o} observations")
+			if gee_full.get('se_correction'):
+				lines.append(f"  {gee_full['se_correction']}")
+			if _gee_degenerate:
+				lines.append(f"  ⚠️  DEGENERATE FIT: all Wald p ≈ 1.0 — likely near-complete separation")
+				lines.append(f"      (outcome is near-uniform; GEE p-values unreliable — use Cochran's Q [C] instead)")
 			lines.append("")
 			# Sex
 			sg = gee_full.get('sex', {})
@@ -4339,6 +4428,10 @@ def display_two_way_anova_results(weight_results: dict, behavioral_results: dict
 			lines.append(f"  Q({wf_behav['df']}) = {wf_behav['Q']:.3f}, p = {wf_behav['p']:.4f} {'***' if wf_behav['p'] < 0.001 else '**' if wf_behav['p'] < 0.01 else '*' if wf_behav['p'] < 0.05 else 'ns'}")
 			if 'n_complete' in wf_behav and wf_behav['n_complete'] > 0:
 				lines.append(f"  Complete subjects: {wf_behav['n_complete']}, Incomplete: {wf_behav.get('n_incomplete', 0)}")
+			_p_perm = wf_behav.get('p_permutation', float('nan'))
+			if not np.isnan(_p_perm):
+				_sig_perm = '***' if _p_perm < 0.001 else '**' if _p_perm < 0.01 else '*' if _p_perm < 0.05 else 'ns'
+				lines.append(f"  Permutation p (5000 shuffles): {_p_perm:.4f} {_sig_perm}")
 		elif 'chi2' in wf_behav:
 			lines.append(f"  χ²({wf_behav['df']}) = {wf_behav['chi2']:.3f}, p = {wf_behav['p']:.4f} (WARNING: assumes independence)")
 		lines.append(f"  Interpretation: {'SIGNIFICANT' if wf_behav['significant'] else 'Not significant'}")
@@ -4458,30 +4551,18 @@ def plot_interaction_effects(
 	Returns:
 		Dictionary mapping measure names to figure objects
 	"""
-	if EXPERIMENT_MODE != 'ramp':
-		print("\nInteraction plots are only available in ramp mode.")
-		return {}
-
 	wc = _MLB['within_col']
 	il = _MLB['interaction_label']
-	# Check if we have any significant interactions
+
+	# Always plot all measures for both ramp and nonramp
 	significant_weight = {
 		measure: results for measure, results in weight_results.items()
-		if results.get('interaction', {}).get('significant', False)
+		if isinstance(results, dict)
 	}
-	
-	significant_behavioral = {}
-	for measure, results in behavioral_results.items():
-		# Check if any sex-stratified tests were significant
-		if 'by_sex' in results.get('interaction', {}):
-			for sex_results in results['interaction']['by_sex'].values():
-				if sex_results.get('p', 1.0) < 0.05:
-					significant_behavioral[measure] = results
-					break
-	
-	if not significant_weight and not significant_behavioral:
-		print(f"\nNo significant {il} interactions found - skipping interaction plots.")
-		return {}
+	significant_behavioral = {
+		measure: results for measure, results in behavioral_results.items()
+		if isinstance(results, dict)
+	}
 	
 	print("\n" + "=" * 80)
 	print(f"CREATING INTERACTION PLOTS FOR SIGNIFICANT {il.upper()} INTERACTIONS")
@@ -4491,6 +4572,8 @@ def plot_interaction_effects(
 	cdf = clean_master_dataframe(df)
 	cdf = _add_day_number_column(cdf)
 	cdf = cdf[cdf["Day"] >= 0]
+	if EXPERIMENT_MODE == 'nonramp':
+		cdf = _add_week_column(cdf)
 	cdf[wc] = cdf[wc].astype(int)
 	
 	# Debug: show available columns and sample
@@ -4517,18 +4600,18 @@ def plot_interaction_effects(
 			print(f"  Skipping: column '{column}' not found")
 			continue
 		
-		# Organize data by Sex and CA% - need to aggregate by subject first for repeated measures
-		measure_df = cdf[["ID", "Sex", "CA (%)", column]].copy()
+		# Organize data by Sex and within-factor - aggregate by subject first for repeated measures
+		measure_df = cdf[["ID", "Sex", wc, column]].copy()
 		measure_df = measure_df.dropna()
 		
-		# For repeated measures, first compute mean for each subject at each CA% level
+		# For repeated measures, first compute mean for each subject at each within-factor level
 		# Then compute group means and SEMs across subjects
-		subject_means = measure_df.groupby(['ID', 'Sex', 'CA (%)'])[column].mean().reset_index()
+		subject_means = measure_df.groupby(['ID', 'Sex', wc])[column].mean().reset_index()
 		
-		# Compute means and SEMs for each Sex × CA% combination
-		ca_levels = sorted(subject_means['CA (%)'].unique())
+		# Compute means and SEMs for each Sex × within-factor combination
+		within_levels = sorted(subject_means[wc].unique())
 		
-		print(f"  CA% levels found: {ca_levels}")
+		print(f"  {wc} levels found: {within_levels}")
 		print(f"  Unique subjects: {len(subject_means['ID'].unique())}")
 		
 		males_means = []
@@ -4536,50 +4619,58 @@ def plot_interaction_effects(
 		females_means = []
 		females_sems = []
 		
-		for ca in ca_levels:
+		for lv in within_levels:
 			# Males
-			m_vals = subject_means[(subject_means['Sex'] == 'M') & (subject_means['CA (%)'] == ca)][column]
+			m_vals = subject_means[(subject_means['Sex'] == 'M') & (subject_means[wc] == lv)][column]
 			if len(m_vals) > 0:
 				males_means.append(m_vals.mean())
 				males_sems.append(m_vals.std(ddof=1) / np.sqrt(len(m_vals)) if len(m_vals) > 1 else 0)
-				print(f"  Males at {ca}%: n={len(m_vals)}, mean={m_vals.mean():.3f}")
+				_lv_label = f'Week {int(lv)}' if EXPERIMENT_MODE == 'nonramp' else f'{int(lv)}%'
+				print(f"  Males at {_lv_label}: n={len(m_vals)}, mean={m_vals.mean():.3f}")
 			else:
 				males_means.append(np.nan)
 				males_sems.append(np.nan)
-				print(f"  Males at {ca}%: no data")
+				_lv_label = f'Week {int(lv)}' if EXPERIMENT_MODE == 'nonramp' else f'{int(lv)}%'
+				print(f"  Males at {_lv_label}: no data")
 			
 			# Females
-			f_vals = subject_means[(subject_means['Sex'] == 'F') & (subject_means['CA (%)'] == ca)][column]
+			f_vals = subject_means[(subject_means['Sex'] == 'F') & (subject_means[wc] == lv)][column]
 			if len(f_vals) > 0:
 				females_means.append(f_vals.mean())
 				females_sems.append(f_vals.std(ddof=1) / np.sqrt(len(f_vals)) if len(f_vals) > 1 else 0)
-				print(f"  Females at {ca}%: n={len(f_vals)}, mean={f_vals.mean():.3f}")
+				_lv_label = f'Week {int(lv)}' if EXPERIMENT_MODE == 'nonramp' else f'{int(lv)}%'
+				print(f"  Females at {_lv_label}: n={len(f_vals)}, mean={f_vals.mean():.3f}")
 			else:
 				females_means.append(np.nan)
 				females_sems.append(np.nan)
-				print(f"  Females at {ca}%: no data")
+				_lv_label = f'Week {int(lv)}' if EXPERIMENT_MODE == 'nonramp' else f'{int(lv)}%'
+				print(f"  Females at {_lv_label}: no data")
 		
 		# Create plot with larger size for better readability
 		fig, ax = plt.subplots(figsize=(12, 8))
 		
-		ax.errorbar(ca_levels, males_means, yerr=males_sems,
-				   marker='o', markersize=10, linewidth=2.5, capsize=6, capthick=2,
-				   color='steelblue', markerfacecolor='lightblue', markeredgecolor='steelblue',
+		ax.errorbar(within_levels, males_means, yerr=males_sems,
+				   marker='s', markersize=10, linewidth=2.5, capsize=6, capthick=2,
+				   color='green', markerfacecolor='green', markeredgecolor='green',
 				   label='Male', linestyle='-', markeredgewidth=2)
 		
-		ax.errorbar(ca_levels, females_means, yerr=females_sems,
-				   marker='s', markersize=10, linewidth=2.5, capsize=6, capthick=2,
-				   color='coral', markerfacecolor='lightcoral', markeredgecolor='coral',
+		ax.errorbar(within_levels, females_means, yerr=females_sems,
+				   marker='o', markersize=10, linewidth=2.5, capsize=6, capthick=2,
+				   color='purple', markerfacecolor='purple', markeredgecolor='purple',
 				   label='Female', linestyle='--', markeredgewidth=2)
 		
-		ax.set_xlabel('Citric Acid Concentration (%)', fontsize=14, weight='bold')
+		_x_label = 'Week' if EXPERIMENT_MODE == 'nonramp' else 'Citric Acid Concentration (%)'
+		ax.set_xlabel(_x_label, fontsize=14, weight='bold')
 		ax.set_ylabel(f'{measure_name} (g)', fontsize=14, weight='bold')
-		p_val = results['interaction']['p']
-		ax.set_title(f'Sex × CA% Interaction: {measure_name}\n(p = {p_val:.4f})',
+		_inter_p = results.get('interaction', {}).get('p', float('nan'))
+		_p_str = f'p = {_inter_p:.4f}' if not np.isnan(_inter_p) else 'p = N/A'
+		ax.set_title(f'Sex × {_MLB["within_factor"]} Interaction: {measure_name}\n({_p_str})',
 					fontsize=16, weight='bold', pad=20)
 		
-		ax.set_xticks(ca_levels)
-		ax.set_xticklabels([f'{int(ca)}%' for ca in ca_levels], fontsize=12)
+		ax.set_xticks(within_levels)
+		_x_tick_labels = ([f'Week {int(lv)}' for lv in within_levels] if EXPERIMENT_MODE == 'nonramp'
+						  else [f'{int(lv)}%' for lv in within_levels])
+		ax.set_xticklabels(_x_tick_labels, fontsize=12)
 		ax.tick_params(direction='in', which='both', length=5, labelsize=12)
 		ax.legend(loc='best', fontsize=13, frameon=True, shadow=True, fancybox=True)
 		ax.spines['top'].set_visible(False)
@@ -4618,8 +4709,8 @@ def plot_interaction_effects(
 			print(f"  Skipping: column '{column}' not found")
 			continue
 		
-		# Organize data by Sex and CA% - aggregate by subject first
-		measure_df = cdf[["ID", "Sex", "CA (%)", column]].copy()
+		# Organize data by Sex and within-factor - aggregate by subject first
+		measure_df = cdf[["ID", "Sex", wc, column]].copy()
 		measure_df = measure_df.dropna()
 		
 		# Debug: show raw values
@@ -4637,13 +4728,13 @@ def plot_interaction_effects(
 		def compute_subject_proportion(group):
 			return group.mean() if len(group) > 0 else np.nan
 		
-		subject_props = measure_df.groupby(['ID', 'Sex', 'CA (%)'])['Response'].apply(compute_subject_proportion).reset_index()
-		subject_props.columns = ['ID', 'Sex', 'CA (%)', 'proportion']
+		subject_props = measure_df.groupby(['ID', 'Sex', wc])['Response'].apply(compute_subject_proportion).reset_index()
+		subject_props.columns = ['ID', 'Sex', wc, 'proportion']
 		
-		# Compute proportions for each Sex × CA% combination (now averaging subject proportions)
-		ca_levels = sorted(subject_props['CA (%)'].unique())
+		# Compute proportions for each Sex × within-factor combination (now averaging subject proportions)
+		within_levels = sorted(subject_props[wc].unique())
 		
-		print(f"  CA% levels found: {ca_levels}")
+		print(f"  {wc} levels found: {within_levels}")
 		print(f"  Unique subjects: {len(subject_props['ID'].unique())}")
 		
 		males_props = []
@@ -4651,55 +4742,62 @@ def plot_interaction_effects(
 		females_props = []
 		females_sems = []
 		
-		for ca in ca_levels:
+		for lv in within_levels:
 			# Males
-			m_vals = subject_props[(subject_props['Sex'] == 'M') & (subject_props['CA (%)'] == ca)]['proportion']
+			m_vals = subject_props[(subject_props['Sex'] == 'M') & (subject_props[wc] == lv)]['proportion']
 			if len(m_vals) > 0:
 				mean_prop = m_vals.mean()
 				males_props.append(mean_prop * 100)  # Convert to percentage
 				# SEM for proportion: SD / sqrt(n)
 				sem = (m_vals.std(ddof=1) / np.sqrt(len(m_vals))) * 100 if len(m_vals) > 1 else 0
 				males_sems.append(sem)
-				print(f"  Males at {ca}%: n={len(m_vals)}, mean={mean_prop*100:.1f}%")
+				_lv_label = f'Week {int(lv)}' if EXPERIMENT_MODE == 'nonramp' else f'{int(lv)}%'
+				print(f"  Males at {_lv_label}: n={len(m_vals)}, mean={mean_prop*100:.1f}%")
 			else:
 				males_props.append(np.nan)
 				males_sems.append(np.nan)
-				print(f"  Males at {ca}%: no data")
+				_lv_label = f'Week {int(lv)}' if EXPERIMENT_MODE == 'nonramp' else f'{int(lv)}%'
+				print(f"  Males at {_lv_label}: no data")
 			
 			# Females
-			f_vals = subject_props[(subject_props['Sex'] == 'F') & (subject_props['CA (%)'] == ca)]['proportion']
+			f_vals = subject_props[(subject_props['Sex'] == 'F') & (subject_props[wc] == lv)]['proportion']
 			if len(f_vals) > 0:
 				mean_prop = f_vals.mean()
 				females_props.append(mean_prop * 100)  # Convert to percentage
 				# SEM for proportion: SD / sqrt(n)
 				sem = (f_vals.std(ddof=1) / np.sqrt(len(f_vals))) * 100 if len(f_vals) > 1 else 0
 				females_sems.append(sem)
-				print(f"  Females at {ca}%: n={len(f_vals)}, mean={mean_prop*100:.1f}%")
+				_lv_label = f'Week {int(lv)}' if EXPERIMENT_MODE == 'nonramp' else f'{int(lv)}%'
+				print(f"  Females at {_lv_label}: n={len(f_vals)}, mean={mean_prop*100:.1f}%")
 			else:
 				females_props.append(np.nan)
 				females_sems.append(np.nan)
-				print(f"  Females at {ca}%: no data")
+				_lv_label = f'Week {int(lv)}' if EXPERIMENT_MODE == 'nonramp' else f'{int(lv)}%'
+				print(f"  Females at {_lv_label}: no data")
 		
 		# Create plot with larger size for better readability
 		fig, ax = plt.subplots(figsize=(12, 8))
 		
-		ax.errorbar(ca_levels, males_props, yerr=males_sems,
-				   marker='o', markersize=10, linewidth=2.5, capsize=6, capthick=2,
-				   color='steelblue', markerfacecolor='lightblue', markeredgecolor='steelblue',
+		ax.errorbar(within_levels, males_props, yerr=males_sems,
+				   marker='s', markersize=10, linewidth=2.5, capsize=6, capthick=2,
+				   color='green', markerfacecolor='green', markeredgecolor='green',
 				   label='Male', linestyle='-', markeredgewidth=2)
 		
-		ax.errorbar(ca_levels, females_props, yerr=females_sems,
-				   marker='s', markersize=10, linewidth=2.5, capsize=6, capthick=2,
-				   color='coral', markerfacecolor='lightcoral', markeredgecolor='coral',
+		ax.errorbar(within_levels, females_props, yerr=females_sems,
+				   marker='o', markersize=10, linewidth=2.5, capsize=6, capthick=2,
+				   color='purple', markerfacecolor='purple', markeredgecolor='purple',
 				   label='Female', linestyle='--', markeredgewidth=2)
 		
-		ax.set_xlabel('Citric Acid Concentration (%)', fontsize=14, weight='bold')
+		_x_label = 'Week' if EXPERIMENT_MODE == 'nonramp' else 'Citric Acid Concentration (%)'
+		ax.set_xlabel(_x_label, fontsize=14, weight='bold')
 		ax.set_ylabel(f'{measure_name} (% Yes)', fontsize=14, weight='bold')
-		ax.set_title(f'Sex × CA% Interaction: {measure_name}\n(Stratified Analysis)',
+		ax.set_title(f'Sex × {_MLB["within_factor"]} Interaction: {measure_name}\n(Sex-Stratified Analysis)',
 					fontsize=16, weight='bold', pad=20)
 		
-		ax.set_xticks(ca_levels)
-		ax.set_xticklabels([f'{int(ca)}%' for ca in ca_levels], fontsize=12)
+		ax.set_xticks(within_levels)
+		_x_tick_labels = ([f'Week {int(lv)}' for lv in within_levels] if EXPERIMENT_MODE == 'nonramp'
+						  else [f'{int(lv)}%' for lv in within_levels])
+		ax.set_xticklabels(_x_tick_labels, fontsize=12)
 		
 		# Set y-axis limits based on actual data range
 		all_values = [v for v in males_props + females_props if not np.isnan(v)]
@@ -4980,33 +5078,32 @@ def main() -> None:
 		except Exception as e:
 			print(f"\nWarning: failed to save results: {e}")
 
-		# Generate interaction plots (ramp mode only)
-		if EXPERIMENT_MODE == 'ramp':
-			print("\n" + "="*80)
-			print("CHECKING FOR SIGNIFICANT INTERACTIONS TO VISUALIZE")
-			print("="*80)
-			interaction_figures = plot_interaction_effects(weight_results, behavioral_results, cdf)
+		# Generate interaction plots (ramp and nonramp)
+		print("\n" + "="*80)
+		print("CHECKING FOR SIGNIFICANT INTERACTIONS TO VISUALIZE")
+		print("="*80)
+		interaction_figures = plot_interaction_effects(weight_results, behavioral_results, cdf)
 
-			if interaction_figures:
-				print(f"\nGenerated {len(interaction_figures)} interaction plot(s).")
-				try:
-					response = input("\nWould you like to save the interaction plots to SVG? (y/n): ").strip().lower()
-					if response == 'y':
-						from datetime import datetime
-						timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-						for measure_name, fig in interaction_figures.items():
-							clean_name = measure_name.replace(" ", "_").replace("?", "").replace("/", "_")
-							svg_filename = f"interaction_plot_{clean_name}_{timestamp}.svg"
-							svg_path = Path.cwd() / svg_filename
-							fig.savefig(svg_path, format='svg', bbox_inches='tight')
-							print(f"  Saved: {svg_path}")
-						print(f"\nAll interaction plots saved successfully!")
-				except KeyboardInterrupt:
-					print("\nSave canceled.")
-				except Exception as e:
-					print(f"\nWarning: failed to save interaction plots: {e}")
-			else:
-				print("No significant interactions detected - no plots generated.")
+		if interaction_figures:
+			print(f"\nGenerated {len(interaction_figures)} interaction plot(s).")
+			try:
+				response = input("\nWould you like to save the interaction plots to SVG? (y/n): ").strip().lower()
+				if response == 'y':
+					from datetime import datetime
+					timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+					for measure_name, fig in interaction_figures.items():
+						clean_name = measure_name.replace(" ", "_").replace("?", "").replace("/", "_")
+						svg_filename = f"interaction_plot_{clean_name}_{timestamp}.svg"
+						svg_path = Path.cwd() / svg_filename
+						fig.savefig(svg_path, format='svg', bbox_inches='tight')
+						print(f"  Saved: {svg_path}")
+					print(f"\nAll interaction plots saved successfully!")
+			except KeyboardInterrupt:
+				print("\nSave canceled.")
+			except Exception as e:
+				print(f"\nWarning: failed to save interaction plots: {e}")
+		else:
+			print("No significant interactions detected - no plots generated.")
 
 	except Exception as e:
 		print(f"\nWarning: failed to perform two-way ANOVA analysis: {e}")
