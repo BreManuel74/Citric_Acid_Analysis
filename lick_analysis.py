@@ -39,7 +39,7 @@ except ImportError:
 #   'ramp'    → CA% increases each week; within-subjects factor = CA_Percent
 #   'nonramp' → CA% is constant across weeks; within-subjects factor = Week
 # ─────────────────────────────────────────────────────────────────────────────
-EXPERIMENT_MODE = 'ramp'  # << CHANGE THIS: 'ramp' or 'nonramp'
+EXPERIMENT_MODE = 'nonramp'  # << CHANGE THIS: 'ramp' or 'nonramp'
 # ─────────────────────────────────────────────────────────────────────────────
 
 _MODE_LABELS: dict = {
@@ -506,11 +506,11 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
             print(f"Filtered bottle weights (excluding zeros): {bottle_weights_filtered}")
             print(f"Number of animals included: {len(bottle_weights_filtered)}")
             avg_bottle_weight = np.mean(bottle_weights_filtered) if len(bottle_weights_filtered) > 0 else 0
-            std_bottle_weight = np.std(bottle_weights_filtered) if len(bottle_weights_filtered) > 0 else 0
+            std_bottle_weight = np.std(bottle_weights_filtered, ddof=1) if len(bottle_weights_filtered) > 1 else 0
             print(f"Bottle weight calculation: sum={np.sum(bottle_weights_filtered)}, mean={avg_bottle_weight:.2f}")
         else:
             avg_bottle_weight = np.mean(bottle_weights)
-            std_bottle_weight = np.std(bottle_weights)
+            std_bottle_weight = np.std(bottle_weights, ddof=1) if len(bottle_weights) > 1 else 0
             print(f"\nBottle weight calculation: sum={np.sum(bottle_weights)}, mean={avg_bottle_weight:.2f}")
         
         avg_total_weight = np.mean(total_weights)
@@ -523,7 +523,7 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
         # Calculate time to 50% statistics (excluding NaN values)
         time_to_50pct_valid = time_to_50pct_licks[~np.isnan(time_to_50pct_licks)]
         avg_time_to_50pct = np.mean(time_to_50pct_valid) if len(time_to_50pct_valid) > 0 else np.nan
-        std_time_to_50pct = np.std(time_to_50pct_valid) if len(time_to_50pct_valid) > 0 else np.nan
+        std_time_to_50pct = np.std(time_to_50pct_valid, ddof=1) if len(time_to_50pct_valid) > 1 else np.nan
         
         # Print detailed calculation breakdown for first-5-min percentages
         print(f"\n--- First 5-Minute Average Calculation Details ---")
@@ -537,12 +537,12 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
         print(f"Average bout % = {np.sum(first_5min_bout_pcts):.2f} / {len(first_5min_bout_pcts)} = {avg_first_5min_bout_pct:.2f}%")
         print(f"--------------------------------------------------\n")
         
-        std_licks = np.std(lick_counts)
-        std_bouts = np.std(bout_counts)
-        std_fecal = np.std(fecal_counts)
-        std_total_weight = np.std(total_weights)
-        std_first_5min_lick_pct = np.std(first_5min_lick_pcts)
-        std_first_5min_bout_pct = np.std(first_5min_bout_pcts)
+        std_licks = np.std(lick_counts, ddof=1) if len(lick_counts) > 1 else 0
+        std_bouts = np.std(bout_counts, ddof=1) if len(bout_counts) > 1 else 0
+        std_fecal = np.std(fecal_counts, ddof=1) if len(fecal_counts) > 1 else 0
+        std_total_weight = np.std(total_weights, ddof=1) if len(total_weights) > 1 else 0
+        std_first_5min_lick_pct = np.std(first_5min_lick_pcts, ddof=1) if len(first_5min_lick_pcts) > 1 else 0
+        std_first_5min_bout_pct = np.std(first_5min_bout_pcts, ddof=1) if len(first_5min_bout_pcts) > 1 else 0
         
         n = len(lick_counts)
         n_time_to_50pct = len(time_to_50pct_valid)
@@ -1853,25 +1853,25 @@ def display_weekly_averages(weekly_averages: Dict) -> str:
         lines.append("")
         lines.append("CROSS-WEEK STATISTICS:")
         lines.append(f"Licks - Mean: {np.mean(all_avg_licks):.1f}, "
-                    f"Std: {np.std(all_avg_licks):.1f}, "
+                    f"Std: {np.std(all_avg_licks, ddof=1):.1f}, "
                     f"Range: {np.min(all_avg_licks):.1f} - {np.max(all_avg_licks):.1f}")
         lines.append(f"Bouts - Mean: {np.mean(all_avg_bouts):.1f}, "
-                    f"Std: {np.std(all_avg_bouts):.1f}, "
+                    f"Std: {np.std(all_avg_bouts, ddof=1):.1f}, "
                     f"Range: {np.min(all_avg_bouts):.1f} - {np.max(all_avg_bouts):.1f}")
         lines.append(f"First 5-min Lick % - Mean: {np.mean(all_avg_first_5min_lick):.1f}%, "
-                    f"Std: {np.std(all_avg_first_5min_lick):.1f}%, "
+                    f"Std: {np.std(all_avg_first_5min_lick, ddof=1):.1f}%, "
                     f"Range: {np.min(all_avg_first_5min_lick):.1f}% - {np.max(all_avg_first_5min_lick):.1f}%")
         lines.append(f"First 5-min Bout % - Mean: {np.mean(all_avg_first_5min_bout):.1f}%, "
-                    f"Std: {np.std(all_avg_first_5min_bout):.1f}%, "
+                    f"Std: {np.std(all_avg_first_5min_bout, ddof=1):.1f}%, "
                     f"Range: {np.min(all_avg_first_5min_bout):.1f}% - {np.max(all_avg_first_5min_bout):.1f}%")
         lines.append(f"Fecal - Mean: {np.mean(all_avg_fecal):.1f}, "
-                    f"Std: {np.std(all_avg_fecal):.1f}, "
+                    f"Std: {np.std(all_avg_fecal, ddof=1):.1f}, "
                     f"Range: {np.min(all_avg_fecal):.1f} - {np.max(all_avg_fecal):.1f}")
         lines.append(f"Bottle Weight - Mean: {np.mean(all_avg_bottle):.1f}, "
-                    f"Std: {np.std(all_avg_bottle):.1f}, "
+                    f"Std: {np.std(all_avg_bottle, ddof=1):.1f}, "
                     f"Range: {np.min(all_avg_bottle):.1f} - {np.max(all_avg_bottle):.1f}")
         lines.append(f"Total Weight - Mean: {np.mean(all_avg_total):.1f}, "
-                    f"Std: {np.std(all_avg_total):.1f}, "
+                    f"Std: {np.std(all_avg_total, ddof=1):.1f}, "
                     f"Range: {np.min(all_avg_total):.1f} - {np.max(all_avg_total):.1f}")
     
     lines.append("=" * 80)
