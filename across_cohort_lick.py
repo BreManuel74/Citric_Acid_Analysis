@@ -3606,15 +3606,16 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  6. Frontloading report  -- Descriptive stats for % licks in first 5 min & time to 50%")
     print("  7. Omnibus ANOVA        -- 4 frontloading measures, BH-FDR corrected omnibus + post-hocs")
     print("  8. 2-Way Omnibus ANOVA  -- CA% x Week only (all subjects, no Sex factor)")
-    print("  9. Run all (1-8)")
+    print("  9. Frontloading plots   -- Line plots of % licks in first 5 min & time to 50% licks by cohort")
+    print(" 10. Run all (1-9)")
     print()
 
-    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-10) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '9')
+    run_all = (user_input == '10')
 
     # ------------------------------------------------------------------ #
     # Option 1: Full mixed ANOVA (CA% x Week x Sex)
@@ -3953,6 +3954,100 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             except Exception as e:
                 print(f"  [WARNING] Interaction plot failed: {e}")
                 import traceback; traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 9: Frontloading line plots (% First 5 min & Time to 50%)
+    # ------------------------------------------------------------------ #
+    if user_input == '9' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Frontloading line plots — % licks in first 5 min & time to 50%")
+            print("=" * 80)
+
+            combined_fl = combine_lick_cohorts(cohorts)
+            if 'Week' not in combined_fl.columns:
+                combined_fl = add_week_column(combined_fl)
+
+            fl_plot_dir = Path(f"0v2_lick_frontloading_plots_{timestamp}")
+            fl_plot_dir.mkdir(exist_ok=True)
+
+            _FL_MEASURES = [
+                ("First_5min_Lick_Pct",  "% Licks in First 5 min",   (0, 100)),
+                ("Time_to_50pct_Licks",  "Time to 50% Licks (min)",  (0, None)),
+            ]
+
+            _FL_COLORS = {
+                0.0: {'line': 'steelblue',  'face': 'lightblue',  'edge': 'steelblue'},
+                2.0: {'line': 'darkorange', 'face': 'moccasin',   'edge': 'darkorange'},
+            }
+            _DEFAULT_COLORS = [
+                {'line': 'steelblue',  'face': 'lightblue',  'edge': 'steelblue'},
+                {'line': 'darkorange', 'face': 'moccasin',   'edge': 'darkorange'},
+                {'line': 'darkgreen',  'face': 'lightgreen', 'edge': 'darkgreen'},
+                {'line': 'purple',     'face': 'plum',       'edge': 'purple'},
+            ]
+
+            n_fl_plots = 0
+            for col_name, y_label, (y_min, y_max) in _FL_MEASURES:
+                if col_name not in combined_fl.columns:
+                    print(f"  [WARNING] Column '{col_name}' not found — skipping plot.")
+                    continue
+                try:
+                    fig_fl, ax_fl = plt.subplots(figsize=(9, 6))
+
+                    ca_levels_fl = sorted(combined_fl['CA%'].dropna().unique())
+                    weeks_fl = sorted(combined_fl['Week'].dropna().unique())
+
+                    for idx, ca_val in enumerate(ca_levels_fl):
+                        grp = combined_fl[combined_fl['CA%'] == ca_val]
+                        wk_stats = (
+                            grp.groupby('Week')[col_name]
+                            .agg(['mean', 'sem', 'count'])
+                            .reset_index()
+                        )
+                        n_per_wk = int(wk_stats['count'].iloc[0]) if len(wk_stats) > 0 else 0
+                        c = _FL_COLORS.get(ca_val, _DEFAULT_COLORS[idx % len(_DEFAULT_COLORS)])
+                        lbl = f"{ca_val:.0f}% CA (n={n_per_wk}/week)"
+                        ax_fl.errorbar(
+                            wk_stats['Week'], wk_stats['mean'],
+                            yerr=wk_stats['sem'],
+                            label=lbl, marker='o', markersize=8,
+                            linewidth=2, capsize=5,
+                            color=c['line'],
+                            markerfacecolor=c['face'],
+                            markeredgecolor=c['edge'],
+                        )
+
+                    ax_fl.set_xlabel('Week', fontsize=12, weight='bold')
+                    ax_fl.set_ylabel(f'{y_label} (mean \u00b1 SEM)', fontsize=12, weight='bold')
+                    ax_fl.set_title(
+                        f'{y_label} Across Weeks by Cohort (mean \u00b1 SEM)',
+                        fontsize=13, weight='bold'
+                    )
+                    ax_fl.set_xticks(weeks_fl)
+                    ax_fl.set_xticklabels([str(int(w) + 1) for w in weeks_fl])
+                    ax_fl.set_ylim(bottom=y_min if y_min is not None else ax_fl.get_ylim()[0])
+                    if y_max is not None:
+                        ax_fl.set_ylim(top=y_max)
+                    ax_fl.legend(loc='best', fontsize=10)
+                    ax_fl.spines['top'].set_visible(False)
+                    ax_fl.spines['right'].set_visible(False)
+                    ax_fl.tick_params(direction='in', which='both', length=5)
+                    fig_fl.tight_layout()
+
+                    svg_path = fl_plot_dir / f"frontloading_{col_name}.svg"
+                    fig_fl.savefig(svg_path, format='svg', dpi=200, bbox_inches='tight')
+                    plt.close(fig_fl)
+                    print(f"[OK] Saved -> {svg_path}")
+                    n_fl_plots += 1
+                except Exception as e:
+                    print(f"  [WARNING] Plot for {col_name} failed: {e}")
+                    import traceback; traceback.print_exc()
+
+            if n_fl_plots:
+                print(f"\n[OK] {n_fl_plots} frontloading plot(s) saved -> {fl_plot_dir}")
 
     print("\n" + "=" * 80)
     print("0% vs 2% lick analysis complete.")
