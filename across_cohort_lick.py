@@ -2131,6 +2131,1199 @@ def generate_lick_frontloading_descriptives_report(
 
 
 # =============================================================================
+# OMNIBUS LICK ANOVA (4 MEASURES, BH-FDR CORRECTED)
+# =============================================================================
+
+# Measures included in the omnibus analysis
+_OMNIBUS_MEASURES = ["Total_Licks", "Total_Bouts", "First_5min_Lick_Pct", "Time_to_50pct_Licks"]
+_OMNIBUS_MEASURE_LABELS = {
+    "Total_Licks":         "Total Licks",
+    "Total_Bouts":         "Total Lick Bouts",
+    "First_5min_Lick_Pct": "% Licks in First 5 min",
+    "Time_to_50pct_Licks": "Time to 50% Licks (min)",
+}
+
+
+def _bonferroni_paired_ttests(data: pd.DataFrame, measure: str, within: str, subject: str) -> pd.DataFrame:
+    """All-pairwise Bonferroni-corrected paired t-tests across levels of a within-subjects factor.
+
+    Parameters
+    ----------
+    data     : long-format DataFrame (one row per subject × within-level)
+    measure  : dependent variable column name
+    within   : within-subjects factor column (e.g. 'Week')
+    subject  : subject ID column
+
+    Returns
+    -------
+    DataFrame with columns: A, B, t, df, p_raw, p_bonferroni, significant
+    """
+    levels = sorted(data[within].unique())
+    pairs = [(a, b) for i, a in enumerate(levels) for b in levels[i+1:]]
+    n_comparisons = len(pairs)
+    rows = []
+    for a, b in pairs:
+        vals_a = data[data[within] == a].set_index(subject)[measure]
+        vals_b = data[data[within] == b].set_index(subject)[measure]
+        common = vals_a.index.intersection(vals_b.index)
+        if len(common) < 2:
+            rows.append({within+'_A': a, within+'_B': b, 't': np.nan, 'df': np.nan,
+                         'p_raw': np.nan, 'p_bonferroni': np.nan, 'significant': False})
+            continue
+        d_a = vals_a.loc[common].values
+        d_b = vals_b.loc[common].values
+        t_stat, p_raw = stats.ttest_rel(d_a, d_b)
+        df_val = len(common) - 1
+        p_bonf = min(p_raw * n_comparisons, 1.0)
+        rows.append({within+'_A': a, within+'_B': b,
+                     't': round(t_stat, 4), 'df': df_val,
+                     'p_raw': round(p_raw, 6), 'p_bonferroni': round(p_bonf, 6),
+                     'significant': p_bonf < 0.05})
+    return pd.DataFrame(rows)
+
+
+def _tukey_between(data: pd.DataFrame, measure: str, factor: str) -> Optional[object]:
+    """Tukey HSD post-hoc for a between-subjects factor.
+
+    Returns statsmodels TukeyHSDResults object, or None on failure.
+    """
+    try:
+        groups = data[factor].astype(str)
+        result = pairwise_tukeyhsd(endog=data[measure].values, groups=groups.values, alpha=0.05)
+        return result
+    except Exception as e:
+        print(f"  [WARNING] Tukey HSD failed for {factor}: {e}")
+        return None
+
+
+def _bh_fdr(p_values: List[float]) -> List[float]:
+    """Benjamini-Hochberg FDR correction. Returns adjusted p-values in original order."""
+    n = len(p_values)
+    if n == 0:
+        return []
+    order = np.argsort(p_values)
+    ranked = np.empty(n)
+    ranked[order] = np.arange(1, n + 1)
+    adjusted = np.array(p_values) * n / ranked
+    # Enforce monotonicity from the right
+    for i in range(n - 2, -1, -1):
+        adjusted[order[i]] = min(adjusted[order[i]], adjusted[order[i + 1]])
+    return [float(min(v, 1.0)) for v in adjusted]
+
+
+def perform_omnibus_lick_anova(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    measures: Optional[List[str]] = None,
+    time_points: Optional[List[int]] = None,
+) -> Dict:
+    """Omnibus 3-way mixed ANOVA across lick measures with BH-FDR correction.
+
+    Design for each measure:
+      - CA% (between-subjects)
+      - Sex (between-subjects)
+      - Week (within-subjects / repeated measures)
+
+    Post-hoc procedure:
+      - Significant CA% or Sex main effect → Tukey HSD on animal-level means
+      - Significant Week main effect → Bonferroni all-pairwise paired t-tests across weeks
+      - Significant interaction involving Week → Bonferroni pairwise paired t-tests
+        within each between-group cell
+
+    BH-FDR is applied across the omnibus Week F-tests of the 4 measures (matching the
+    within-measures multiple-comparisons family). Between-factor F-tests are corrected
+    within their own family of 4.
+
+    Returns
+    -------
+    dict keyed by measure name, each containing:
+      'anova'       : raw results dict from perform_cross_cohort_lick_anova
+      'posthoc_week': DataFrame of Bonferroni paired t-tests across weeks (if Week sig)
+      'posthoc_ca'  : Tukey results for CA% (if CA% sig)
+      'posthoc_sex' : Tukey results for Sex (if Sex sig)
+      'fdr_week_p'  : BH-corrected p for the Week F-test
+      'fdr_ca_p'    : BH-corrected p for the CA% F-test
+      'fdr_sex_p'   : BH-corrected p for the Sex F-test
+      'analysis_df' : the prepared long-format DataFrame used for this measure
+    """
+    if measures is None:
+        measures = _OMNIBUS_MEASURES
+
+    if not HAS_PINGOUIN:
+        print("[ERROR] pingouin not installed. Cannot run omnibus ANOVA.")
+        return {}
+
+    print("\n" + "=" * 80)
+    print("OMNIBUS LICK ANOVA — 4 MEASURES, BH-FDR CORRECTED")
+    print("=" * 80)
+    print(f"Measures: {measures}")
+    print("Design  : CA% (between) × Sex (between) × Week (within)")
+
+    combined_df = combine_lick_cohorts(cohort_dfs)
+    if 'Week' not in combined_df.columns:
+        combined_df = add_week_column(combined_df)
+
+    all_results: Dict = {}
+    week_p_values: List[float] = []
+    ca_p_values:   List[float] = []
+    sex_p_values:  List[float] = []
+
+    # ------------------------------------------------------------------ #
+    # Pass 1: run ANOVAs and collect omnibus p-values for FDR
+    # ------------------------------------------------------------------ #
+    for measure in measures:
+        print(f"\n{'─'*60}")
+        print(f"  ANOVA: {_OMNIBUS_MEASURE_LABELS.get(measure, measure)}")
+        print(f"{'─'*60}")
+
+        if measure not in combined_df.columns:
+            print(f"  [WARNING] Column '{measure}' not found — skipping.")
+            all_results[measure] = {'error': f'Column {measure} not found'}
+            week_p_values.append(np.nan)
+            ca_p_values.append(np.nan)
+            sex_p_values.append(np.nan)
+            continue
+
+        # Subset to non-NaN rows (handles Time_to_50pct_Licks exclusions)
+        req_cols = ['ID', 'Week', 'Sex', 'CA%', measure]
+        adf = combined_df[req_cols].dropna().copy()
+
+        if time_points is not None:
+            adf = adf[adf['Week'].isin(time_points)]
+
+        tp = sorted(adf['Week'].unique())
+
+        try:
+            # Pingouin requires complete cases for mixed ANOVA; drop animals with
+            # missing weeks for this measure
+            counts = adf.groupby('ID')['Week'].nunique()
+            n_weeks = len(tp)
+            complete_ids = counts[counts == n_weeks].index
+            adf_complete = adf[adf['ID'].isin(complete_ids)].copy()
+
+            n_dropped = adf['ID'].nunique() - len(complete_ids)
+            if n_dropped > 0:
+                print(f"  [INFO] {n_dropped} animal(s) excluded (incomplete weeks for {measure})")
+
+            if adf_complete['CA%'].nunique() < 2 or adf_complete['ID'].nunique() < 4:
+                raise ValueError("Insufficient subjects for mixed ANOVA")
+
+            # Combined between factor for true 3-way (pingouin only supports 1 between)
+            adf_complete['CA_Sex'] = (adf_complete['CA%'].astype(str) + '_'
+                                      + adf_complete['Sex'].astype(str))
+
+            tbl_combined = pg.mixed_anova(data=adf_complete, dv=measure,
+                                          within='Week', subject='ID',
+                                          between='CA_Sex')
+
+            tbl_ca  = pg.mixed_anova(data=adf_complete, dv=measure,
+                                     within='Week', subject='ID',
+                                     between='CA%')
+
+            tbl_sex = pg.mixed_anova(data=adf_complete, dv=measure,
+                                     within='Week', subject='ID',
+                                     between='Sex')
+
+            def _get(tbl, src):
+                row = tbl[tbl['Source'] == src]
+                if row.empty:
+                    return np.nan, np.nan, np.nan
+                r = row.iloc[0]
+                return float(r.get('F', np.nan)), float(r.get('p-unc', np.nan)), float(r.get('np2', np.nan))
+
+            week_F,    week_p,    week_np2    = _get(tbl_ca,  'Week')
+            ca_F,      ca_p,      ca_np2      = _get(tbl_ca,  'CA%')
+            sex_F,     sex_p,     sex_np2     = _get(tbl_sex, 'Sex')
+            wk_ca_F,   wk_ca_p,   wk_ca_np2  = _get(tbl_ca,  'Interaction')
+            wk_sex_F,  wk_sex_p,  wk_sex_np2 = _get(tbl_sex, 'Interaction')
+            grp_F,     grp_p,     grp_np2    = _get(tbl_combined, 'CA_Sex')
+            wk_grp_F,  wk_grp_p,  wk_grp_np2 = _get(tbl_combined, 'Interaction')
+
+            week_p_values.append(week_p)
+            ca_p_values.append(ca_p)
+            sex_p_values.append(sex_p)
+
+            all_results[measure] = {
+                'measure': measure,
+                'analysis_df': adf_complete,
+                'weeks': tp,
+                'n_subjects': adf_complete['ID'].nunique(),
+                'n_dropped': n_dropped,
+                'tbl_combined': tbl_combined,
+                'tbl_ca': tbl_ca,
+                'tbl_sex': tbl_sex,
+                'week_F': week_F,  'week_p': week_p,   'week_np2': week_np2,
+                'ca_F':   ca_F,    'ca_p':   ca_p,     'ca_np2':   ca_np2,
+                'sex_F':  sex_F,   'sex_p':  sex_p,    'sex_np2':  sex_np2,
+                'wk_ca_F': wk_ca_F, 'wk_ca_p': wk_ca_p, 'wk_ca_np2': wk_ca_np2,
+                'wk_sex_F': wk_sex_F, 'wk_sex_p': wk_sex_p, 'wk_sex_np2': wk_sex_np2,
+                'grp_F': grp_F, 'grp_p': grp_p, 'grp_np2': grp_np2,
+                'wk_grp_F': wk_grp_F, 'wk_grp_p': wk_grp_p, 'wk_grp_np2': wk_grp_np2,
+            }
+
+        except Exception as e:
+            print(f"  [ERROR] ANOVA failed for {measure}: {e}")
+            import traceback; traceback.print_exc()
+            all_results[measure] = {'error': str(e)}
+            week_p_values.append(np.nan)
+            ca_p_values.append(np.nan)
+            sex_p_values.append(np.nan)
+
+    # ------------------------------------------------------------------ #
+    # BH-FDR correction across the 4 omnibus F-test families
+    # ------------------------------------------------------------------ #
+    valid_week_p = [p if not np.isnan(p) else 1.0 for p in week_p_values]
+    valid_ca_p   = [p if not np.isnan(p) else 1.0 for p in ca_p_values]
+    valid_sex_p  = [p if not np.isnan(p) else 1.0 for p in sex_p_values]
+
+    fdr_week = _bh_fdr(valid_week_p)
+    fdr_ca   = _bh_fdr(valid_ca_p)
+    fdr_sex  = _bh_fdr(valid_sex_p)
+
+    for i, measure in enumerate(measures):
+        if measure not in all_results or 'error' in all_results[measure]:
+            continue
+        all_results[measure]['fdr_week_p'] = fdr_week[i]
+        all_results[measure]['fdr_ca_p']   = fdr_ca[i]
+        all_results[measure]['fdr_sex_p']  = fdr_sex[i]
+
+    # ------------------------------------------------------------------ #
+    # Pass 2: post-hoc tests (driven by FDR-corrected omnibus significance)
+    # ------------------------------------------------------------------ #
+    for measure in measures:
+        r = all_results.get(measure, {})
+        if 'error' in r:
+            continue
+
+        adf = r['analysis_df']
+        tp  = r['weeks']
+
+        # --- Week post-hoc: Bonferroni all-pairwise paired t-tests ----------
+        week_sig = r.get('fdr_week_p', 1.0) < 0.05 or r.get('wk_ca_p', 1.0) < 0.05 or r.get('wk_sex_p', 1.0) < 0.05
+        if week_sig and len(tp) > 1:
+            print(f"\n  Post-hoc (Week, Bonferroni): {_OMNIBUS_MEASURE_LABELS.get(measure, measure)}")
+            ph = _bonferroni_paired_ttests(adf, measure, 'Week', 'ID')
+            r['posthoc_week'] = ph
+
+        # --- CA% post-hoc: Tukey on animal-level means ----------------------
+        if r.get('fdr_ca_p', 1.0) < 0.05:
+            print(f"  Post-hoc (CA%, Tukey): {_OMNIBUS_MEASURE_LABELS.get(measure, measure)}")
+            animal_means = adf.groupby(['ID', 'CA%'])[measure].mean().reset_index()
+            r['posthoc_ca'] = _tukey_between(animal_means, measure, 'CA%')
+
+        # --- Sex post-hoc: Tukey on animal-level means -----------------------
+        if r.get('fdr_sex_p', 1.0) < 0.05:
+            print(f"  Post-hoc (Sex, Tukey): {_OMNIBUS_MEASURE_LABELS.get(measure, measure)}")
+            animal_means = adf.groupby(['ID', 'Sex'])[measure].mean().reset_index()
+            r['posthoc_sex'] = _tukey_between(animal_means, measure, 'Sex')
+
+        # --- Interaction cell post-hocs: Bonferroni within each cell --------
+        cell_posthocs = {}
+        if r.get('wk_ca_p', 1.0) < 0.05:
+            for ca_val in sorted(adf['CA%'].unique()):
+                cell_df = adf[adf['CA%'] == ca_val]
+                ph = _bonferroni_paired_ttests(cell_df, measure, 'Week', 'ID')
+                cell_posthocs[f'CA%={ca_val}'] = ph
+        if r.get('wk_sex_p', 1.0) < 0.05:
+            for sex_val in sorted(adf['Sex'].unique()):
+                cell_df = adf[adf['Sex'] == sex_val]
+                ph = _bonferroni_paired_ttests(cell_df, measure, 'Week', 'ID')
+                cell_posthocs[f'Sex={sex_val}'] = ph
+        if cell_posthocs:
+            r['posthoc_week_cells'] = cell_posthocs
+
+    # Store ordered measure list for report use
+    all_results['_measures'] = measures
+    return all_results
+
+
+# =============================================================================
+# OMNIBUS LICK REPORT
+# =============================================================================
+
+def generate_omnibus_lick_report(
+    omnibus_results: Dict,
+    cohort_dfs: Optional[Dict[str, pd.DataFrame]] = None,
+    save_path: Optional[Path] = None,
+) -> str:
+    """Generate a comprehensive omnibus lick ANOVA report with post-hocs.
+
+    Parameters
+    ----------
+    omnibus_results : output of perform_omnibus_lick_anova
+    cohort_dfs      : original cohort DataFrames (for cohort summary header)
+    save_path       : if provided, write the report to this file
+
+    Returns
+    -------
+    Report as a string
+    """
+    measures = omnibus_results.get('_measures', _OMNIBUS_MEASURES)
+
+    def _sig(p: float) -> str:
+        if np.isnan(p): return 'n/a'
+        if p < 0.001:   return '***'
+        if p < 0.01:    return '**'
+        if p < 0.05:    return '*'
+        return 'ns'
+
+    def _fmt_p(p: float) -> str:
+        if np.isnan(p): return 'n/a'
+        if p < 0.0001:  return '< 0.0001'
+        return f'{p:.4f}'
+
+    def _dec(p, fdr_p=None):
+        chk = fdr_p if (fdr_p is not None and not np.isnan(fdr_p)) else p
+        if np.isnan(chk): return 'n/a'
+        return 'SIGNIFICANT' if chk < 0.05 else 'NOT SIGNIFICANT'
+
+    def _ef(np2):
+        if np.isnan(np2): return ''
+        return f', ηp²={np2:.3f}'
+
+    def _df_from_tbl(tbl, src):
+        if tbl is None: return '?', '?'
+        row = tbl[tbl['Source'] == src]
+        if row.empty: return '?', '?'
+        rv = row.iloc[0]
+        return int(rv.get('DF1', 0)), int(rv.get('DF2', 0))
+
+    lines = []
+    lines += ['=' * 80,
+              'OMNIBUS LICK ANOVA REPORT',
+              '=' * 80,
+              f'Generated : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+              f'Measures  : {", ".join(_OMNIBUS_MEASURE_LABELS.get(m, m) for m in measures)}',
+              f'Design    : CA% (between) × Sex (between) × Week (within)',
+              f'Post-hocs : Tukey HSD for between-subjects; Bonferroni paired t-tests for within',
+              f'Correction: BH-FDR across omnibus F-tests within each factor family (n={len(measures)})',
+              '']
+
+    # Cohort summary
+    if cohort_dfs is not None:
+        lines += ['COHORT SUMMARY', '-' * 40]
+        for label, df in cohort_dfs.items():
+            n_a = df['ID'].nunique() if 'ID' in df.columns else len(df)
+            ca  = df['CA%'].iloc[0] if 'CA%' in df.columns else '?'
+            sex_counts = (df.drop_duplicates('ID')['Sex'].value_counts().to_dict()
+                          if 'Sex' in df.columns and 'ID' in df.columns else {})
+            sex_str = ', '.join(f'{s}: {n}' for s, n in sorted(sex_counts.items()))
+            lines.append(f'  {label}: {n_a} animals (CA% = {ca}){(", " + sex_str) if sex_str else ""}')
+        lines.append('')
+
+    # ------------------------------------------------------------------ #
+    # BH-FDR summary table
+    # ------------------------------------------------------------------ #
+    lines += ['=' * 80,
+              'BH-FDR CORRECTED OMNIBUS P-VALUES (α = 0.05)',
+              '=' * 80,
+              f'{"Measure":<32} {"Week (raw)":>12} {"Week (FDR)":>12} {"CA% (raw)":>12} '
+              f'{"CA% (FDR)":>12} {"Sex (raw)":>12} {"Sex (FDR)":>12}']
+    lines.append('-' * 96)
+    for m in measures:
+        r = omnibus_results.get(m, {})
+        if 'error' in r:
+            lines.append(f'  {_OMNIBUS_MEASURE_LABELS.get(m,m):<30} ERROR: {r["error"]}')
+            continue
+        label = _OMNIBUS_MEASURE_LABELS.get(m, m)
+        lines.append(
+            f'  {label:<30} '
+            f'{_fmt_p(r.get("week_p", np.nan)):>12} '
+            f'{_fmt_p(r.get("fdr_week_p", np.nan)):>12} '
+            f'{_fmt_p(r.get("ca_p", np.nan)):>12} '
+            f'{_fmt_p(r.get("fdr_ca_p", np.nan)):>12} '
+            f'{_fmt_p(r.get("sex_p", np.nan)):>12} '
+            f'{_fmt_p(r.get("fdr_sex_p", np.nan)):>12} '
+        )
+    lines.append('')
+
+    # ------------------------------------------------------------------ #
+    # Per-measure detailed sections
+    # ------------------------------------------------------------------ #
+    for m in measures:
+        r = omnibus_results.get(m, {})
+        label = _OMNIBUS_MEASURE_LABELS.get(m, m)
+        divider = '━' * 80
+        lines += ['', divider, f'  MEASURE: {label}', divider]
+
+        if 'error' in r:
+            lines.append(f'  ERROR: {r["error"]}')
+            continue
+
+        lines += [f'  N subjects (complete cases): {r.get("n_subjects", "?")}',
+                  f'  Animals dropped (incomplete weeks): {r.get("n_dropped", 0)}',
+                  f'  Weeks analyzed: {r.get("weeks", "?")}',
+                  '']
+
+        # Descriptive stats — per group (CA% × Sex), collapsed across weeks
+        adf = r.get('analysis_df')
+        if adf is not None:
+            lines += ['  DESCRIPTIVE STATISTICS (by CA% × Sex, collapsed across weeks)',
+                      '  ' + '-' * 70]
+            for (ca_val, sex_val), grp in adf.groupby(['CA%', 'Sex'])[m]:
+                n    = len(grp)
+                mn   = grp.mean()
+                sd   = grp.std(ddof=1) if n > 1 else np.nan
+                se   = sd / np.sqrt(n) if n > 1 else np.nan
+                ci_lo = mn - 1.96 * se if not np.isnan(se) else np.nan
+                ci_hi = mn + 1.96 * se if not np.isnan(se) else np.nan
+                ci_str = f'[{ci_lo:.2f}, {ci_hi:.2f}]' if not np.isnan(ci_lo) else 'n/a'
+                lines.append(f'    CA%={ca_val:.0f}%, Sex={sex_val}: '
+                              f'n={n}, M={mn:.2f}, SD={sd:.2f}, SEM={se:.2f}, 95% CI {ci_str}')
+            lines.append('')
+
+        # Print the pingouin ANOVA tables
+        tbl_ca  = r.get('tbl_ca')
+        tbl_sex = r.get('tbl_sex')
+        for tbl_label, tbl in [('CA% × Week', tbl_ca), ('Sex × Week', tbl_sex)]:
+            if tbl is not None:
+                lines += [f'  ANOVA TABLE ({tbl_label} mixed ANOVA)',
+                          '  ' + '-' * 70]
+                disp_cols = [c for c in ['Source', 'DF1', 'DF2', 'F', 'p-unc',
+                                          'p-GG-corr', 'np2', 'eps'] if c in tbl.columns]
+                for ln in tbl[disp_cols].to_string(index=False).split('\n'):
+                    lines.append('  ' + ln)
+                lines.append('')
+
+        # Interpretation block
+        fdr_w    = r.get('fdr_week_p', np.nan)
+        fdr_c    = r.get('fdr_ca_p',   np.nan)
+        fdr_s    = r.get('fdr_sex_p',  np.nan)
+        wk_ca_p  = r.get('wk_ca_p',   np.nan)
+        wk_sex_p = r.get('wk_sex_p',  np.nan)
+        wk_df1,   wk_df2   = _df_from_tbl(tbl_ca,  'Week')
+        ca_df1,   ca_df2   = _df_from_tbl(tbl_ca,  'CA%')
+        sex_df1,  sex_df2  = _df_from_tbl(tbl_sex, 'Sex')
+        wkca_df1, wkca_df2 = _df_from_tbl(tbl_ca,  'Interaction')
+        wksx_df1, wksx_df2 = _df_from_tbl(tbl_sex, 'Interaction')
+
+        # Check whether GG correction was applied to Week (within-subjects)
+        _wk_gg_p = np.nan
+        if tbl_ca is not None and 'p-GG-corr' in tbl_ca.columns:
+            _wk_row = tbl_ca[tbl_ca['Source'] == 'Week']
+            if not _wk_row.empty:
+                _wk_gg_p = float(_wk_row.iloc[0].get('p-GG-corr', np.nan))
+        _wk_p_show = _wk_gg_p if not np.isnan(_wk_gg_p) else r.get('week_p', np.nan)
+        _wk_p_lbl  = 'p (GG-corr)' if not np.isnan(_wk_gg_p) else 'p'
+
+        lines += ['  INTERPRETATION', '  ' + '-' * 70]
+        lines.append(
+            f'  1. Week: {_dec(r.get("week_p", np.nan), fdr_w)}\n'
+            f'     F({wk_df1}, {wk_df2}) = {r.get("week_F", np.nan):.2f}, '
+            f'{_wk_p_lbl} = {_fmt_p(_wk_p_show)}, '
+            f'p_FDR = {_fmt_p(fdr_w)} {_sig(fdr_w)}'
+            f'{_ef(r.get("week_np2", np.nan))}'
+        )
+        lines.append(
+            f'  2. CA%: {_dec(r.get("ca_p", np.nan), fdr_c)}\n'
+            f'     F({ca_df1}, {ca_df2}) = {r.get("ca_F", np.nan):.2f}, '
+            f'p = {_fmt_p(r.get("ca_p", np.nan))}, '
+            f'p_FDR = {_fmt_p(fdr_c)} {_sig(fdr_c)}'
+            f'{_ef(r.get("ca_np2", np.nan))}'
+        )
+        lines.append(
+            f'  3. Sex: {_dec(r.get("sex_p", np.nan), fdr_s)}\n'
+            f'     F({sex_df1}, {sex_df2}) = {r.get("sex_F", np.nan):.2f}, '
+            f'p = {_fmt_p(r.get("sex_p", np.nan))}, '
+            f'p_FDR = {_fmt_p(fdr_s)} {_sig(fdr_s)}'
+            f'{_ef(r.get("sex_np2", np.nan))}'
+        )
+        lines.append(
+            f'  4. Week × CA%: {"SIGNIFICANT" if (not np.isnan(wk_ca_p) and wk_ca_p < 0.05) else "NOT SIGNIFICANT"}\n'
+            f'     F({wkca_df1}, {wkca_df2}) = {r.get("wk_ca_F", np.nan):.2f}, '
+            f'p = {_fmt_p(wk_ca_p)} {_sig(wk_ca_p)}'
+            f'{_ef(r.get("wk_ca_np2", np.nan))}'
+        )
+        lines.append(
+            f'  5. Week × Sex: {"SIGNIFICANT" if (not np.isnan(wk_sex_p) and wk_sex_p < 0.05) else "NOT SIGNIFICANT"}\n'
+            f'     F({wksx_df1}, {wksx_df2}) = {r.get("wk_sex_F", np.nan):.2f}, '
+            f'p = {_fmt_p(wk_sex_p)} {_sig(wk_sex_p)}'
+            f'{_ef(r.get("wk_sex_np2", np.nan))}'
+        )
+        lines.append('')
+
+        # Post-hoc: Week (overall Bonferroni)
+        if 'posthoc_week' in r:
+            ph = r['posthoc_week']
+            wcol_a = 'Week_A' if 'Week_A' in ph.columns else ph.columns[0]
+            wcol_b = 'Week_B' if 'Week_B' in ph.columns else ph.columns[1]
+            lines += ['  POST-HOC: Week (all-pairwise Bonferroni paired t-tests)',
+                      '  ' + '-' * 60,
+                      f'  {"Week A":>8} {"Week B":>8} {"t":>8} {"df":>6} '
+                      f'{"p_raw":>12} {"p_bonf":>12} {"sig":>5}']
+            for _, row in ph.iterrows():
+                sig_marker = '*' if row['significant'] else ''
+                lines.append(
+                    f'  {str(int(row[wcol_a])):>8} {str(int(row[wcol_b])):>8} '
+                    f'{row["t"]:>8.3f} {int(row["df"]):>6} '
+                    f'{_fmt_p(row["p_raw"]):>12} {_fmt_p(row["p_bonferroni"]):>12} {sig_marker:>5}')
+            lines.append('')
+
+        _tukey_note = '  (reject=True means the groups differ significantly at FWER=0.05)'
+
+        # Post-hoc: CA% (Tukey)
+        if 'posthoc_ca' in r and r['posthoc_ca'] is not None:
+            lines += ['  POST-HOC: CA% (Tukey HSD on animal means)',
+                      '  ' + '-' * 60,
+                      str(r['posthoc_ca']),
+                      _tukey_note, '']
+
+        # Post-hoc: Sex (Tukey)
+        if 'posthoc_sex' in r and r['posthoc_sex'] is not None:
+            lines += ['  POST-HOC: Sex (Tukey HSD on animal means)',
+                      '  ' + '-' * 60,
+                      str(r['posthoc_sex']),
+                      _tukey_note, '']
+
+        # Cell post-hocs (interaction decomposition)
+        if 'posthoc_week_cells' in r:
+            for cell_label, ph in r['posthoc_week_cells'].items():
+                wcol_a = [c for c in ph.columns if c.endswith('_A')][0]
+                wcol_b = [c for c in ph.columns if c.endswith('_B')][0]
+                lines += [f'  POST-HOC INTERACTION CELL: {cell_label} — '
+                           f'Week pairwise (Bonferroni paired t-tests)',
+                           '  ' + '-' * 60,
+                           f'  {"Week A":>8} {"Week B":>8} {"t":>8} {"df":>6} '
+                           f'{"p_raw":>12} {"p_bonf":>12} {"sig":>5}']
+                for _, row in ph.iterrows():
+                    sig_marker = '*' if row['significant'] else ''
+                    lines.append(
+                        f'  {str(int(row[wcol_a])):>8} {str(int(row[wcol_b])):>8} '
+                        f'{row["t"]:>8.3f} {int(row["df"]):>6} '
+                        f'{_fmt_p(row["p_raw"]):>12} {_fmt_p(row["p_bonferroni"]):>12} {sig_marker:>5}')
+                lines.append('')
+
+    # ------------------------------------------------------------------ #
+    # Summary table
+    # ------------------------------------------------------------------ #
+    def _star(p): return '*' if (not np.isnan(p) and p < 0.05) else ' '
+    lines += ['', '=' * 80,
+              'SUMMARY TABLE — BH-FDR CORRECTED OMNIBUS RESULTS',
+              '=' * 80,
+              '  * = significant at α = 0.05 after BH-FDR correction (main effects);'
+              ' raw p for interactions',
+              '',
+              f'  {"Measure":<32} {"Week(FDR)":>12} {"CA%(FDR)":>12} {"Sex(FDR)":>12}'
+              f' {"Wk×CA%":>10} {"Wk×Sex":>10}  Decision']
+    lines.append('  ' + '-' * 95)
+    for m in measures:
+        r = omnibus_results.get(m, {})
+        if 'error' in r:
+            lines.append(f'  {_OMNIBUS_MEASURE_LABELS.get(m,m):<32} ERROR')
+            continue
+        fw  = r.get('fdr_week_p', np.nan)
+        fc  = r.get('fdr_ca_p',   np.nan)
+        fs  = r.get('fdr_sex_p',  np.nan)
+        wca = r.get('wk_ca_p',    np.nan)
+        wsx = r.get('wk_sex_p',   np.nan)
+        sigs = []
+        if not np.isnan(fw)  and fw  < 0.05: sigs.append('Week')
+        if not np.isnan(fc)  and fc  < 0.05: sigs.append('CA%')
+        if not np.isnan(fs)  and fs  < 0.05: sigs.append('Sex')
+        if not np.isnan(wca) and wca < 0.05: sigs.append('Wk×CA%')
+        if not np.isnan(wsx) and wsx < 0.05: sigs.append('Wk×Sex')
+        decision = ', '.join(sigs) if sigs else 'no significant effects'
+        lines.append(
+            f'  {_OMNIBUS_MEASURE_LABELS.get(m,m):<32} '
+            f'{_fmt_p(fw):>12}{_star(fw)} '
+            f'{_fmt_p(fc):>12}{_star(fc)} '
+            f'{_fmt_p(fs):>12}{_star(fs)} '
+            f'{_fmt_p(wca):>10}{_star(wca)} '
+            f'{_fmt_p(wsx):>10}{_star(wsx)}  {decision}'
+        )
+    lines += ['', '=' * 80, 'END OF OMNIBUS REPORT', '=' * 80]
+    report = '\n'.join(lines)
+
+    if save_path is not None:
+        try:
+            save_path.write_text(report, encoding='utf-8')
+            print(f'\n[OK] Omnibus report saved -> {save_path}')
+        except Exception as e:
+            print(f'[WARNING] Could not save report: {e}')
+
+    return report
+
+
+# =============================================================================
+# STRATIFIED OMNIBUS ANALYSES
+# =============================================================================
+
+def perform_omnibus_lick_anova_sex_stratified(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    sex: str,
+    measures: Optional[List[str]] = None,
+    time_points: Optional[List[int]] = None,
+) -> Dict:
+    """Omnibus sex-stratified lick ANOVA: Week (within) × CA% (between) for one sex.
+
+    Runs all 4 measures, applies BH-FDR across the 4 Week and 4 CA% omnibus F-tests.
+    Post-hocs: Bonferroni paired t-tests for Week; Tukey for CA%.
+    """
+    if measures is None:
+        measures = _OMNIBUS_MEASURES
+    if not HAS_PINGOUIN:
+        print("[ERROR] pingouin not installed.")
+        return {}
+
+    sex_label = 'Males' if sex == 'M' else 'Females'
+    print(f"\n{'='*80}")
+    print(f"SEX-STRATIFIED OMNIBUS LICK ANOVA ({sex_label.upper()})")
+    print(f"{'='*80}")
+
+    combined_df = combine_lick_cohorts(cohort_dfs)
+    if 'Week' not in combined_df.columns:
+        combined_df = add_week_column(combined_df)
+    combined_df = combined_df[combined_df['Sex'] == sex]
+
+    all_results: Dict = {}
+    week_ps: List[float] = []
+    ca_ps: List[float] = []
+
+    for measure in measures:
+        if measure not in combined_df.columns:
+            all_results[measure] = {'error': f'Column {measure} not found'}
+            week_ps.append(np.nan); ca_ps.append(np.nan)
+            continue
+
+        adf = combined_df[['ID', 'Week', 'Sex', 'CA%', measure]].dropna().copy()
+        if time_points is not None:
+            adf = adf[adf['Week'].isin(time_points)]
+        tp = sorted(adf['Week'].unique())
+
+        n_weeks = len(tp)
+        counts = adf.groupby('ID')['Week'].nunique()
+        complete_ids = counts[counts == n_weeks].index
+        adf = adf[adf['ID'].isin(complete_ids)].copy()
+        n_dropped = combined_df['ID'].nunique() - len(complete_ids) if len(complete_ids) else 0
+
+        try:
+            tbl = pg.mixed_anova(data=adf, dv=measure, within='Week',
+                                 subject='ID', between='CA%')
+
+            def _get(src):
+                row = tbl[tbl['Source'] == src]
+                if row.empty: return np.nan, np.nan, np.nan
+                r = row.iloc[0]
+                return float(r.get('F', np.nan)), float(r.get('p-unc', np.nan)), float(r.get('np2', np.nan))
+
+            wF, wP, wNP2 = _get('Week')
+            cF, cP, cNP2 = _get('CA%')
+            iF, iP, iNP2 = _get('Interaction')
+
+            week_ps.append(wP); ca_ps.append(cP)
+            all_results[measure] = {
+                'measure': measure, 'sex': sex, 'analysis_df': adf, 'weeks': tp,
+                'n_subjects': len(complete_ids), 'n_dropped': n_dropped,
+                'anova_table': tbl,
+                'week_F': wF, 'week_p': wP, 'week_np2': wNP2,
+                'ca_F': cF,   'ca_p':   cP, 'ca_np2':   cNP2,
+                'int_F': iF,  'int_p':  iP, 'int_np2':  iNP2,
+            }
+        except Exception as e:
+            print(f"  [ERROR] ANOVA failed for {measure} ({sex_label}): {e}")
+            all_results[measure] = {'error': str(e)}
+            week_ps.append(np.nan); ca_ps.append(np.nan)
+
+    # BH-FDR
+    fdr_w = _bh_fdr([p if not np.isnan(p) else 1.0 for p in week_ps])
+    fdr_c = _bh_fdr([p if not np.isnan(p) else 1.0 for p in ca_ps])
+
+    for i, m in enumerate(measures):
+        if 'error' not in all_results.get(m, {'error': ''}):
+            all_results[m]['fdr_week_p'] = fdr_w[i]
+            all_results[m]['fdr_ca_p']   = fdr_c[i]
+
+    # Post-hocs
+    for m in measures:
+        r = all_results.get(m, {})
+        if 'error' in r: continue
+        adf = r['analysis_df']
+        tp  = r['weeks']
+        if (r.get('fdr_week_p', 1.0) < 0.05 or r.get('int_p', 1.0) < 0.05) and len(tp) > 1:
+            r['posthoc_week'] = _bonferroni_paired_ttests(adf, m, 'Week', 'ID')
+        if r.get('fdr_ca_p', 1.0) < 0.05:
+            am = adf.groupby(['ID', 'CA%'])[m].mean().reset_index()
+            r['posthoc_ca'] = _tukey_between(am, m, 'CA%')
+        if r.get('int_p', 1.0) < 0.05:
+            cell_ph = {}
+            for ca_val in sorted(adf['CA%'].unique()):
+                ph = _bonferroni_paired_ttests(adf[adf['CA%'] == ca_val], m, 'Week', 'ID')
+                cell_ph[f'CA%={ca_val}'] = ph
+            r['posthoc_week_cells'] = cell_ph
+
+    all_results['_measures'] = measures
+    all_results['_sex'] = sex
+    return all_results
+
+
+def perform_omnibus_lick_anova_ca_stratified(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    ca_percent: float,
+    measures: Optional[List[str]] = None,
+    time_points: Optional[List[int]] = None,
+) -> Dict:
+    """Omnibus CA%-stratified lick ANOVA: Week (within) × Sex (between) for one CA% level.
+
+    Runs all 4 measures, applies BH-FDR across the 4 Week and 4 Sex omnibus F-tests.
+    Post-hocs: Bonferroni paired t-tests for Week; Tukey for Sex.
+    """
+    if measures is None:
+        measures = _OMNIBUS_MEASURES
+    if not HAS_PINGOUIN:
+        print("[ERROR] pingouin not installed.")
+        return {}
+
+    print(f"\n{'='*80}")
+    print(f"CA%-STRATIFIED OMNIBUS LICK ANOVA ({ca_percent}% CA)")
+    print(f"{'='*80}")
+
+    combined_df = combine_lick_cohorts(cohort_dfs)
+    if 'Week' not in combined_df.columns:
+        combined_df = add_week_column(combined_df)
+    combined_df = combined_df[combined_df['CA%'] == ca_percent]
+
+    all_results: Dict = {}
+    week_ps: List[float] = []
+    sex_ps: List[float] = []
+
+    for measure in measures:
+        if measure not in combined_df.columns:
+            all_results[measure] = {'error': f'Column {measure} not found'}
+            week_ps.append(np.nan); sex_ps.append(np.nan)
+            continue
+
+        adf = combined_df[['ID', 'Week', 'Sex', 'CA%', measure]].dropna().copy()
+        if time_points is not None:
+            adf = adf[adf['Week'].isin(time_points)]
+        tp = sorted(adf['Week'].unique())
+
+        n_weeks = len(tp)
+        counts = adf.groupby('ID')['Week'].nunique()
+        complete_ids = counts[counts == n_weeks].index
+        adf = adf[adf['ID'].isin(complete_ids)].copy()
+        n_dropped = combined_df['ID'].nunique() - len(complete_ids) if len(complete_ids) else 0
+
+        try:
+            tbl = pg.mixed_anova(data=adf, dv=measure, within='Week',
+                                 subject='ID', between='Sex')
+
+            def _get(src):
+                row = tbl[tbl['Source'] == src]
+                if row.empty: return np.nan, np.nan, np.nan
+                r = row.iloc[0]
+                return float(r.get('F', np.nan)), float(r.get('p-unc', np.nan)), float(r.get('np2', np.nan))
+
+            wF, wP, wNP2 = _get('Week')
+            sF, sP, sNP2 = _get('Sex')
+            iF, iP, iNP2 = _get('Interaction')
+
+            week_ps.append(wP); sex_ps.append(sP)
+            all_results[measure] = {
+                'measure': measure, 'ca_percent': ca_percent, 'analysis_df': adf, 'weeks': tp,
+                'n_subjects': len(complete_ids), 'n_dropped': n_dropped,
+                'anova_table': tbl,
+                'week_F': wF, 'week_p': wP, 'week_np2': wNP2,
+                'sex_F': sF,  'sex_p':  sP, 'sex_np2':  sNP2,
+                'int_F': iF,  'int_p':  iP, 'int_np2':  iNP2,
+            }
+        except Exception as e:
+            print(f"  [ERROR] ANOVA failed for {measure} ({ca_percent}% CA): {e}")
+            all_results[measure] = {'error': str(e)}
+            week_ps.append(np.nan); sex_ps.append(np.nan)
+
+    # BH-FDR
+    fdr_w = _bh_fdr([p if not np.isnan(p) else 1.0 for p in week_ps])
+    fdr_s = _bh_fdr([p if not np.isnan(p) else 1.0 for p in sex_ps])
+
+    for i, m in enumerate(measures):
+        if 'error' not in all_results.get(m, {'error': ''}):
+            all_results[m]['fdr_week_p'] = fdr_w[i]
+            all_results[m]['fdr_sex_p']  = fdr_s[i]
+
+    # Post-hocs
+    for m in measures:
+        r = all_results.get(m, {})
+        if 'error' in r: continue
+        adf = r['analysis_df']
+        tp  = r['weeks']
+        if (r.get('fdr_week_p', 1.0) < 0.05 or r.get('int_p', 1.0) < 0.05) and len(tp) > 1:
+            r['posthoc_week'] = _bonferroni_paired_ttests(adf, m, 'Week', 'ID')
+        if r.get('fdr_sex_p', 1.0) < 0.05:
+            am = adf.groupby(['ID', 'Sex'])[m].mean().reset_index()
+            r['posthoc_sex'] = _tukey_between(am, m, 'Sex')
+        if r.get('int_p', 1.0) < 0.05:
+            cell_ph = {}
+            for sex_val in sorted(adf['Sex'].unique()):
+                ph = _bonferroni_paired_ttests(adf[adf['Sex'] == sex_val], m, 'Week', 'ID')
+                cell_ph[f'Sex={sex_val}'] = ph
+            r['posthoc_week_cells'] = cell_ph
+
+    all_results['_measures'] = measures
+    all_results['_ca_percent'] = ca_percent
+    return all_results
+
+
+def perform_omnibus_lick_anova_2way(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    measures: Optional[List[str]] = None,
+    time_points: Optional[List[int]] = None,
+) -> Dict:
+    """Omnibus 2-way mixed ANOVA across lick measures: CA% (between) × Week (within).
+
+    Uses all subjects regardless of sex. BH-FDR is applied separately across the
+    4 Week omnibus F-tests and across the 4 CA% omnibus F-tests.
+
+    Post-hocs:
+      - Significant CA% main effect  → Tukey HSD on animal-level means
+      - Significant Week main effect → Bonferroni all-pairwise paired t-tests
+      - Significant Week × CA%       → Bonferroni pairwise paired t-tests within
+                                        each CA% cell
+    """
+    if measures is None:
+        measures = _OMNIBUS_MEASURES
+    if not HAS_PINGOUIN:
+        print("[ERROR] pingouin not installed.")
+        return {}
+
+    print(f"\n{'='*80}")
+    print("2-WAY OMNIBUS LICK ANOVA — CA% × WEEK (ALL SUBJECTS)")
+    print(f"{'='*80}")
+
+    combined_df = combine_lick_cohorts(cohort_dfs)
+    if 'Week' not in combined_df.columns:
+        combined_df = add_week_column(combined_df)
+
+    all_results: Dict = {}
+    week_ps: List[float] = []
+    ca_ps:   List[float] = []
+
+    for measure in measures:
+        print(f"\n{'─'*60}")
+        print(f"  ANOVA: {_OMNIBUS_MEASURE_LABELS.get(measure, measure)}")
+        print(f"{'─'*60}")
+
+        if measure not in combined_df.columns:
+            print(f"  [WARNING] Column '{measure}' not found — skipping.")
+            all_results[measure] = {'error': f'Column {measure} not found'}
+            week_ps.append(np.nan); ca_ps.append(np.nan)
+            continue
+
+        adf = combined_df[['ID', 'Week', 'CA%', measure]].dropna().copy()
+        if time_points is not None:
+            adf = adf[adf['Week'].isin(time_points)]
+        tp = sorted(adf['Week'].unique())
+
+        n_weeks = len(tp)
+        counts = adf.groupby('ID')['Week'].nunique()
+        complete_ids = counts[counts == n_weeks].index
+        n_dropped = adf['ID'].nunique() - len(complete_ids)
+        adf = adf[adf['ID'].isin(complete_ids)].copy()
+
+        if n_dropped > 0:
+            print(f"  [INFO] {n_dropped} animal(s) excluded (incomplete weeks for {measure})")
+
+        try:
+            if adf['CA%'].nunique() < 2 or adf['ID'].nunique() < 4:
+                raise ValueError("Insufficient subjects for mixed ANOVA")
+
+            tbl = pg.mixed_anova(data=adf, dv=measure, within='Week',
+                                 subject='ID', between='CA%')
+
+            def _get(src):
+                row = tbl[tbl['Source'] == src]
+                if row.empty: return np.nan, np.nan, np.nan
+                rv = row.iloc[0]
+                return float(rv.get('F', np.nan)), float(rv.get('p-unc', np.nan)), float(rv.get('np2', np.nan))
+
+            wF, wP, wNP2 = _get('Week')
+            cF, cP, cNP2 = _get('CA%')
+            iF, iP, iNP2 = _get('Interaction')
+
+            week_ps.append(wP); ca_ps.append(cP)
+            all_results[measure] = {
+                'measure':    measure,
+                'analysis_df': adf,
+                'weeks':       tp,
+                'n_subjects':  adf['ID'].nunique(),
+                'n_dropped':   n_dropped,
+                'anova_table': tbl,
+                'week_F':  wF, 'week_p':  wP, 'week_np2':  wNP2,
+                'ca_F':    cF, 'ca_p':    cP, 'ca_np2':    cNP2,
+                'int_F':   iF, 'int_p':   iP, 'int_np2':   iNP2,
+            }
+        except Exception as e:
+            print(f"  [ERROR] ANOVA failed for {measure}: {e}")
+            import traceback; traceback.print_exc()
+            all_results[measure] = {'error': str(e)}
+            week_ps.append(np.nan); ca_ps.append(np.nan)
+
+    # BH-FDR correction
+    fdr_w = _bh_fdr([p if not np.isnan(p) else 1.0 for p in week_ps])
+    fdr_c = _bh_fdr([p if not np.isnan(p) else 1.0 for p in ca_ps])
+    for i, m in enumerate(measures):
+        if 'error' not in all_results.get(m, {'error': ''}):
+            all_results[m]['fdr_week_p'] = fdr_w[i]
+            all_results[m]['fdr_ca_p']   = fdr_c[i]
+
+    # Post-hoc tests
+    for m in measures:
+        r = all_results.get(m, {})
+        if 'error' in r: continue
+        adf = r['analysis_df']
+        tp  = r['weeks']
+
+        if (r.get('fdr_week_p', 1.0) < 0.05 or r.get('int_p', 1.0) < 0.05) and len(tp) > 1:
+            print(f"  Post-hoc (Week, Bonferroni): {_OMNIBUS_MEASURE_LABELS.get(m, m)}")
+            r['posthoc_week'] = _bonferroni_paired_ttests(adf, m, 'Week', 'ID')
+
+        if r.get('fdr_ca_p', 1.0) < 0.05:
+            print(f"  Post-hoc (CA%, Tukey): {_OMNIBUS_MEASURE_LABELS.get(m, m)}")
+            am = adf.groupby(['ID', 'CA%'])[m].mean().reset_index()
+            r['posthoc_ca'] = _tukey_between(am, m, 'CA%')
+
+        if r.get('int_p', 1.0) < 0.05:
+            cell_ph = {}
+            for ca_val in sorted(adf['CA%'].unique()):
+                ph = _bonferroni_paired_ttests(adf[adf['CA%'] == ca_val], m, 'Week', 'ID')
+                cell_ph[f'CA%={ca_val}'] = ph
+            r['posthoc_week_cells'] = cell_ph
+
+    all_results['_measures'] = measures
+    return all_results
+
+
+def _format_stratified_omnibus_report(
+    all_results: Dict,
+    header: str,
+    between_factor: str,
+    fdr_between_key: str,
+    posthoc_between_key: str,
+    save_path: Optional[Path] = None,
+) -> str:
+    """Shared formatter for sex-stratified, CA%-stratified, and 2-way omnibus reports."""
+    measures = all_results.get('_measures', _OMNIBUS_MEASURES)
+
+    def _sig(p):
+        if np.isnan(p): return 'n/a'
+        if p < 0.001: return '***'
+        if p < 0.01:  return '**'
+        if p < 0.05:  return '*'
+        return 'ns'
+
+    def _fmt_p(p):
+        if np.isnan(p): return 'n/a'
+        if p < 0.0001:  return '< 0.0001'
+        return f'{p:.4f}'
+
+    def _dec(p, fdr_p=None):
+        chk = fdr_p if (fdr_p is not None and not np.isnan(fdr_p)) else p
+        if np.isnan(chk): return 'n/a'
+        return 'SIGNIFICANT' if chk < 0.05 else 'NOT SIGNIFICANT'
+
+    def _ef(np2):
+        if np.isnan(np2): return ''
+        return f', ηp²={np2:.3f}'
+
+    def _df_from_tbl(tbl, src):
+        if tbl is None: return '?', '?'
+        row = tbl[tbl['Source'] == src]
+        if row.empty: return '?', '?'
+        rv = row.iloc[0]
+        return int(rv.get('DF1', 0)), int(rv.get('DF2', 0))
+
+    between_raw_key = 'ca_p'   if between_factor == 'CA%' else 'sex_p'
+    between_F_key   = 'ca_F'   if between_factor == 'CA%' else 'sex_F'
+    between_np2_key = 'ca_np2' if between_factor == 'CA%' else 'sex_np2'
+    between_src     = 'CA%'    if between_factor == 'CA%' else 'Sex'
+
+    lines = ['=' * 80, header, '=' * 80,
+             f'Generated : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+             f'Design    : {between_factor} (between) × Week (within)',
+             f'Post-hocs : Tukey HSD for {between_factor}; Bonferroni paired t-tests for Week',
+             f'Correction: BH-FDR across {len(measures)} measures within each factor family',
+             '']
+
+    # FDR summary table
+    lines += ['=' * 80, 'BH-FDR CORRECTED OMNIBUS P-VALUES', '=' * 80,
+              f'{"Measure":<32} {"Week(raw)":>12} {"Week(FDR)":>12} '
+              f'{between_factor+"(raw)":>14} {between_factor+"(FDR)":>14}']
+    lines.append('-' * 88)
+    for m in measures:
+        r = all_results.get(m, {})
+        if 'error' in r:
+            lines.append(f'  {_OMNIBUS_MEASURE_LABELS.get(m,m):<30} ERROR')
+            continue
+        lines.append(
+            f'  {_OMNIBUS_MEASURE_LABELS.get(m,m):<30} '
+            f'{_fmt_p(r.get("week_p",np.nan)):>12} '
+            f'{_fmt_p(r.get("fdr_week_p",np.nan)):>12} '
+            f'{_fmt_p(r.get(between_raw_key,np.nan)):>14} '
+            f'{_fmt_p(r.get(fdr_between_key,np.nan)):>14} ')
+    lines.append('')
+
+    # Per-measure sections
+    for m in measures:
+        r = all_results.get(m, {})
+        label = _OMNIBUS_MEASURE_LABELS.get(m, m)
+        divider = '━' * 80
+        lines += ['', divider, f'  MEASURE: {label}', divider]
+
+        if 'error' in r:
+            lines.append(f'  ERROR: {r["error"]}')
+            continue
+
+        lines += [f'  N subjects: {r.get("n_subjects","?")}',
+                  f'  Animals dropped: {r.get("n_dropped",0)}',
+                  f'  Weeks: {r.get("weeks","?")}', '']
+
+        # Descriptive stats — per group, collapsed across weeks
+        adf = r.get('analysis_df')
+        grp_col = 'CA%' if between_factor == 'CA%' else 'Sex'
+        if adf is not None:
+            lines += [f'  DESCRIPTIVE STATISTICS (by {grp_col}, collapsed across weeks)',
+                      '  ' + '-' * 60]
+            for gv, grp in adf.groupby(grp_col)[m]:
+                n    = len(grp)
+                mn   = grp.mean()
+                sd   = grp.std(ddof=1) if n > 1 else np.nan
+                se   = sd / np.sqrt(n) if n > 1 else np.nan
+                ci_lo = mn - 1.96 * se if not np.isnan(se) else np.nan
+                ci_hi = mn + 1.96 * se if not np.isnan(se) else np.nan
+                ci_str = f'[{ci_lo:.2f}, {ci_hi:.2f}]' if not np.isnan(ci_lo) else 'n/a'
+                lines.append(f'    {grp_col}={gv}: n={n}, M={mn:.2f}, SD={sd:.2f}, '
+                              f'SEM={se:.2f}, 95% CI {ci_str}')
+            lines.append('')
+
+        # ANOVA table from pingouin
+        tbl = r.get('anova_table')
+        if tbl is not None:
+            lines += [f'  ANOVA TABLE ({between_factor} × Week mixed ANOVA)',
+                      '  ' + '-' * 60]
+            disp_cols = [c for c in ['Source', 'DF1', 'DF2', 'F', 'p-unc',
+                                      'p-GG-corr', 'np2', 'eps'] if c in tbl.columns]
+            for ln in tbl[disp_cols].to_string(index=False).split('\n'):
+                lines.append('  ' + ln)
+            lines.append('')
+
+        # Interpretation block
+        fdr_w = r.get('fdr_week_p', np.nan)
+        fdr_b = r.get(fdr_between_key, np.nan)
+        int_p = r.get('int_p', np.nan)
+        wk_df1, wk_df2 = _df_from_tbl(tbl, 'Week')
+        b_df1,  b_df2  = _df_from_tbl(tbl, between_src)
+        in_df1, in_df2 = _df_from_tbl(tbl, 'Interaction')
+
+        # Check whether GG correction was applied to Week (within-subjects)
+        _wk_gg_p = np.nan
+        if tbl is not None and 'p-GG-corr' in tbl.columns:
+            _wk_row = tbl[tbl['Source'] == 'Week']
+            if not _wk_row.empty:
+                _wk_gg_p = float(_wk_row.iloc[0].get('p-GG-corr', np.nan))
+        _wk_p_show = _wk_gg_p if not np.isnan(_wk_gg_p) else r.get('week_p', np.nan)
+        _wk_p_lbl  = 'p (GG-corr)' if not np.isnan(_wk_gg_p) else 'p'
+
+        lines += ['  INTERPRETATION', '  ' + '-' * 60]
+        lines.append(
+            f'  1. Week: {_dec(r.get("week_p", np.nan), fdr_w)}\n'
+            f'     F({wk_df1}, {wk_df2}) = {r.get("week_F", np.nan):.2f}, '
+            f'{_wk_p_lbl} = {_fmt_p(_wk_p_show)}, '
+            f'p_FDR = {_fmt_p(fdr_w)} {_sig(fdr_w)}'
+            f'{_ef(r.get("week_np2", np.nan))}'
+        )
+        lines.append(
+            f'  2. {between_factor}: {_dec(r.get(between_raw_key, np.nan), fdr_b)}\n'
+            f'     F({b_df1}, {b_df2}) = {r.get(between_F_key, np.nan):.2f}, '
+            f'p = {_fmt_p(r.get(between_raw_key, np.nan))}, '
+            f'p_FDR = {_fmt_p(fdr_b)} {_sig(fdr_b)}'
+            f'{_ef(r.get(between_np2_key, np.nan))}'
+        )
+        lines.append(
+            f'  3. Week × {between_factor}: '
+            f'{"SIGNIFICANT" if (not np.isnan(int_p) and int_p < 0.05) else "NOT SIGNIFICANT"}\n'
+            f'     F({in_df1}, {in_df2}) = {r.get("int_F", np.nan):.2f}, '
+            f'p = {_fmt_p(int_p)} {_sig(int_p)}'
+            f'{_ef(r.get("int_np2", np.nan))}'
+        )
+        lines.append('')
+
+        # Post-hoc: Week
+        if 'posthoc_week' in r:
+            ph = r['posthoc_week']
+            wcol_a = [c for c in ph.columns if c.endswith('_A')][0]
+            wcol_b = [c for c in ph.columns if c.endswith('_B')][0]
+            lines += ['  POST-HOC: Week (Bonferroni paired t-tests)', '  ' + '-' * 60,
+                      f'  {"Week A":>8} {"Week B":>8} {"t":>8} {"df":>6} '
+                      f'{"p_raw":>12} {"p_bonf":>12} {"sig":>5}']
+            for _, row in ph.iterrows():
+                sm = '*' if row['significant'] else ''
+                lines.append(f'  {str(int(row[wcol_a])):>8} {str(int(row[wcol_b])):>8} '
+                              f'{row["t"]:>8.3f} {int(row["df"]):>6} '
+                              f'{_fmt_p(row["p_raw"]):>12} {_fmt_p(row["p_bonferroni"]):>12} {sm:>5}')
+            lines.append('')
+
+        _tukey_note = '  (reject=True means the groups differ significantly at FWER=0.05)'
+        if posthoc_between_key in r and r[posthoc_between_key] is not None:
+            lines += [f'  POST-HOC: {between_factor} (Tukey HSD on animal means)',
+                      '  ' + '-' * 60, str(r[posthoc_between_key]),
+                      _tukey_note, '']
+
+        if 'posthoc_week_cells' in r:
+            for cell_label, ph in r['posthoc_week_cells'].items():
+                wcol_a = [c for c in ph.columns if c.endswith('_A')][0]
+                wcol_b = [c for c in ph.columns if c.endswith('_B')][0]
+                lines += [f'  POST-HOC INTERACTION CELL: {cell_label} (Bonferroni paired t-tests)',
+                           '  ' + '-' * 60,
+                           f'  {"Week A":>8} {"Week B":>8} {"t":>8} {"df":>6} '
+                           f'{"p_raw":>12} {"p_bonf":>12} {"sig":>5}']
+                for _, row in ph.iterrows():
+                    sm = '*' if row['significant'] else ''
+                    lines.append(f'  {str(int(row[wcol_a])):>8} {str(int(row[wcol_b])):>8} '
+                                  f'{row["t"]:>8.3f} {int(row["df"]):>6} '
+                                  f'{_fmt_p(row["p_raw"]):>12} {_fmt_p(row["p_bonferroni"]):>12} {sm:>5}')
+                lines.append('')
+
+    # Summary table
+    def _star(p): return '*' if (not np.isnan(p) and p < 0.05) else ' '
+    lines += ['', '=' * 80,
+              f'SUMMARY TABLE — ALL KEY P-VALUES (α = 0.05)',
+              '=' * 80,
+              f'  * = significant after BH-FDR correction (between-subjects); raw p for interaction',
+              '',
+              f'  {"Measure":<32} {"Week(FDR)":>12} {between_factor+"(FDR)":>14}'
+              f' {"Wk×"+between_factor:>16}  Decision']
+    lines.append('  ' + '-' * 82)
+    for m in measures:
+        r = all_results.get(m, {})
+        if 'error' in r:
+            lines.append(f'  {_OMNIBUS_MEASURE_LABELS.get(m,m):<32} ERROR')
+            continue
+        fw = r.get('fdr_week_p', np.nan)
+        fb = r.get(fdr_between_key, np.nan)
+        fi = r.get('int_p', np.nan)
+        sigs = []
+        if not np.isnan(fw) and fw < 0.05: sigs.append('Week')
+        if not np.isnan(fb) and fb < 0.05: sigs.append(between_factor)
+        if not np.isnan(fi) and fi < 0.05: sigs.append(f'Wk×{between_factor}')
+        decision = ', '.join(sigs) + ' significant' if sigs else 'no significant effects'
+        lines.append(
+            f'  {_OMNIBUS_MEASURE_LABELS.get(m,m):<32} '
+            f'{_fmt_p(fw):>12}{_star(fw)} '
+            f'{_fmt_p(fb):>14}{_star(fb)} '
+            f'{_fmt_p(fi):>16}{_star(fi)}  {decision}'
+        )
+    lines += ['', '=' * 80, 'END OF REPORT', '=' * 80]
+    report = '\n'.join(lines)
+
+    if save_path is not None:
+        try:
+            save_path.write_text(report, encoding='utf-8')
+            print(f'[OK] Report saved -> {save_path}')
+        except Exception as e:
+            print(f'[WARNING] Could not save: {e}')
+
+    return report
+
+
+# =============================================================================
 # PLOTTING FUNCTIONS
 # =============================================================================
 
@@ -2281,6 +3474,79 @@ def plot_lick_measure_by_cohort(
     return fig
 
 
+def plot_omnibus_interaction(
+    adf: pd.DataFrame,
+    measure: str,
+    interaction_factor: str,
+    title_suffix: str = '',
+    save_path: Optional[Path] = None,
+    show: bool = True,
+) -> Optional[plt.Figure]:
+    """Plot a significant Week × factor interaction: mean \u00b1 SEM per group over weeks.
+
+    Parameters
+    ----------
+    adf              : long-format DataFrame with [ID, Week, measure, interaction_factor]
+    measure          : column to plot (e.g. 'Total_Licks')
+    interaction_factor : 'CA%' or 'Sex'
+    title_suffix     : appended to figure title (e.g. 'Males only')
+    save_path        : optional; always saved as SVG
+    show             : call plt.show() if True, otherwise close the figure
+    """
+    if not HAS_MATPLOTLIB:
+        print("[ERROR] matplotlib not installed. Cannot create plots.")
+        return None
+
+    measure_label = _OMNIBUS_MEASURE_LABELS.get(measure, measure.replace('_', ' '))
+    groups = sorted(adf[interaction_factor].unique())
+
+    if interaction_factor == 'CA%':
+        palette = ['steelblue', 'darkorange', 'darkgreen', 'purple']
+    else:  # Sex
+        palette = ['steelblue', 'deeppink', 'darkgreen', 'darkorange']
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+    weeks = sorted(adf['Week'].unique())
+
+    for idx, grp_val in enumerate(groups):
+        grp_df = adf[adf[interaction_factor] == grp_val]
+        stats_df = grp_df.groupby('Week')[measure].agg(['mean', 'sem']).reset_index()
+        color = palette[idx % len(palette)]
+        lbl = f"{grp_val:.0f}% CA" if interaction_factor == 'CA%' else str(grp_val)
+        ax.errorbar(stats_df['Week'], stats_df['mean'], yerr=stats_df['sem'],
+                    label=lbl, marker='o', markersize=8, linewidth=2,
+                    capsize=5, color=color,
+                    markerfacecolor=color, markeredgecolor=color)
+
+    factor_label = 'CA%' if interaction_factor == 'CA%' else 'Sex'
+    title = f'{measure_label}: Week \u00d7 {factor_label} Interaction'
+    if title_suffix:
+        title += f' ({title_suffix})'
+    ax.set_title(title, fontsize=13, weight='bold')
+    ax.set_xlabel('Week', fontsize=12, weight='bold')
+    ax.set_ylabel(f'{measure_label} (mean \u00b1 SEM)', fontsize=12, weight='bold')
+    ax.set_xticks(weeks)
+    ax.set_xticklabels([str(int(w) + 1) for w in weeks])
+    ax.set_ylim(bottom=0)
+    ax.legend(title=factor_label, loc='best', fontsize=10)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(direction='in', which='both', length=5)
+    fig.tight_layout()
+
+    if save_path is not None:
+        svg_path = Path(save_path).with_suffix('.svg')
+        fig.savefig(svg_path, format='svg', dpi=200, bbox_inches='tight')
+        print(f"[OK] Saved interaction plot -> {svg_path}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig
+
+
 # =============================================================================
 # MAIN EXECUTION
 # =============================================================================
@@ -2338,15 +3604,17 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  4. Lick plots           -- Mean lick measure by cohort over weeks")
     print("  5. Sex-split plots      -- Mean lick measure split by cohort x sex")
     print("  6. Frontloading report  -- Descriptive stats for % licks in first 5 min & time to 50%")
-    print("  7. Run all (1-6)")
+    print("  7. Omnibus ANOVA        -- 4 frontloading measures, BH-FDR corrected omnibus + post-hocs")
+    print("  8. 2-Way Omnibus ANOVA  -- CA% x Week only (all subjects, no Sex factor)")
+    print("  9. Run all (1-8)")
     print()
 
-    user_input = input("Select option (1-7) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '7')
+    run_all = (user_input == '9')
 
     # ------------------------------------------------------------------ #
     # Option 1: Full mixed ANOVA (CA% x Week x Sex)
@@ -2540,6 +3808,151 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             print(f"  [WARNING] Frontloading descriptives report failed: {e}")
             import traceback
             traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 7: Omnibus ANOVA (4 frontloading measures, BH-FDR corrected)
+    # ------------------------------------------------------------------ #
+    if user_input == '7' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: Omnibus ANOVA — 4 measures, BH-FDR corrected, with post-hocs")
+        print("=" * 80)
+
+        combined_report_sections = []
+
+        # Full omnibus (CA% × Sex × Week)
+        try:
+            omnibus_res = perform_omnibus_lick_anova(cohorts)
+            section = generate_omnibus_lick_report(omnibus_res, cohort_dfs=cohorts, save_path=None)
+            combined_report_sections.append(section)
+            # Plot significant interactions
+            if HAS_MATPLOTLIB:
+                int_plot_dir = Path(f"0v2_lick_interaction_plots_{timestamp}")
+                n_int_plots = 0
+                for _m in omnibus_res.get('_measures', _OMNIBUS_MEASURES):
+                    _r = omnibus_res.get(_m, {})
+                    if 'error' in _r or 'analysis_df' not in _r:
+                        continue
+                    int_plot_dir.mkdir(exist_ok=True)
+                    if _r.get('wk_ca_p', 1.0) < 0.05:
+                        plot_omnibus_interaction(
+                            _r['analysis_df'], _m, 'CA%',
+                            save_path=int_plot_dir / f"omnibus3way_{_m}_week_x_ca.svg",
+                            show=False)
+                        n_int_plots += 1
+                    if _r.get('wk_sex_p', 1.0) < 0.05:
+                        plot_omnibus_interaction(
+                            _r['analysis_df'], _m, 'Sex',
+                            save_path=int_plot_dir / f"omnibus3way_{_m}_week_x_sex.svg",
+                            show=False)
+                        n_int_plots += 1
+                if n_int_plots:
+                    print(f"[OK] {n_int_plots} interaction plot(s) saved -> {int_plot_dir}")
+                else:
+                    print("  (No significant Week interactions to plot from 3-way omnibus)")
+        except Exception as e:
+            print(f"  [WARNING] Omnibus ANOVA failed: {e}")
+            import traceback; traceback.print_exc()
+            combined_report_sections.append(f"[ERROR] Omnibus ANOVA failed: {e}\n")
+
+        # Sex-stratified omnibus
+        for sex_val in ('M', 'F'):
+            sex_label = 'males' if sex_val == 'M' else 'females'
+            try:
+                strat_res = perform_omnibus_lick_anova_sex_stratified(cohorts, sex=sex_val)
+                header = f"SEX-STRATIFIED OMNIBUS LICK ANOVA ({'MALES' if sex_val=='M' else 'FEMALES'})"
+                section = _format_stratified_omnibus_report(
+                    strat_res, header=header,
+                    between_factor='CA%', fdr_between_key='fdr_ca_p',
+                    posthoc_between_key='posthoc_ca', save_path=None)
+                combined_report_sections.append(section)
+            except Exception as e:
+                print(f"  [WARNING] Sex-stratified omnibus ({sex_label}) failed: {e}")
+                import traceback; traceback.print_exc()
+                combined_report_sections.append(f"[ERROR] Sex-stratified omnibus ({sex_label}) failed: {e}\n")
+
+        # CA%-stratified omnibus
+        combined_for_ca = combine_lick_cohorts(cohorts)
+        ca_levels = sorted(combined_for_ca['CA%'].dropna().unique()) if 'CA%' in combined_for_ca.columns else []
+        for ca_val in ca_levels:
+            try:
+                strat_res = perform_omnibus_lick_anova_ca_stratified(cohorts, ca_percent=ca_val)
+                header = f"CA%-STRATIFIED OMNIBUS LICK ANOVA ({ca_val}% CA)"
+                section = _format_stratified_omnibus_report(
+                    strat_res, header=header,
+                    between_factor='Sex', fdr_between_key='fdr_sex_p',
+                    posthoc_between_key='posthoc_sex', save_path=None)
+                combined_report_sections.append(section)
+            except Exception as e:
+                print(f"  [WARNING] CA%-stratified omnibus ({ca_val}%) failed: {e}")
+                import traceback; traceback.print_exc()
+                combined_report_sections.append(f"[ERROR] CA%-stratified omnibus ({ca_val}%) failed: {e}\n")
+
+        # Combine and save as one file
+        divider = "\n\n" + "=" * 80 + "\n" + "=" * 80 + "\n\n"
+        full_report = divider.join(combined_report_sections)
+        combined_rpt_path = Path(f"0v2_lick_omnibus_combined_{timestamp}.txt")
+        try:
+            combined_rpt_path.write_text(full_report, encoding='utf-8')
+            print(f"\n[OK] Combined omnibus report saved -> {combined_rpt_path}")
+        except Exception as e:
+            print(f"  [WARNING] Could not save combined report: {e}")
+        print(full_report)
+
+    # ------------------------------------------------------------------ #
+    # Option 8: 2-way omnibus ANOVA (CA% × Week, no Sex factor)
+    # ------------------------------------------------------------------ #
+    if user_input == '8' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: 2-Way Omnibus ANOVA — CA% × Week (all subjects, BH-FDR corrected)")
+        print("=" * 80)
+
+        twoway_res = None
+        try:
+            twoway_res = perform_omnibus_lick_anova_2way(cohorts)
+            header_2way = "2-WAY OMNIBUS LICK ANOVA — CA% × WEEK (ALL SUBJECTS)"
+            twoway_section = _format_stratified_omnibus_report(
+                twoway_res,
+                header=header_2way,
+                between_factor='CA%',
+                fdr_between_key='fdr_ca_p',
+                posthoc_between_key='posthoc_ca',
+                save_path=None,
+            )
+            twoway_rpt_path = Path(f"0v2_lick_2way_omnibus_{timestamp}.txt")
+            twoway_rpt_path.write_text(twoway_section, encoding='utf-8')
+            print(f"\n[OK] 2-Way omnibus report saved -> {twoway_rpt_path}")
+            print(twoway_section)
+        except Exception as e:
+            print(f"  [WARNING] 2-Way omnibus ANOVA/report failed: {e}")
+            import traceback; traceback.print_exc()
+
+        # Plot significant Week × CA% interactions (separate try so report success is independent)
+        if twoway_res is not None and HAS_MATPLOTLIB:
+            try:
+                int_plot_dir = Path(f"0v2_lick_2way_interaction_plots_{timestamp}")
+                n_int_plots = 0
+                for _m in twoway_res.get('_measures', _OMNIBUS_MEASURES):
+                    _r = twoway_res.get(_m, {})
+                    if 'error' in _r or 'analysis_df' not in _r:
+                        print(f"  [DEBUG] Skipping {_m}: error={_r.get('error')}, has_adf={'analysis_df' in _r}")
+                        continue
+                    int_p_val = _r.get('int_p', 1.0)
+                    print(f"  [DEBUG] {_m}: int_p={int_p_val:.4f}")
+                    if int_p_val < 0.05:
+                        int_plot_dir.mkdir(exist_ok=True)
+                        plot_omnibus_interaction(
+                            _r['analysis_df'], _m, 'CA%',
+                            title_suffix='all subjects',
+                            save_path=int_plot_dir / f"2way_{_m}_week_x_ca.svg",
+                            show=False)
+                        n_int_plots += 1
+                if n_int_plots:
+                    print(f"[OK] {n_int_plots} interaction plot(s) saved -> {int_plot_dir}")
+                else:
+                    print("  (No significant Week × CA% interactions to plot from 2-way omnibus)")
+            except Exception as e:
+                print(f"  [WARNING] Interaction plot failed: {e}")
+                import traceback; traceback.print_exc()
 
     print("\n" + "=" * 80)
     print("0% vs 2% lick analysis complete.")
