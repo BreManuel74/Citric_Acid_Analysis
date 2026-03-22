@@ -6638,6 +6638,501 @@ def generate_ca_x_week_report(
 
 
 # =============================================================================
+# 2-WAY OMNIBUS WEIGHT ANOVA (BH-FDR CORRECTED ACROSS MEASURES)
+# =============================================================================
+
+def _bh_fdr(p_values: List[float]) -> List[float]:
+    """Benjamini-Hochberg FDR correction. Returns adjusted p-values in original order."""
+    n = len(p_values)
+    if n == 0:
+        return []
+    order = np.argsort(p_values)
+    ranked = np.empty(n)
+    ranked[order] = np.arange(1, n + 1)
+    adjusted = np.array(p_values) * n / ranked
+    for i in range(n - 2, -1, -1):
+        adjusted[order[i]] = min(adjusted[order[i]], adjusted[order[i + 1]])
+    return [float(min(v, 1.0)) for v in adjusted]
+
+
+def perform_omnibus_weight_anova_2way(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    measures: Optional[List[str]] = None,
+    weeks: Optional[List[int]] = None,
+) -> Dict:
+    """Omnibus 2-way mixed ANOVA for weight measures: CA% (between) × Week (within).
+
+    Runs the 2-way mixed ANOVA for all measures simultaneously and applies
+    BH-FDR correction separately across measures within each factor family
+    (Week p-values corrected together; CA% p-values corrected together).
+
+    Post-hocs per measure:
+      - Significant CA% main effect  → Tukey HSD on animal-level means
+      - Significant Week main effect → Bonferroni all-pairwise paired t-tests
+      - Significant Week × CA%       → Bonferroni pairwise within each CA% cell
+
+    Parameters:
+        cohort_dfs: Dictionary mapping cohort labels to DataFrames
+        measures: Weight measures to analyze (default: ['Total Change', 'Daily Change'])
+        weeks: Optional list of week numbers to include (default: all)
+
+    Returns:
+        Dict keyed by measure name with ANOVA results; also includes '_measures' list.
+    """
+    if measures is None:
+        measures = ["Total Change", "Daily Change"]
+
+    if not HAS_PINGOUIN:
+        print("[ERROR] pingouin is required for mixed ANOVA")
+        return {}
+
+    print(f"\n{'='*80}")
+    print("2-WAY OMNIBUS WEIGHT ANOVA — CA% × WEEK (ALL MEASURES, BH-FDR CORRECTED)")
+    print(f"{'='*80}")
+
+    combined_df = combine_cohorts_for_analysis(cohort_dfs)
+    combined_df = clean_cohort(combined_df)
+    if 'Day' not in combined_df.columns:
+        combined_df = add_day_column_across_cohorts(combined_df)
+    combined_df = _add_week_column_across_cohorts(combined_df)
+    combined_df = combined_df[combined_df['Day'] >= 0]
+
+    all_results: Dict = {}
+    week_ps: List[float] = []
+    ca_ps: List[float] = []
+
+    for measure in measures:
+        print(f"\n{'─'*60}")
+        print(f"  ANOVA: {measure}")
+        print(f"{'─'*60}")
+
+        if measure not in combined_df.columns:
+            print(f"  [WARNING] Column '{measure}' not found — skipping.")
+            all_results[measure] = {'error': f'Column {measure} not found'}
+            week_ps.append(np.nan)
+            ca_ps.append(np.nan)
+            continue
+
+        adf = combined_df[['ID', 'Week', 'CA (%)', measure]].dropna().copy()
+        if weeks is not None:
+            adf = adf[adf['Week'].isin(weeks)]
+
+        # Average within Week × ID (collapse daily observations to one per animal per week)
+        adf = adf.groupby(['ID', 'Week', 'CA (%)'])[measure].mean().reset_index()
+
+        tp = sorted(adf['Week'].unique())
+        n_weeks = len(tp)
+
+        # Complete-subject design: drop animals missing any week
+        counts = adf.groupby('ID')['Week'].nunique()
+        complete_ids = counts[counts == n_weeks].index
+        n_dropped = adf['ID'].nunique() - len(complete_ids)
+        adf = adf[adf['ID'].isin(complete_ids)].copy()
+
+        if n_dropped > 0:
+            print(f"  [INFO] {n_dropped} animal(s) excluded (incomplete weeks for {measure})")
+
+        try:
+            if adf['CA (%)'].nunique() < 2 or adf['ID'].nunique() < 4:
+                raise ValueError("Insufficient subjects for mixed ANOVA")
+
+            tbl = pg.mixed_anova(
+                data=adf, dv=measure, within='Week',
+                subject='ID', between='CA (%)',
+                correction='auto',
+            )
+
+            def _get(src):
+                row = tbl[tbl['Source'] == src]
+                if row.empty:
+                    return np.nan, np.nan, np.nan, np.nan
+                rv = row.iloc[0]
+                F = float(rv.get('F', np.nan))
+                p_unc = float(rv.get('p-unc', np.nan))
+                np2 = float(rv.get('np2', np.nan))
+                eps = float(rv.get('eps', np.nan))
+                return F, p_unc, np2, eps
+
+            wF, wP, wNP2, wEps = _get('Week')
+            cF, cP, cNP2, _   = _get('CA (%)')
+            iF, iP, iNP2, _   = _get('Interaction')
+
+            # Use GG-corrected p for Week if sphericity violated
+            week_row = tbl[tbl['Source'] == 'Week']
+            wP_gg = np.nan
+            sphericity_ok = True
+            if len(week_row) > 0:
+                wr = week_row.iloc[0]
+                sph_val = wr.get('sphericity', True)
+                sphericity_ok = not (sph_val is False or sph_val == False)
+                wP_gg = float(wr.get('p-GG-corr', np.nan))
+
+            # p used for reporting and FDR (GG-corrected when violated)
+            wP_use = wP_gg if (not sphericity_ok and np.isfinite(wP_gg)) else wP
+
+            week_ps.append(wP_use)
+            ca_ps.append(cP)
+
+            # Descriptive stats by CA% and by CA%×Week
+            desc_rows = []
+            for ca_val, grp in adf.groupby('CA (%)')[measure]:
+                n = len(grp)
+                m = grp.mean()
+                s = grp.std(ddof=1) if n > 1 else np.nan
+                sem = s / np.sqrt(n) if (n > 0 and np.isfinite(s)) else np.nan
+                desc_rows.append({
+                    'CA (%)': ca_val, 'n': n, 'mean': m, 'sd': s,
+                    'sem': sem,
+                    'ci_lower': m - 1.96 * sem if np.isfinite(sem) else np.nan,
+                    'ci_upper': m + 1.96 * sem if np.isfinite(sem) else np.nan,
+                })
+            desc_df = pd.DataFrame(desc_rows)
+
+            all_results[measure] = {
+                'measure':       measure,
+                'analysis_df':   adf,
+                'weeks':         tp,
+                'n_subjects':    adf['ID'].nunique(),
+                'n_dropped':     n_dropped,
+                'anova_table':   tbl,
+                'desc_df':       desc_df,
+                'week_F':   wF,  'week_p':   wP_use, 'week_p_raw': wP,
+                'week_np2': wNP2, 'week_eps': wEps,
+                'sphericity_ok': sphericity_ok,
+                'ca_F':   cF,  'ca_p':   cP,  'ca_np2':   cNP2,
+                'int_F':  iF,  'int_p':  iP,  'int_np2':  iNP2,
+            }
+
+        except Exception as e:
+            print(f"  [ERROR] ANOVA failed for {measure}: {e}")
+            import traceback; traceback.print_exc()
+            all_results[measure] = {'error': str(e)}
+            week_ps.append(np.nan)
+            ca_ps.append(np.nan)
+
+    # --- BH-FDR correction across measures ---
+    fdr_w = _bh_fdr([p if np.isfinite(p) else 1.0 for p in week_ps])
+    fdr_c = _bh_fdr([p if np.isfinite(p) else 1.0 for p in ca_ps])
+    for i, m in enumerate(measures):
+        r = all_results.get(m, {})
+        if 'error' not in r:
+            r['fdr_week_p'] = fdr_w[i]
+            r['fdr_ca_p']   = fdr_c[i]
+
+    # --- Post-hoc tests ---
+    for m in measures:
+        r = all_results.get(m, {})
+        if 'error' in r:
+            continue
+        adf = r['analysis_df']
+        tp  = r['weeks']
+        ca_levels = sorted(adf['CA (%)'].unique())
+
+        # Week main effect or interaction → Bonferroni paired t-tests across all week pairs
+        if (r.get('fdr_week_p', 1.0) < 0.05 or r.get('int_p', 1.0) < 0.05) and len(tp) > 1:
+            print(f"  Post-hoc (Week, Bonferroni): {m}")
+            pairs = [(a, b) for i, a in enumerate(tp) for b in tp[i+1:]]
+            ph_rows = []
+            for wA, wB in pairs:
+                dA = adf[adf['Week'] == wA][['ID', m]].rename(columns={m: 'vA'})
+                dB = adf[adf['Week'] == wB][['ID', m]].rename(columns={m: 'vB'})
+                merged = dA.merge(dB, on='ID').dropna()
+                if len(merged) < 3:
+                    continue
+                t_stat, p_raw = stats.ttest_rel(merged['vA'], merged['vB'])
+                df_val = len(merged) - 1
+                p_bonf = float(min(1.0, p_raw * len(pairs)))
+                ph_rows.append({
+                    'Week A': wA, 'Week B': wB,
+                    't': t_stat, 'df': df_val,
+                    'p_raw': p_raw, 'p_bonf': p_bonf,
+                    'sig': '*' if p_bonf < 0.05 else '',
+                })
+            r['posthoc_week'] = pd.DataFrame(ph_rows)
+
+        # CA% main effect → Tukey HSD on per-animal means (collapsed across weeks)
+        if r.get('fdr_ca_p', 1.0) < 0.05 and len(ca_levels) >= 2:
+            print(f"  Post-hoc (CA%, Tukey): {m}")
+            try:
+                from statsmodels.stats.multicomp import pairwise_tukeyhsd
+                am = adf.groupby(['ID', 'CA (%)'])[m].mean().reset_index()
+                tukey = pairwise_tukeyhsd(am[m], am['CA (%)'])
+                r['posthoc_ca'] = tukey
+            except Exception as ex:
+                print(f"  [WARNING] Tukey failed for {m}: {ex}")
+
+        # Significant interaction → per-cell Bonferroni paired t-tests
+        if r.get('int_p', 1.0) < 0.05:
+            cell_ph = {}
+            for ca_val in ca_levels:
+                sub = adf[adf['CA (%)'] == ca_val].copy()
+                pairs = [(a, b) for i, a in enumerate(tp) for b in tp[i+1:]]
+                ph_rows = []
+                for wA, wB in pairs:
+                    dA = sub[sub['Week'] == wA][['ID', m]].rename(columns={m: 'vA'})
+                    dB = sub[sub['Week'] == wB][['ID', m]].rename(columns={m: 'vB'})
+                    merged = dA.merge(dB, on='ID').dropna()
+                    if len(merged) < 3:
+                        continue
+                    t_stat, p_raw = stats.ttest_rel(merged['vA'], merged['vB'])
+                    df_val = len(merged) - 1
+                    p_bonf = float(min(1.0, p_raw * len(pairs)))
+                    ph_rows.append({
+                        'Week A': wA, 'Week B': wB,
+                        't': t_stat, 'df': df_val,
+                        'p_raw': p_raw, 'p_bonf': p_bonf,
+                        'sig': '*' if p_bonf < 0.05 else '',
+                    })
+                cell_ph[ca_val] = pd.DataFrame(ph_rows)
+            r['posthoc_week_cells'] = cell_ph
+
+    all_results['_measures'] = measures
+    return all_results
+
+
+def generate_omnibus_weight_report_2way(
+    all_results: Dict,
+    cohort_dfs: Optional[Dict[str, pd.DataFrame]] = None,
+) -> str:
+    """Generate a report for the 2-way omnibus BH-FDR corrected weight ANOVA."""
+    lines = []
+    measures = all_results.get('_measures', ["Total Change", "Daily Change"])
+
+    def _sig(p):
+        if not np.isfinite(p): return '?'
+        if p < 0.001: return '***'
+        if p < 0.01:  return '**'
+        if p < 0.05:  return '*'
+        return 'ns'
+
+    def _fp(p):
+        if not np.isfinite(p): return '-'
+        if p < 0.0001: return '< 0.0001'
+        return f'{p:.4f}'
+
+    lines.append("=" * 80)
+    lines.append("2-WAY OMNIBUS WEIGHT ANOVA — CA% × WEEK (ALL MEASURES)")
+    lines.append("=" * 80)
+    lines.append(f"Generated : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("Design    : CA% (between) × Week (within), sex collapsed")
+    lines.append("Post-hocs : Tukey HSD for CA%; Bonferroni paired t-tests for Week")
+    lines.append("Correction: BH-FDR across measures within each factor family")
+    lines.append("")
+
+    # Study design
+    if cohort_dfs is not None:
+        lines.append("=" * 80)
+        lines.append("STUDY DESIGN")
+        lines.append("=" * 80)
+        for label, df in cohort_dfs.items():
+            n_animals = df['ID'].nunique() if 'ID' in df.columns else len(df)
+            lines.append(f"  {label}: {n_animals} animals")
+        lines.append("")
+
+    # BH-FDR summary table
+    lines.append("=" * 80)
+    lines.append("BH-FDR CORRECTED OMNIBUS P-VALUES")
+    lines.append("=" * 80)
+    col_w = 38
+    lines.append(
+        f"  {'Measure':<{col_w}} {'Week(raw)':>12} {'Week(FDR)':>12} "
+        f"{'CA%(raw)':>12} {'CA%(FDR)':>12}"
+    )
+    lines.append("  " + "-" * 90)
+    for m in measures:
+        r = all_results.get(m, {})
+        if 'error' in r:
+            lines.append(f"  {m:<{col_w}} [ERROR]")
+            continue
+        wraw = _fp(r.get('week_p', np.nan))
+        wfdr = _fp(r.get('fdr_week_p', np.nan))
+        craw = _fp(r.get('ca_p', np.nan))
+        cfdr = _fp(r.get('fdr_ca_p', np.nan))
+        # add star to FDR value if significant
+        wfdr_s = f"{wfdr} {_sig(r.get('fdr_week_p', np.nan))}" if r.get('fdr_week_p', np.nan) < 0.05 else f"{wfdr} "
+        cfdr_s = f"{cfdr} {_sig(r.get('fdr_ca_p', np.nan))}" if r.get('fdr_ca_p', np.nan) < 0.05 else f"{cfdr} "
+        lines.append(
+            f"  {m:<{col_w}} {wraw:>12} {wfdr_s:>14} {craw:>12} {cfdr_s:>14}"
+        )
+    lines.append("")
+    lines.append("")
+
+    # Per-measure sections
+    for m in measures:
+        r = all_results.get(m, {})
+        lines.append("━" * 80)
+        lines.append(f"  MEASURE: {m}")
+        lines.append("━" * 80)
+
+        if 'error' in r:
+            lines.append(f"  [ERROR] {r['error']}")
+            lines.append("")
+            continue
+
+        adf = r.get('analysis_df')
+        tp  = r.get('weeks', [])
+        desc_df = r.get('desc_df')
+
+        lines.append(f"  N subjects: {r.get('n_subjects', '?')}")
+        lines.append(f"  Animals dropped: {r.get('n_dropped', 0)}")
+        lines.append(f"  Weeks: {tp}")
+        lines.append("")
+
+        # Descriptives
+        if desc_df is not None and len(desc_df) > 0:
+            lines.append("  DESCRIPTIVE STATISTICS (by CA%, collapsed across weeks)")
+            lines.append("  " + "-" * 60)
+            for _, row in desc_df.iterrows():
+                lines.append(
+                    f"    CA%={row['CA (%)']:.1f}: n={int(row['n'])}, "
+                    f"M={row['mean']:.3f}, SD={row['sd']:.3f}, "
+                    f"SEM={row['sem']:.3f}, 95% CI [{row['ci_lower']:.3f}, {row['ci_upper']:.3f}]"
+                )
+            lines.append("")
+
+        # ANOVA table
+        tbl = r.get('anova_table')
+        if tbl is not None:
+            lines.append("  ANOVA TABLE (CA% × Week mixed ANOVA)")
+            lines.append("  " + "-" * 60)
+            lines.append("  " + tbl.to_string().replace('\n', '\n  '))
+            lines.append("")
+
+        # Interpretation
+        lines.append("  INTERPRETATION")
+        lines.append("  " + "-" * 60)
+
+        wP = r.get('week_p', np.nan)
+        wFDR = r.get('fdr_week_p', np.nan)
+        wF = r.get('week_F', np.nan)
+        wNP2 = r.get('week_np2', np.nan)
+        wEps = r.get('week_eps', np.nan)
+        sph_ok = r.get('sphericity_ok', True)
+        cP = r.get('ca_p', np.nan)
+        cFDR = r.get('fdr_ca_p', np.nan)
+        cF = r.get('ca_F', np.nan)
+        cNP2 = r.get('ca_np2', np.nan)
+        iP = r.get('int_p', np.nan)
+        iF = r.get('int_F', np.nan)
+        iNP2 = r.get('int_np2', np.nan)
+        n_subj = r.get('n_subjects', '?')
+        # determine DF2 for within factor from ANOVA table
+        try:
+            wDF1 = int(tbl[tbl['Source'] == 'Week'].iloc[0]['DF1'])
+            wDF2 = int(tbl[tbl['Source'] == 'Week'].iloc[0]['DF2'])
+            cDF2 = int(tbl[tbl['Source'] == 'CA (%)'].iloc[0]['DF2'])
+            iDF1 = int(tbl[tbl['Source'] == 'Interaction'].iloc[0]['DF1'])
+            iDF2 = int(tbl[tbl['Source'] == 'Interaction'].iloc[0]['DF2'])
+        except Exception:
+            wDF1 = wDF2 = cDF2 = iDF1 = iDF2 = '?'
+
+        wk_label = "p (GG-corr)" if not sph_ok else "p"
+        wSig = "SIGNIFICANT" if wFDR < 0.05 else "NOT SIGNIFICANT"
+        cSig = "SIGNIFICANT" if cFDR < 0.05 else "NOT SIGNIFICANT"
+        iSig = "SIGNIFICANT" if (np.isfinite(iP) and iP < 0.05) else "NOT SIGNIFICANT"
+
+        lines.append(f"  1. Week: {wSig}")
+        lines.append(
+            f"     F({wDF1}, {wDF2}) = {wF:.2f}, {wk_label} = {_fp(wP)}, "
+            f"p_FDR = {_fp(wFDR)} {_sig(wFDR)}, ηp²={wNP2:.3f}"
+        )
+        if not sph_ok and np.isfinite(wEps):
+            lines.append(f"     (GG epsilon = {wEps:.3f})")
+
+        lines.append(f"  2. CA%: {cSig}")
+        lines.append(
+            f"     F(1, {cDF2}) = {cF:.2f}, p = {_fp(cP)}, "
+            f"p_FDR = {_fp(cFDR)} {_sig(cFDR)}, ηp²={cNP2:.3f}"
+        )
+
+        lines.append(f"  3. Week × CA%: {iSig}")
+        lines.append(
+            f"     F({iDF1}, {iDF2}) = {iF:.2f}, p = {_fp(iP)} {_sig(iP)}, ηp²={iNP2:.3f}"
+        )
+        lines.append("")
+
+        # Post-hoc: Week
+        ph_week = r.get('posthoc_week')
+        if ph_week is not None and len(ph_week) > 0:
+            lines.append("  POST-HOC: Week (Bonferroni paired t-tests)")
+            lines.append("  " + "-" * 60)
+            lines.append(f"    {'Week A':>7} {'Week B':>7} {'t':>9} {'df':>5} {'p_raw':>12} {'p_bonf':>12} {'sig':>4}")
+            for _, row in ph_week.iterrows():
+                sig_s = row.get('sig', '')
+                lines.append(
+                    f"    {int(row['Week A']):>7} {int(row['Week B']):>7} "
+                    f"{row['t']:>9.3f} {int(row['df']):>5} "
+                    f"{row['p_raw']:>12.4f} {row['p_bonf']:>12.4f} {sig_s:>4}"
+                )
+            lines.append("")
+
+        # Post-hoc: CA% (Tukey)
+        ph_ca = r.get('posthoc_ca')
+        if ph_ca is not None:
+            lines.append("  POST-HOC: CA% (Tukey HSD on animal means)")
+            lines.append("  " + "-" * 60)
+            lines.append(str(ph_ca.summary()))
+            lines.append("  (reject=True means the groups differ significantly at FWER=0.05)")
+            lines.append("")
+
+        # Post-hoc: interaction cells
+        cell_ph = r.get('posthoc_week_cells', {})
+        if cell_ph:
+            for ca_val, ph in cell_ph.items():
+                if ph is None or len(ph) == 0:
+                    continue
+                lines.append(f"  POST-HOC INTERACTION CELL: CA%={ca_val} (Bonferroni paired t-tests)")
+                lines.append("  " + "-" * 60)
+                lines.append(f"    {'Week A':>7} {'Week B':>7} {'t':>9} {'df':>5} {'p_raw':>12} {'p_bonf':>12} {'sig':>4}")
+                for _, row in ph.iterrows():
+                    sig_s = row.get('sig', '')
+                    lines.append(
+                        f"    {int(row['Week A']):>7} {int(row['Week B']):>7} "
+                        f"{row['t']:>9.3f} {int(row['df']):>5} "
+                        f"{row['p_raw']:>12.4f} {row['p_bonf']:>12.4f} {sig_s:>4}"
+                    )
+                lines.append("")
+
+    # Summary table
+    lines.append("=" * 80)
+    lines.append("SUMMARY TABLE — ALL KEY P-VALUES (α = 0.05)")
+    lines.append("=" * 80)
+    lines.append("  * = significant after BH-FDR correction; raw p for interaction")
+    lines.append("")
+    lines.append(
+        f"  {'Measure':<30} {'Week(FDR)':>12} {'CA%(FDR)':>12} {'Wk×CA%':>10}  Decision"
+    )
+    lines.append("  " + "-" * 90)
+    for m in measures:
+        r = all_results.get(m, {})
+        if 'error' in r:
+            continue
+        wfdr = _fp(r.get('fdr_week_p', np.nan))
+        cfdr = _fp(r.get('fdr_ca_p', np.nan))
+        ip   = _fp(r.get('int_p', np.nan))
+        wstar = '*' if r.get('fdr_week_p', np.nan) < 0.05 else ''
+        cstar = '*' if r.get('fdr_ca_p', np.nan) < 0.05 else ''
+        istar = '*' if (np.isfinite(r.get('int_p', np.nan)) and r.get('int_p') < 0.05) else ''
+        decision_parts = []
+        if wstar: decision_parts.append("Week")
+        if cstar: decision_parts.append("CA%")
+        if istar: decision_parts.append("Wk×CA%")
+        decision = ", ".join(decision_parts) + " significant" if decision_parts else "None significant"
+        lines.append(
+            f"  {m:<30} {wfdr+wstar:>12} {cfdr+cstar:>12} {ip+istar:>10}   {decision}"
+        )
+    lines.append("")
+    lines.append("=" * 80)
+    lines.append("END OF REPORT")
+    lines.append("=" * 80)
+
+    return "\n".join(lines)
+
+
+# =============================================================================
+
+
+# =============================================================================
 # SLOPE ANALYSIS: COMPARING RATE OF WEIGHT CHANGE ACROSS COHORTS
 # =============================================================================
 
@@ -8324,15 +8819,16 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  6. Weight plots         -- Total/Daily Change by ID, Sex, and CA%")
     print("  7. Behavioral plots     -- Nesting, lethargy, anxiety prevalence across weeks")
     print("  8. Behavioral stats     -- Cohort x Week analysis of binary behavioral metrics")
-    print("  9. Run all (1-8)")
+    print("  9. BH-FDR 2-way omnibus -- CA% x Week for all measures, BH-FDR corrected across measures")
+    print(" 10. Run all (1-9)")
     print()
 
-    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-10) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '9')
+    run_all = (user_input == '10')
 
     # ------------------------------------------------------------------ #
     # Option 1 / part of 7: Full weekly omnibus (CA%  x  Week  x  Sex)
@@ -8650,6 +9146,79 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         plt.close('all')
             except Exception as e:
                 print(f"  [WARNING] Interaction plot generation failed: {e}")
+
+    # ------------------------------------------------------------------ #
+    # Option 9 / part of 10: BH-FDR 2-way omnibus (CA% × Week, all measures)
+    # ------------------------------------------------------------------ #
+    if user_input == '9' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: BH-FDR 2-Way Omnibus — CA% × Week (all measures)")
+        print("=" * 80)
+
+        omnibus2_res = None
+        try:
+            omnibus2_res = perform_omnibus_weight_anova_2way(cohorts)
+            report_2way = generate_omnibus_weight_report_2way(
+                omnibus2_res, cohort_dfs=cohorts
+            )
+            rpt_path = Path(f"0v2_omnibus_2way_fdr_{timestamp}.txt")
+            rpt_path.write_text(report_2way, encoding='utf-8')
+            print(f"\n[OK] BH-FDR 2-way omnibus report saved -> {rpt_path}")
+            print(report_2way)
+        except Exception as e:
+            print(f"  [WARNING] BH-FDR 2-way omnibus failed: {e}")
+            import traceback; traceback.print_exc()
+
+        # Plot significant Week × CA% interactions (separate try)
+        if omnibus2_res is not None and HAS_MATPLOTLIB:
+            try:
+                measures_res = omnibus2_res.get('_measures', available_measures)
+                int_plot_dir = Path(f"0v2_omnibus_2way_interaction_plots_{timestamp}")
+                n_plots = 0
+                for _m in measures_res:
+                    _r = omnibus2_res.get(_m, {})
+                    if 'error' in _r or 'analysis_df' not in _r:
+                        continue
+                    int_p = _r.get('int_p', 1.0)
+                    if np.isfinite(int_p) and int_p < 0.05:
+                        int_plot_dir.mkdir(exist_ok=True)
+                        adf = _r['analysis_df']
+                        ca_levels_plot = sorted(adf['CA (%)'].unique())
+                        weeks_plot = sorted(adf['Week'].unique())
+                        palette = ['steelblue', 'darkorange', 'darkgreen', 'purple']
+                        fig, ax = plt.subplots(figsize=(9, 6))
+                        for idx, ca_val in enumerate(ca_levels_plot):
+                            grp = adf[adf['CA (%)'] == ca_val]
+                            stats_df = grp.groupby('Week')[_m].agg(['mean', 'sem']).reset_index()
+                            color = palette[idx % len(palette)]
+                            lbl = f"{ca_val:.0f}% CA"
+                            ax.errorbar(stats_df['Week'], stats_df['mean'],
+                                        yerr=stats_df['sem'],
+                                        label=lbl, marker='o', markersize=8,
+                                        linewidth=2, capsize=5, color=color,
+                                        markerfacecolor=color, markeredgecolor=color)
+                        ax.set_title(f'{_m}: Week × CA% Interaction', fontsize=13, weight='bold')
+                        ax.set_xlabel('Week', fontsize=12, weight='bold')
+                        ax.set_ylabel(f'{_m} (mean ± SEM)', fontsize=12, weight='bold')
+                        ax.set_xticks(weeks_plot)
+                        ax.set_xticklabels([str(int(w)) for w in weeks_plot])
+                        ax.set_ylim(bottom=min(0, ax.get_ylim()[0]))
+                        ax.legend(title='CA%', loc='best', fontsize=10)
+                        ax.spines['top'].set_visible(False)
+                        ax.spines['right'].set_visible(False)
+                        fig.tight_layout()
+                        save_path = int_plot_dir / f"2way_{_m.replace(' ', '_')}_week_x_ca.svg"
+                        fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+                        plt.close(fig)
+                        print(f"[OK] Saved interaction plot -> {save_path}")
+                        n_plots += 1
+                if n_plots:
+                    print(f"[OK] {n_plots} interaction plot(s) saved -> {int_plot_dir}")
+                else:
+                    print("  (No significant Week × CA% interactions to plot)")
+            except Exception as e:
+                print(f"  [WARNING] Interaction plot failed: {e}")
+                import traceback; traceback.print_exc()
 
     print("\n" + "=" * 80)
     print("0% vs 2% analysis complete.")
