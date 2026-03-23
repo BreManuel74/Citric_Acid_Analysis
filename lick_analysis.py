@@ -1654,12 +1654,16 @@ def perform_mixed_anova_posthoc(data: pd.DataFrame, dv: str, within: str, betwee
                     detailed=True
                 )
                 
+                # Column names vary by pingouin version; support both
+                p_col = 'p-unc' if 'p-unc' in rm_aov.columns else 'p_unc'
+                df_col = 'ddof1' if 'ddof1' in rm_aov.columns else 'DF'
+                df2_col = 'ddof2' if 'ddof2' in rm_aov.columns else None
                 simple_effects.append({
                     between: between_level,
                     'F': rm_aov.loc[0, 'F'],
-                    'df1': rm_aov.loc[0, 'ddof1'],
-                    'df2': rm_aov.loc[0, 'ddof2'],
-                    'p-unc': rm_aov.loc[0, 'p-unc'],
+                    'df1': rm_aov.loc[0, df_col],
+                    'df2': rm_aov.loc[1, df_col] if df2_col is None else rm_aov.loc[0, df2_col],
+                    'p-unc': rm_aov.loc[0, p_col],
                     'n_subjects': level_data[subject].nunique(),
                     f'n_{within}_levels': len(within_levels)
                 })
