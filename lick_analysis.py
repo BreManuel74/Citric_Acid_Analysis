@@ -5243,6 +5243,13 @@ def main():
     brief_path = master_csv.parent / "weekly_lick_summary_brief.txt"
     save_brief_lick_summary(weekly_averages, brief_path)
     print(f"Brief lick summary saved to: {brief_path}")
+
+    # Optional: Save statistical test registry
+    save_registry = input("\nSave statistical test registry (methods documentation)? (y/n): ").strip().lower()
+    if save_registry in ['y', 'yes']:
+        registry_path = master_csv.parent / "statistical_test_registry.txt"
+        registry_report = generate_test_registry_report(save_path=registry_path)
+        print(registry_report)
     
     # Optional: Save plots
     save_plot = input("\nSave weekly averages plots as SVG? (y/n): ").strip().lower()
@@ -5360,6 +5367,346 @@ def main():
     print(f"Lick Rate Analysis: 5-minute bins over 30 minutes for each week + comprehensive combined plot")
     
     return weekly_results, weekly_averages, anova_results, bonferroni_results
+
+
+def generate_test_registry_report(save_path=None) -> str:
+    """Generate a formatted plain-text report documenting every statistical
+    test used in lick_analysis.py: data/variables consumed, library source,
+    and every parameter with its meaning."""
+    mode_label = (
+        "RAMP mode  (within-factor = CA%, repeated across citric-acid concentrations)"
+        if EXPERIMENT_MODE == 'ramp'
+        else "NONRAMP mode  (within-factor = Week, repeated across calendar weeks)"
+    )
+    within_factor = "CA_Percent" if EXPERIMENT_MODE == 'ramp' else "Week"
+    wf            = "CA%"        if EXPERIMENT_MODE == 'ramp' else "Week"
+
+    W = 80  # report line width
+
+    def _h1(text):
+        return ["=" * W, f"  {text}", "=" * W]
+
+    def _h2(num, title):
+        return [f"\n{'─' * W}", f"  TEST {num}  │  {title}", f"{'─' * W}", ""]
+
+    def _sub(label):
+        pad = W - 4 - len(label) - 2
+        return [f"  {label}  {'·' * max(pad, 4)}", ""]
+
+    def _tbl(rows, w1=12, w2=44, w3=20):
+        hdr  = f"    {'Variable':<{w1}}  {'Description':<{w2}}  Data Type"
+        sep  = f"    {'─'*w1}  {'─'*w2}  {'─'*w3}"
+        body = [f"    {r[0]:<{w1}}  {r[1]:<{w2}}  {r[2]}" for r in rows]
+        return [hdr, sep] + body
+
+    def _out(rows, w1=14, w2=62):
+        hdr  = f"    {'Column':<{w1}}  Meaning"
+        sep  = f"    {'─'*w1}  {'─'*w2}"
+        body = [f"    {r[0]:<{w1}}  {r[1]}" for r in rows]
+        return [hdr, sep] + body
+
+    # ── Header + Quick Reference ──────────────────────────────────────────── #
+    lines = _h1("STATISTICAL TEST REGISTRY  —  lick_analysis.py")
+    lines += [
+        "",
+        f"  Mode    : {mode_label}",
+        f"  Within  : {within_factor}  |  Between: Sex  |  α = 0.05",
+        "",
+        f"  QUICK REFERENCE  {'·' * 57}",
+        "",
+        f"    {'#':<3}  {'Test':<40}  Library / Function",
+        f"    {'─'*3}  {'─'*40}  {'─'*30}",
+        f"    1    {'Mixed ANOVA  (primary)':<40}  pingouin / pg.mixed_anova()",
+        f"    2    {f'RM-ANOVA  (no Sex data)':<40}  pingouin / pg.rm_anova()",
+        f"    3    {'One-way ANOVA  (no pingouin)':<40}  scipy.stats / f_oneway()",
+        f"    4    {f'Paired t-tests + Bonferroni  ({wf} post-hoc)':<40}  scipy.stats / ttest_rel()",
+        f"    5    {f'Pairwise within  ({wf} post-hoc)':<40}  pingouin / pg.pairwise_tests()",
+        f"    6    {'Pairwise between  (Sex post-hoc)':<40}  scipy / pingouin / ttest_ind()",
+        f"    7    {'Simple-effects RM-ANOVA  (per Sex stratum)':<40}  pingouin / pg.rm_anova()",
+        "",
+        "    Multiple comparisons:",
+        "      Bonferroni — Tests 4 (manual t-test loop) and 7 (across Sex strata)",
+        "      BH-FDR     — Tests 5–6  (padjust=fdr_bh inside pg.pairwise_tests)",
+        "    Sphericity : Greenhouse-Geisser auto-correction  (all pingouin tests;",
+        "                 triggered when Mauchly's p-spher < 0.05)",
+        "=" * W,
+    ]
+
+    # ── TEST 1 ───────────────────────────────────────────────────────────── #
+    lines += _h2("1", f"Mixed (Split-Plot) ANOVA  —  Sex × {wf}")
+    lines += _sub("PURPOSE")
+    lines += [
+        f"    Tests whether lick measures differ across {wf} levels (within-subjects),",
+        f"    between sexes (between-subjects), and whether a Sex × {wf} interaction exists.",
+        "    Primary test when Sex data are available; falls back to Test 2/3 without it.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += ["    pingouin.mixed_anova()     import pingouin as pg", ""]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("data",    f"Long-format DataFrame  (one row per Animal × {wf})", "pd.DataFrame"),
+        ("dv",      "Lick measure  e.g. 'Total_Licks', 'Total_Bouts'",    "pd.Series[float64]"),
+        ("within",  f"'{within_factor}'  — repeated-measures factor",     "pd.Series[int/str]"),
+        ("between", "'Sex'  →  'Male' | 'Female'",                        "pd.Series[str]"),
+        ("subject", "'Animal'  — unique per-animal identifier",            "pd.Series[str]"),
+    ])
+    lines.append("")
+    lines += _sub("PARAMETERS")
+    lines += [
+        "    correction    Not explicitly set  (pingouin default = no forced GG).",
+        "                  Mauchly's sphericity test runs automatically.",
+        "                  When p-spher < 0.05, GG ε adjusts df downward → more conservative",
+        "                  F-test.  Cite p-GG-corr instead of p-unc in those rows.",
+        "                  Note: across_cohort.py uses correction=True  (GG always applied).",
+        "",
+        "    ss_type       Type III SS  (pingouin default; not set explicitly).",
+        "                  Each effect is adjusted for all others including interactions.",
+        "                  Standard choice for unbalanced designs.",
+        "",
+    ]
+    lines += _sub("OUTPUT  (key columns)")
+    lines += _out([
+        ("Source",    f"Effect label: '{within_factor}', 'Sex', '{within_factor} * Sex'"),
+        ("F",         "F-statistic"),
+        ("p-unc",     "Unadjusted p  (use p-GG-corr when sphericity is violated)"),
+        ("np2",       "Partial η²  —  small ≥ 0.01  |  medium ≥ 0.06  |  large ≥ 0.14"),
+        ("p-GG-corr", "Greenhouse-Geisser corrected p  (within-subjects / interaction rows)"),
+        ("W-spher",   "Mauchly's W  (1.0 = perfect sphericity)"),
+        ("p-spher",   "Mauchly's test p  (< 0.05 → sphericity violated → cite GG p)"),
+        ("eps",       "GG ε  (1.0 = no correction needed; lower → larger df reduction)"),
+    ])
+    lines += [
+        "",
+        "    Measures: Total_Licks, Total_Bouts, Avg_ILI, Avg_Bout_Duration,",
+        "              Bottle_Weight_Loss, First_5min_Lick_Pct, Time_to_50pct_Licks,",
+        "              First_5min_Bout_Pct",
+        "    Threshold: α = 0.05  (each measure is an independent testing family)",
+    ]
+
+    # ── TEST 2 ───────────────────────────────────────────────────────────── #
+    lines += _h2("2", f"One-Way RM-ANOVA  —  {wf} only  (no Sex data)")
+    lines += _sub("PURPOSE")
+    lines += [
+        f"    Fallback when Sex data are absent.  Tests the {wf} within-factor only,",
+        "    treating all animals as one group.  Results carry a 'no Sex data' warning.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += ["    pingouin.rm_anova()     import pingouin as pg", ""]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("data",    f"Long-format DataFrame (one row per Animal × {wf})", "pd.DataFrame"),
+        ("dv",      "Lick measure column",                                "pd.Series[float64]"),
+        ("within",  f"'{within_factor}'",                                 "pd.Series[int/str]"),
+        ("subject", "'Animal'",                                           "pd.Series[str]"),
+    ])
+    lines.append("")
+    lines += _sub("PARAMETERS")
+    lines += [
+        "    detailed   True  — returns full SS table including within- and between-subjects",
+        "               error rows, enabling sphericity assessment and η² reporting.",
+        "",
+        "    All other params use pingouin defaults.",
+        "    Output columns: Source, F, p-unc, np2, p-GG-corr, eps, W-spher, p-spher",
+        "    Threshold: α = 0.05",
+    ]
+
+    # ── TEST 3 ───────────────────────────────────────────────────────────── #
+    lines += _h2("3", "One-Way Independent ANOVA  (pingouin not installed)")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Emergency fallback when pingouin cannot be imported.  Subjects treated as",
+        "    independent observations — does NOT account for repeated measures or Sex.",
+        "    Results are flagged with a warning in all reports.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += ["    scipy.stats.f_oneway()     from scipy import stats", ""]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("*groups", f"One 1-D array per {wf} level (all measurements at that level)",
+         "np.ndarray[float64]"),
+    ])
+    lines.append("")
+    lines += _sub("PARAMETERS  &  OUTPUT")
+    lines += [
+        "    *groups  — positional; pass each level's values as a separate array",
+        "    (no additional keyword parameters)",
+        "    Returns  — F-statistic (float),  p-value (float)",
+        "    Threshold: α = 0.05",
+    ]
+
+    # ── TEST 4 ───────────────────────────────────────────────────────────── #
+    lines += _h2("4", f"Bonferroni Paired t-Tests  (post-hoc for significant {wf} effect)")
+    lines += _sub("PURPOSE")
+    lines += [
+        f"    Pairwise follow-up after a significant {wf} ANOVA.  Each pair of {wf} levels",
+        "    is compared using a paired t-test  (same animals experienced both levels).",
+        "    Bonferroni multiplication controls the family-wise error rate across all pairs.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += ["    scipy.stats.ttest_rel()     from scipy import stats", ""]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("v1", f"Values at {wf} level A  (ordered by Animal ID)", "np.ndarray[float64]"),
+        ("v2", f"Values at {wf} level B  (same order as v1)",     "np.ndarray[float64]"),
+    ], w1=5, w2=52, w3=20)
+    lines += [
+        "    Note: only animals present at BOTH levels are included  (inner join on ID).",
+        "",
+    ]
+    lines += _sub("PARAMETERS  &  ADDITIONAL QUANTITIES")
+    lines += [
+        "    v1, v2     — equal-length paired 1-D arrays  (two-tailed test by default)",
+        "",
+        f"    Bonferroni:  p_adj = min(p_raw × k, 1.0)   where k = C(n_{wf}_levels, 2)",
+        "",
+        "    df         = n_pairs − 1",
+        "    t_crit     = stats.t.ppf(0.975, df)  (two-tailed critical value, α = 0.05)",
+        "    CI_lower   = mean_diff − t_crit × SE_diff",
+        "    CI_upper   = mean_diff + t_crit × SE_diff",
+        "    SE_diff    = SD(differences) / sqrt(n_pairs)",
+        "",
+        "    Threshold: α = 0.05 applied to Bonferroni-adjusted p",
+    ]
+
+    # ── TEST 5 ───────────────────────────────────────────────────────────── #
+    lines += _h2("5", f"Within-Subjects Pairwise Tests  (post-hoc for {wf} effect)")
+    lines += _sub("PURPOSE")
+    lines += [
+        f"    Called from perform_mixed_anova_posthoc().  All pairwise {wf} comparisons",
+        "    collapsed across Sex, using pingouin's built-in FDR correction and Hedges' g.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += ["    pingouin.pairwise_tests()     import pingouin as pg", ""]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("data",    "Long-format DataFrame",               "pd.DataFrame"),
+        ("dv",      "Lick measure column",                 "pd.Series[float64]"),
+        ("within",  f"'{within_factor}'",                  "pd.Series[int/str]"),
+        ("subject", "Subject identifier column",           "pd.Series[str]"),
+    ])
+    lines.append("")
+    lines += _sub("PARAMETERS")
+    lines += [
+        "    parametric   True  — paired Student's t-test  (not Wilcoxon rank-sum)",
+        "",
+        "    padjust      'fdr_bh'  — Benjamini-Hochberg FDR applied across all pairwise",
+        "                 comparisons for this measure.  Controls the expected proportion of",
+        "                 false discoveries at 5%  (less conservative than Bonferroni).",
+        "",
+        "    effsize      'hedges'  — Hedges' g  =  Cohen's d × (1 − 3 / (4·df − 1)).",
+        "                 Bias-corrected standardised mean difference; preferred for n < 20.",
+        "",
+        "    Threshold: α = 0.05 applied to BH-FDR-corrected p  (padjust column)",
+    ]
+
+    # ── TEST 6 ───────────────────────────────────────────────────────────── #
+    lines += _h2("6", "Between-Subjects Pairwise Tests  (post-hoc for Sex effect)")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Also from perform_mixed_anova_posthoc().  Compares Sex groups on the lick",
+        f"    measure averaged across all {wf} levels.  Uses ttest_ind for 2 groups,",
+        "    pg.pairwise_tests for 3 or more.",
+        "",
+    ]
+    lines += _sub("LIBRARY  (exactly 2 Sex groups — the common case)")
+    lines += ["    scipy.stats.ttest_ind()     from scipy import stats", ""]
+    lines += _sub("INPUTS  (2-group case)")
+    lines += _tbl([
+        ("group1", "Per-animal means for Sex group 1",   "pd.Series[float64]"),
+        ("group2", "Per-animal means for Sex group 2",   "pd.Series[float64]"),
+    ], w1=8, w2=50, w3=20)
+    lines.append("")
+    lines += _sub("PARAMETERS  (2-group case)")
+    lines += [
+        "    equal_var   True  (default)  —  Student's independent-samples t-test.",
+        "                Assumes equal population variances  (not Welch's correction).",
+        "",
+        "    Cohen's d   = (mean₁ − mean₂) / pooled_SD",
+        "    pooled_SD   = sqrt( ((n₁−1)·SD₁² + (n₂−1)·SD₂²) / (n₁+n₂−2) )",
+        "",
+    ]
+    lines += _sub("LIBRARY  (≥ 3 Sex groups — uncommon fallback)")
+    lines += [
+        "    pingouin.pairwise_tests(data, dv, between='Sex',",
+        "                            parametric=True, padjust='fdr_bh', effsize='cohen')",
+        "",
+        "    Threshold: α = 0.05  (no correction for 2 groups  |  BH-FDR for ≥ 3 groups)",
+    ]
+
+    # ── TEST 7 ───────────────────────────────────────────────────────────── #
+    lines += _h2("7", "Simple-Effects RM-ANOVA  (within each Sex stratum separately)")
+    lines += _sub("PURPOSE")
+    lines += [
+        f"    From perform_mixed_anova_posthoc().  For each Sex level independently,",
+        f"    a one-way RM-ANOVA tests whether the {wf} effect holds within that sex.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += ["    pingouin.rm_anova()     import pingouin as pg", ""]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("data",    f"Long-format DataFrame  filtered to one Sex stratum",  "pd.DataFrame"),
+        ("dv",      "Lick measure column",                                  "pd.Series[float64]"),
+        ("within",  f"'{within_factor}'",                                   "pd.Series[int/str]"),
+        ("subject", "Subject identifier column",                            "pd.Series[str]"),
+    ])
+    lines.append("")
+    lines += _sub("PARAMETERS  &  CORRECTION")
+    lines += [
+        "    detailed   False  (condensed output — no separate error-SS rows)",
+        "    All other params use pingouin defaults.",
+        "",
+        "    Bonferroni across strata:  α_adj = 0.05 / n_sex_levels",
+        "    Sphericity GG-correction applied automatically when p-spher < 0.05.",
+        "",
+        "    Output: Source, F, p-unc, np2  (+ p-GG-corr when sphericity violated)",
+        "    Threshold: α_adj = 0.05 / n_sex_levels",
+    ]
+
+    # ── SUMMARY ──────────────────────────────────────────────────────────── #
+    lines += [
+        "",
+        f"\n{'─' * W}",
+        "  CORRECTION METHODS SUMMARY",
+        f"  {'·' * (W - 4)}",
+        "",
+        f"    {'Context':<34}  {'Method':<18}  Detail",
+        f"    {'─'*34}  {'─'*18}  {'─'*22}",
+        f"    {'Omnibus within effect (all tests)':<34}  {'GG auto':<18}  Mauchly p < 0.05 triggers GG",
+        f"    {'Paired t-test loop  (Test 4)':<34}  {'Bonferroni':<18}  p × C(k,2)  |  capped at 1.0",
+        f"    {'Pairwise_tests  (Tests 5–6)':<34}  {'BH-FDR':<18}  padjust=fdr_bh in pingouin",
+        f"    {'Simple-effects  (Test 7)':<34}  {'Bonferroni/Sex':<18}  α_adj = 0.05 / n_sex_levels",
+        "",
+        f"{'─' * W}",
+        "  MEASURES ANALYSED",
+        f"  {'·' * (W - 4)}",
+        "",
+        "    Primary lick measures",
+        "      1.  Total_Licks          total lick count per session               int → float",
+        "      2.  Total_Bouts          total lick bouts per session               int → float",
+        "      3.  Avg_ILI              mean inter-lick interval  (ms)             float",
+        "      4.  Avg_Bout_Duration    mean bout duration  (s)                    float",
+        "      5.  Bottle_Weight_Loss   liquid consumed  (g; negatives removed)    float",
+        "",
+        "    Frontloading / temporal distribution",
+        "      6.  First_5min_Lick_Pct  % of session licks in the first 5 min     float  0–100",
+        "      7.  Time_to_50pct_Licks  minutes to reach 50% of session licks     float",
+        "      8.  First_5min_Bout_Pct  % of session bouts in the first 5 min     float  0–100",
+        "",
+        "=" * W,
+    ]
+
+    report = "\n".join(lines)
+    if save_path is not None:
+        Path(save_path).write_text(report, encoding="utf-8")
+        print(f"[OK] Test registry saved -> {save_path}")
+    return report
+
 
 
 if __name__ == "__main__":

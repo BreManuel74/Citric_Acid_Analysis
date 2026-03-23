@@ -1,4 +1,4 @@
-﻿"""
+"""
 Cross-Cohort Analysis Module
 
 This module provides functionality to load and compare data across multiple cohorts.
@@ -8789,6 +8789,322 @@ def _detect_comparison_type(cohorts: Dict[str, pd.DataFrame]) -> str:
     return 'unknown'
 
 
+# ---------------------------------------------------------------------------
+# Statistical Test Registry
+# ---------------------------------------------------------------------------
+
+def generate_test_registry_report(save_path=None) -> str:
+    """Generate a formatted plain-text report documenting every statistical
+    test used in across_cohort.py: data/variables consumed, library source,
+    and every parameter with its meaning."""
+
+    W = 80  # report line width
+
+    def _h1(text):
+        return ["=" * W, f"  {text}", "=" * W]
+
+    def _h2(num, title):
+        return [f"\n{'─' * W}", f"  TEST {num}  │  {title}", f"{'─' * W}", ""]
+
+    def _sub(label):
+        pad = W - 4 - len(label) - 2
+        return [f"  {label}  {'·' * max(pad, 4)}", ""]
+
+    def _tbl(rows, w1=12, w2=44, w3=20):
+        hdr  = f"    {'Variable':<{w1}}  {'Description':<{w2}}  Data Type"
+        sep  = f"    {'─'*w1}  {'─'*w2}  {'─'*w3}"
+        body = [f"    {r[0]:<{w1}}  {r[1]:<{w2}}  {r[2]}" for r in rows]
+        return [hdr, sep] + body
+
+    def _out(rows, w1=14, w2=62):
+        hdr  = f"    {'Column':<{w1}}  Meaning"
+        sep  = f"    {'─'*w1}  {'─'*w2}"
+        body = [f"    {r[0]:<{w1}}  {r[1]}" for r in rows]
+        return [hdr, sep] + body
+
+    # ── Header + Quick Reference ──────────────────────────────────────────── #
+    lines = _h1("STATISTICAL TEST REGISTRY  —  across_cohort.py")
+    lines += [
+        "",
+        "  Script: 0% vs 2% nonramp cross-cohort weight and behavioral analysis",
+        "  Within-factor: Week  |  Between-factors: CA% (0 vs 2), Sex  |  α = 0.05",
+        "",
+        f"  QUICK REFERENCE  {'·' * 57}",
+        "",
+        f"    {'#':<3}  {'Test':<44}  Library / Function",
+        f"    {'─'*3}  {'─'*44}  {'─'*26}",
+        "    1    Mixed ANOVA  (CA% × Week × Sex)               pingouin / pg.mixed_anova()",
+        "    2    Between-subjects ANOVA  (CA% × Sex)            pingouin / pg.anova()",
+        "    3    Pairwise post-hoc  (Bonferroni)                pingouin / pg.pairwise_tests()",
+        "    4    Cochran's Q  (binary outcomes across weeks)    statsmodels / cochrans_q()",
+        "    5    McNemar  (pairwise week post-hoc, binary)      statsmodels / mcnemar()",
+        "",
+        "    Multiple comparisons:",
+        "      Bonferroni  — Test 3  (padjust='bonf')  and  Test 5  (p × n_pairs)",
+        "      No cross-measure correction  (each weight measure is a separate family)",
+        "    Sphericity : correction=True  (GG always applied, not just when violated)",
+        "=" * W,
+    ]
+
+    # ── TEST 1 ───────────────────────────────────────────────────────────── #
+    lines += _h2("1", "Mixed (Split-Plot) ANOVA  —  CA% × Week × Sex")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Tests whether weight-change measures differ across weeks (within-subjects),",
+        "    between CA% cohorts and sexes (between-subjects), and whether any two-way or",
+        "    three-way interactions exist.  Primary longitudinal test for weight outcomes.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += ["    pingouin.mixed_anova()     import pingouin as pg", ""]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("data",    "Long-format DataFrame  (one row per ID × Week)",       "pd.DataFrame"),
+        ("dv",      "Measure  e.g. 'Total Change' or 'Daily Change'  (g)", "pd.Series[float64]"),
+        ("within",  "'Week'  — repeated-measures factor  (integer index)",  "pd.Series[int]"),
+        ("subject", "'ID'  — unique animal identifier",                     "pd.Series[str]"),
+        ("between", "'Group'  (e.g. '0% Male') | 'Sex' | 'CA (%)'",        "pd.Series[str]"),
+    ])
+    lines.append("")
+    lines += _sub("PARAMETERS")
+    lines += [
+        "    correction   True  — Greenhouse-Geisser ε correction is ALWAYS applied to",
+        "                 within-subjects and interaction effects, regardless of whether",
+        "                 Mauchly's sphericity test is violated.",
+        "                 GG adjusts both numerator and denominator df downward, producing",
+        "                 a conservative F-test even when sphericity holds.",
+        "                 contrast: behavioral_analysis.py uses correction='auto'",
+        "                 (GG only when p-spher < 0.05).",
+        "",
+        "    ss_type      Type III SS  (pingouin default; not set explicitly).",
+        "",
+    ]
+    lines += _sub("OUTPUT  (key columns)")
+    lines += _out([
+        ("Source",  "Effect label: 'Week', 'Group', 'Sex', 'CA (%)', 'Week * Group', …"),
+        ("ddof1",   "Numerator df  (GG-corrected because correction=True)"),
+        ("ddof2",   "Denominator df  (GG-corrected)"),
+        ("F",       "F-statistic"),
+        ("p-unc",   "Unadjusted p  (note: GG df already used; compare to p-GG-corr)"),
+        ("np2",     "Partial η²  —  small ≥ 0.01  |  medium ≥ 0.06  |  large ≥ 0.14"),
+        ("eps",     "GG ε  (1.0 = no sphericity violation; lower → more df reduction)"),
+    ])
+    lines += ["", "    Threshold: α = 0.05"]
+
+    # ── TEST 2 ───────────────────────────────────────────────────────────── #
+    lines += _h2("2", "Two-Way Between-Subjects ANOVA  —  CA% × Sex")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Examines the cross-sectional between-subjects effects using per-animal means",
+        "    averaged across all weeks.  Runs after or alongside the mixed ANOVA.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += ["    pingouin.anova()     import pingouin as pg", ""]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("data",    "subject_means_clean  — one row per animal  (week-averaged)",  "pd.DataFrame"),
+        ("dv",      "Measure column  (float, grams)",                              "pd.Series[float64]"),
+        ("between", "['CA_percent', 'Sex']",                                       "list[str]"),
+        ("",        "  CA_percent — CA concentration  (0 or 2)",                   "float/int"),
+        ("",        "  Sex        — 'Male' | 'Female'",                            "str"),
+    ])
+    lines.append("")
+    lines += _sub("PARAMETERS")
+    lines += [
+        "    ss_type   int — Sum-of-Squares type used to partition variance:",
+        "              Type 1  sequential SS; each factor adjusted for entries before it;",
+        "                      order-dependent — sensitive to factor entry order.",
+        "              Type 2  hierarchical SS; main effects adjusted for each other",
+        "                      but not interactions.",
+        "              Type 3  marginal / orthogonal SS; each effect adjusted for all",
+        "              (default) others including interactions.  Standard for unbalanced",
+        "                      designs — the recommended choice here.",
+        "",
+    ]
+    lines += _sub("OUTPUT  (key columns)")
+    lines += _out([
+        ("Source",  "'CA_percent', 'Sex', 'CA_percent * Sex', 'Residual'"),
+        ("SS",      "Sum of squares for the effect"),
+        ("DF",      "Degrees of freedom"),
+        ("MS",      "Mean square  =  SS / DF"),
+        ("F",       "F-statistic"),
+        ("p-unc",   "Unadjusted p-value"),
+        ("np2",     "Partial η²"),
+    ])
+    lines += ["", "    Threshold: α = 0.05"]
+
+    # ── TEST 3 ───────────────────────────────────────────────────────────── #
+    lines += _h2("3", "Pairwise Post-Hoc Tests  —  Bonferroni-corrected  (CA% or Sex)")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Follow-up for a significant CA% or Sex main effect.  Compares all pairs",
+        "    of groups on the weight measure (per-animal means across weeks).",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += ["    pingouin.pairwise_tests()     import pingouin as pg", ""]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("data",    "subject_means  — one row per animal",               "pd.DataFrame"),
+        ("dv",      "Measure column  (float)",                           "pd.Series[float64]"),
+        ("between", "'CA (%)'  — categorical grouping factor",           "pd.Series[str/float]"),
+    ])
+    lines.append("")
+    lines += _sub("PARAMETERS")
+    lines += [
+        "    padjust   'bonf'  — Bonferroni correction: multiply each raw p by the number",
+        "              of comparisons k; cap at 1.0.  Controls FWER at α = 0.05.",
+        "              More conservative than BH-FDR used in lick scripts; chosen here",
+        "              because the number of weight-measure comparisons is small.",
+        "",
+    ]
+    lines += _sub("OUTPUT  (key columns)")
+    lines += _out([
+        ("A, B",    "The two groups being compared"),
+        ("T",       "t-statistic"),
+        ("dof",     "Degrees of freedom"),
+        ("p-unc",   "Uncorrected p-value"),
+        ("p-corr",  "Bonferroni-corrected p-value"),
+        ("hedges",  "Hedges' g effect size  (bias-corrected Cohen's d)"),
+    ])
+    lines += ["", "    Threshold: α = 0.05 applied to Bonferroni-corrected p"]
+
+    # ── TEST 4 ───────────────────────────────────────────────────────────── #
+    lines += _h2("4", "Cochran's Q Test  —  binary behavioral outcomes across weeks")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Non-parametric repeated-measures test for binary (0/1) outcomes across weeks.",
+        "    Analogous to a RM-ANOVA for proportions.  Used for nesting, lethargy,",
+        "    anxious behaviors, and CA-spot digging.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += [
+        "    statsmodels.stats.contingency_tables.cochrans_q()",
+        "    from statsmodels.stats.contingency_tables import cochrans_q",
+        "",
+    ]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("wide", "Wide-format binary matrix:  rows = subjects,  columns = weeks",
+         "pd.DataFrame[float64]"),
+    ])
+    lines += [
+        "    Cell values: 0 (absent) or 1 (present).",
+        "    Constructed by pivoting the behavioral DataFrame on Week; NaN → 0.",
+        "",
+    ]
+    lines += _sub("PARAMETERS  &  OUTPUT")
+    lines += [
+        "    wide  — positional DataFrame argument  (no additional keyword params)",
+        "    Uses chi-squared approximation internally.",
+        "",
+        "    statistic   Cochran's Q  (float; chi-square distributed with df = k − 1)",
+        "                where k = number of weeks",
+        "    pvalue      asymptotic p-value  (H0: binary outcome probability equals",
+        "                across all weeks)",
+        "",
+    ]
+    lines += _sub("SUPPLEMENTARY PERMUTATION TEST")
+    lines += [
+        "    n_permutations : _n_perm = 5000",
+        "    RNG seed       : np.random.default_rng(seed=42)  (for reproducibility)",
+        "    Method: within each subject (row), shuffle binary responses across weeks;",
+        "            re-compute Q each iteration.",
+        "    Empirical p  =  proportion of permuted Q ≥ observed Q",
+        "    Threshold: α = 0.05",
+    ]
+
+    # ── TEST 5 ───────────────────────────────────────────────────────────── #
+    lines += _h2("5", "McNemar's Test  —  pairwise week post-hoc  (binary outcomes)")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Performed after a significant Cochran's Q (Test 4).  Compares each pair of",
+        "    weeks on the binary outcome for subjects observed at both weeks.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += [
+        "    statsmodels.stats.contingency_tables.mcnemar()",
+        "    from statsmodels.stats.contingency_tables import mcnemar",
+        "",
+    ]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("table", "2×2 contingency table:  rows = response at week A (0/1),",
+         "np.ndarray[int]"),
+        ("",      "cols = response at week B (0/1)", ""),
+    ])
+    lines += [
+        "    Constructed by cross-tabulating the binary outcome column between two weeks",
+        "    for the subjects observed at both.",
+        "",
+    ]
+    lines += _sub("PARAMETERS")
+    lines += [
+        "    exact        False  — chi-square approximation  (used when discordant pairs ≥ 25;",
+        "                 chi-square approximation is more powerful and common in practice).",
+        "",
+        "    correction   True   — Yates' continuity correction:  subtract 0.5 from",
+        "                 |b − c| before squaring.  Reduces Type-I error for small",
+        "                 numbers of discordant pairs.",
+        "",
+    ]
+    lines += _sub("EFFECT SIZE  &  CORRECTION")
+    lines += [
+        "    Bonferroni: p_adj = min(p_raw × actual_n, 1.0)",
+        "    where actual_n = number of week-pairs that produced a valid test result",
+        "    (some pairs skipped when too few discordant pairs exist).",
+        "",
+        "    statistic   chi-square value  (or exact stat when exact=True)",
+        "    pvalue      raw p-value; Bonferroni-adjusted p also reported",
+        "    Threshold: α = 0.05 applied to Bonferroni-adjusted p",
+    ]
+
+    # ── SUMMARY ──────────────────────────────────────────────────────────── #
+    lines += [
+        "",
+        f"\n{'─' * W}",
+        "  CORRECTION METHODS SUMMARY",
+        f"  {'·' * (W - 4)}",
+        "",
+        f"    {'Context':<38}  {'Method':<18}  Detail",
+        f"    {'─'*38}  {'─'*18}  {'─'*18}",
+        f"    {'Mixed ANOVA within/interaction':<38}  {'GG always':<18}  correction=True",
+        f"    {'Between-subjects pairwise  (Test 3)':<38}  {'Bonferroni':<18}  padjust=bonf",
+        f"    {'McNemar post-hoc  (Test 5)':<38}  {'Bonferroni':<18}  p × actual_n pairs",
+        f"    {'Cochrans Q  (Test 4)':<38}  {'None':<18}  each behavior separate",
+        "",
+        f"{'─' * W}",
+        "  MEASURES ANALYSED",
+        f"  {'·' * (W - 4)}",
+        "",
+        "    Continuous weight measures  (Mixed ANOVA + Two-way ANOVA)",
+        "      Total Change    cumulative weight change across the experiment   float  (g)",
+        "      Daily Change    mean daily weight change per session             float  (g/day)",
+        "",
+        "    Binary behavioral observations  (Cochran's Q + McNemar)",
+        "      Nesting       nest present (1) or absent (0) per week",
+        "      Lethargy      observed (1) or not (0) per week",
+        "      Anxious Behaviors   observed (1) or not (0) per week",
+        "      CA-spot Digging     observed (1) or not (0) per week",
+        "",
+        "=" * W,
+    ]
+
+    report = "\n".join(lines)
+    if save_path is not None:
+        try:
+            from pathlib import Path as _Path
+            _Path(save_path).write_text(report, encoding="utf-8")
+            print(f"[OK] Test registry saved -> {save_path}")
+        except Exception as _e:
+            print(f"[WARNING] Could not save registry: {_e}")
+    return report
+
+
+
 def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     """
     Interactive analysis menu for the 0% vs 2% nonramp comparison.
@@ -8820,15 +9136,16 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  7. Behavioral plots     -- Nesting, lethargy, anxiety prevalence across weeks")
     print("  8. Behavioral stats     -- Cohort x Week analysis of binary behavioral metrics")
     print("  9. BH-FDR 2-way omnibus -- CA% x Week for all measures, BH-FDR corrected across measures")
-    print(" 10. Run all (1-9)")
+    print(" 10. Statistical registry -- Print/save methods documentation for all tests used")
+    print(" 11. Run all (1-10)")
     print()
 
-    user_input = input("Select option (1-10) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-11) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '10')
+    run_all = (user_input == '11')
 
     # ------------------------------------------------------------------ #
     # Option 1 / part of 7: Full weekly omnibus (CA%  x  Week  x  Sex)
@@ -9219,6 +9536,21 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             except Exception as e:
                 print(f"  [WARNING] Interaction plot failed: {e}")
                 import traceback; traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 10 / part of run_all: Statistical test registry
+    # ------------------------------------------------------------------ #
+    if user_input == '10' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: Statistical test registry (methods documentation)")
+        print("=" * 80)
+        try:
+            registry_path = Path(f"0v2_test_registry_{timestamp}.txt")
+            registry_report = generate_test_registry_report(save_path=registry_path)
+            print(registry_report)
+        except Exception as e:
+            print(f"  [WARNING] Registry generation failed: {e}")
+            import traceback; traceback.print_exc()
 
     print("\n" + "=" * 80)
     print("0% vs 2% analysis complete.")

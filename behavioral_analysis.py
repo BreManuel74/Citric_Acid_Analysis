@@ -4837,6 +4837,322 @@ def plot_interaction_effects(
 	return figures
 
 
+def generate_test_registry_report(save_path=None) -> str:
+    """Generate a formatted plain-text report documenting every statistical
+    test used in behavioral_analysis.py: data/variables consumed, library
+    source, and every parameter with its meaning."""
+    wc = _MLB['within_col']    # e.g. 'CA_Percent' or 'Week'
+    fl = _MLB['factor_label']  # e.g. 'CA%' or 'Week'
+    mode_label = (
+        "RAMP mode  (within-factor = CA%, repeated across citric-acid concentrations)"
+        if EXPERIMENT_MODE == 'ramp'
+        else "NONRAMP mode  (within-factor = Week, repeated across calendar weeks)"
+    )
+
+    W = 80  # report line width
+
+    def _h1(text):
+        return ["=" * W, f"  {text}", "=" * W]
+
+    def _h2(num, title):
+        return [f"\n{'─' * W}", f"  TEST {num}  │  {title}", f"{'─' * W}", ""]
+
+    def _sub(label):
+        pad = W - 4 - len(label) - 2
+        return [f"  {label}  {'·' * max(pad, 4)}", ""]
+
+    def _tbl(rows, w1=12, w2=44, w3=20):
+        hdr  = f"    {'Variable':<{w1}}  {'Description':<{w2}}  Data Type"
+        sep  = f"    {'─'*w1}  {'─'*w2}  {'─'*w3}"
+        body = [f"    {r[0]:<{w1}}  {r[1]:<{w2}}  {r[2]}" for r in rows]
+        return [hdr, sep] + body
+
+    def _out(rows, w1=14, w2=62):
+        hdr  = f"    {'Column':<{w1}}  Meaning"
+        sep  = f"    {'─'*w1}  {'─'*w2}"
+        body = [f"    {r[0]:<{w1}}  {r[1]}" for r in rows]
+        return [hdr, sep] + body
+
+    # ── Header + Quick Reference ──────────────────────────────────────────── #
+    lines = _h1("STATISTICAL TEST REGISTRY  —  behavioral_analysis.py")
+    lines += [
+        "",
+        f"  Mode    : {mode_label}",
+        f"  Within  : {wc}  ({fl})  |  Between: Sex  |  α = 0.05",
+        "",
+        "  Analyses: continuous weight-change measures  +  binary behavioral observations",
+        "",
+        f"  QUICK REFERENCE  {'·' * 57}",
+        "",
+        f"    {'#':<3}  {'Test':<44}  Library / Function",
+        f"    {'─'*3}  {'─'*44}  {'─'*26}",
+        f"    1    {'Mixed ANOVA  (continuous measures)':<44}  pingouin / pg.mixed_anova()",
+        f"    2    {'One-way ANOVA  (no pingouin fallback)':<44}  scipy.stats / f_oneway()",
+        "    3    {:<44}  statsmodels / cochrans_q()".format("Cochran's Q  (binary outcomes across " + fl),
+        "    4    {:<44}  statsmodels / mcnemar()".format("McNemar  (pairwise " + fl + " post-hoc, binary)"),
+        f"    5    {'GEE  (Sex effect on binary outcome)':<44}  statsmodels / GEE()",
+        "",
+        "    Multiple comparisons:",
+        "      McNemar post-hoc  — Bonferroni  (p_adj = p_raw × k; k = C(n_levels, 2))",
+        "      Mixed ANOVA within  — GG auto-correction  (Mauchly p < 0.05 triggers GG)",
+        "      Mixed ANOVA: correction='auto'  — GG applied only when sphericity violated",
+        "=" * W,
+    ]
+
+    # ── TEST 1 ───────────────────────────────────────────────────────────── #
+    lines += _h2("1", f"Mixed (Split-Plot) ANOVA  —  Sex × {fl}")
+    lines += _sub("PURPOSE")
+    lines += [
+        f"    Tests whether continuous measures differ across {fl} levels (within-subjects),",
+        "    between sexes (between-subjects), and whether Sex moderates the trend.",
+        "    This is the primary test for weight-change and lick-rate outcomes.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += ["    pingouin.mixed_anova()     import pingouin as pg", ""]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("data",    f"Long-format DataFrame  (one row per ID × {fl} level)", "pd.DataFrame"),
+        ("dv",      "'Value'  — continuous outcome  (weight change in g, etc.)", "pd.Series[float64]"),
+        ("within",  f"'{wc}'  — repeated-measures factor",                       "pd.Series[str/int]"),
+        ("between", "'Sex'  →  'Male' | 'Female'",                               "pd.Series[str]"),
+        ("subject", "'ID'  — unique animal identifier",                          "pd.Series[str]"),
+    ])
+    lines.append("")
+    lines += _sub("PARAMETERS")
+    lines += [
+        "    correction   'auto'  — Greenhouse-Geisser ε correction is applied to",
+        "                 within-subjects and interaction effects ONLY WHEN Mauchly's",
+        "                 sphericity test is significant  (p-spher < 0.05).",
+        "                 contrast: across_cohort.py uses correction=True  (always GG).",
+        "                 contrast: lick_analysis.py does not set correction  (same as auto",
+        "                 but pingouin infers it from the data).",
+        "",
+        "    ss_type      Type III SS  (pingouin default; not set explicitly).",
+        "",
+    ]
+    lines += _sub("OUTPUT  (key columns)")
+    lines += _out([
+        ("Source",    f"Effect label: 'Sex', '{wc}', 'Sex * {wc}'"),
+        ("F",         "F-statistic"),
+        ("p-unc",     "Unadjusted p  (use p-GG-corr when sphericity is violated)"),
+        ("np2",       "Partial η²  —  small ≥ 0.01  |  medium ≥ 0.06  |  large ≥ 0.14"),
+        ("DF1/DF2",   "Numerator / denominator degrees of freedom"),
+        ("p-GG-corr", "GG-corrected p  (within-subjects / interaction rows)"),
+        ("W-spher",   "Mauchly's W  (1.0 = perfect sphericity)"),
+        ("p-spher",   "Mauchly's p  (< 0.05 → cite p-GG-corr)"),
+        ("eps",       "GG ε  (1.0 = no correction; lower → larger df reduction)"),
+    ])
+    lines += [
+        "",
+        "    Measures: Total_Weight_Change  (g),  Daily_Weight_Change  (g/day)",
+        "    Threshold: α = 0.05",
+    ]
+
+    # ── TEST 2 ───────────────────────────────────────────────────────────── #
+    lines += _h2("2", "One-Way Independent ANOVA  (pingouin not installed)")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Emergency fallback when pingouin is unavailable.  Does NOT account for",
+        "    repeated measures or Sex.  Results are flagged with a warning in output.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += ["    scipy.stats.f_oneway()     from scipy.stats import f_oneway", ""]
+    lines += _sub("INPUTS  &  OUTPUT")
+    lines += _tbl([
+        ("*groups", f"One 1-D array per {fl} level (observations at that level)",
+         "np.ndarray[float64]"),
+    ])
+    lines += [
+        "",
+        "    *groups  — positional; pass each level's values as a separate array",
+        "    Returns  — F-statistic (float),  p-value (float)",
+        "    Threshold: α = 0.05",
+    ]
+
+    # ── TEST 3 ───────────────────────────────────────────────────────────── #
+    lines += _h2("3", f"Cochran's Q Test  —  binary outcomes across {fl} levels")
+    lines += _sub("PURPOSE")
+    lines += [
+        f"    Non-parametric repeated-measures test for binary (0/1) outcomes across",
+        f"    {fl} levels.  Analogous to a RM-ANOVA for proportions.  Used for nest",
+        "    building, lethargy, anxious behaviors, and CA-spot digging.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += [
+        "    statsmodels.stats.contingency_tables.cochrans_q()",
+        "    from statsmodels.stats.contingency_tables import cochrans_q",
+        "",
+    ]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("wide", f"Wide-format binary matrix: rows = subjects, columns = {fl} levels",
+         "pd.DataFrame[float64]"),
+    ])
+    lines += [
+        "    Cell values: 0 (absent) or 1 (present).",
+        f"    Constructed by pivoting the long-format DataFrame on {fl}; NaN → 0.",
+        "",
+    ]
+    lines += _sub("PARAMETERS  &  OUTPUT")
+    lines += [
+        "    wide  — positional DataFrame argument  (no additional keyword params)",
+        "    Uses chi-squared approximation internally.",
+        "",
+        "    statistic   Cochran's Q  (float; chi-square distributed with df = k − 1)",
+        f"                where k = number of {fl} levels",
+        "    pvalue      asymptotic p-value  (H0: binary outcome probability is equal",
+        f"                across all {fl} levels)",
+        "",
+    ]
+    lines += _sub("SUPPLEMENTARY PERMUTATION TEST")
+    lines += [
+        "    When the asymptotic p is borderline, a permutation test is also run:",
+        "    n_permutations : 5000",
+        "    RNG seed       : np.random.default_rng(42)  (for reproducibility)",
+        "    Method: within each subject (row), shuffle binary responses across",
+        f"            {fl} levels; re-compute Q each iteration.",
+        "    Empirical p  =  proportion of permuted Q ≥ observed Q",
+        "    Threshold: α = 0.05",
+    ]
+
+    # ── TEST 4 ───────────────────────────────────────────────────────────── #
+    lines += _h2("4", f"McNemar's Test  —  pairwise {fl} post-hoc  (binary outcomes)")
+    lines += _sub("PURPOSE")
+    lines += [
+        f"    Performed after a significant Cochran's Q (Test 3).  Compares each pair",
+        f"    of {fl} levels on the binary outcome for subjects present at both levels.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += [
+        "    statsmodels.stats.contingency_tables.mcnemar()",
+        "    from statsmodels.stats.contingency_tables import mcnemar",
+        "",
+    ]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("table", f"2×2 contingency table: rows = response at {fl} level A (0/1),",
+         "pd.DataFrame[int]"),
+        ("",      f"cols = response at {fl} level B (0/1)", ""),
+    ])
+    lines.append("")
+    lines += _sub("PARAMETERS")
+    lines += [
+        "    exact        False  — chi-square approximation  (appropriate when n ≥ 5;",
+        "                 more powerful than the exact binomial for moderate n).",
+        "",
+        "    correction   True   — Yates' continuity correction:  subtract 0.5 from",
+        "                 |b − c| before squaring in the chi-square formula.  Reduces",
+        "                 Type-I error when the number of discordant pairs is small.",
+        "",
+    ]
+    lines += _sub("EFFECT SIZE  &  CORRECTION")
+    lines += [
+        "    phi = sqrt(χ² / n)   where n = total paired observations",
+        "    (φ ≈ 0.1 small  |  ≈ 0.3 medium  |  ≈ 0.5 large for 2×2 tables)",
+        "",
+        "    Bonferroni: p_adj = min(p_raw × k, 1.0)",
+        f"    where k = C(n_{fl}_levels, 2)  =  total pairwise comparisons",
+        "    Minimum sample: n_paired ≥ 5  (otherwise the pair is skipped)",
+        "    Threshold: α = 0.05 applied to Bonferroni-adjusted p",
+    ]
+
+    # ── TEST 5 ───────────────────────────────────────────────────────────── #
+    lines += _h2("5", "Generalized Estimating Equations  (GEE)  —  Sex effect on binary outcome")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Tests whether Sex predicts a binary behavioral outcome while accounting for",
+        "    within-subject correlation across repeated measurements.  Complements",
+        "    Cochran's Q for the between-subjects (Sex) effect in binary data.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += [
+        "    statsmodels.genmod.generalized_estimating_equations.GEE",
+        "    from statsmodels.genmod.generalized_estimating_equations import GEE",
+        "    from statsmodels.genmod.families import Binomial",
+        "    from statsmodels.genmod.cov_struct import Exchangeable",
+        "",
+    ]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("Response",    "Binary outcome  (0 = absent, 1 = present)",        "pd.Series[int/float]"),
+        ("Sex_numeric", "Sex as integer  (Male = 1, Female = 0)",            "pd.Series[int]"),
+        ("ID",          "Cluster identifier  (subject grouping)",            "pd.Series[str]"),
+        ("data",        "Long-format DataFrame",                             "pd.DataFrame"),
+    ])
+    lines.append("")
+    lines += _sub("MODEL SPECIFICATION")
+    lines += [
+        "    Formula     'Response ~ Sex_numeric'",
+        "                Binary outcome regressed on Sex as sole predictor.",
+        "",
+        "    groups      ID  — observations from the same animal share a correlation",
+        "",
+        "    family      Binomial()  — logistic link function  (models log-odds)",
+        "",
+        "    cov_struct  Exchangeable()  — compound symmetry covariance structure.",
+        "                Assumes all repeated measurements within a subject have the",
+        "                same pairwise correlation ρ  (estimated from data).",
+        "                Alternative: Independence() would ignore within-subject corr.",
+        "",
+        "    Fitting     gee_model.fit()  — GEE estimating equations  (not MLE);",
+        "                robust sandwich variance estimator for standard errors.",
+        "",
+    ]
+    lines += _sub("OUTPUT")
+    lines += _out([
+        ("coef",   "params['Sex_numeric']  — log-odds coefficient for Sex effect"),
+        ("SE",     "bse['Sex_numeric']  — robust sandwich standard error"),
+        ("Z",      "tvalues['Sex_numeric']  — Wald Z-score"),
+        ("p",      "pvalues['Sex_numeric']  — two-tailed p-value for Sex"),
+        ("OR",     "Odds ratio  =  exp(coef)"),
+        ("95% CI", "exp(coef ± 1.96 × SE)"),
+    ])
+    lines += ["", "    Threshold: α = 0.05"]
+
+    # ── SUMMARY ──────────────────────────────────────────────────────────── #
+    lines += [
+        "",
+        f"\n{'─' * W}",
+        "  CORRECTION METHODS SUMMARY",
+        f"  {'·' * (W - 4)}",
+        "",
+        f"    {'Context':<38}  {'Method':<18}  Detail",
+        f"    {'─'*38}  {'─'*18}  {'─'*18}",
+        f"    {'Mixed ANOVA within/interaction':<38}  {'GG auto':<18}  correction='auto'",
+        f"    {'McNemar post-hoc pairs  (Test 4)':<38}  {'Bonferroni':<18}  p × C(k,2)",
+        f"    {'Cochrans Q  (Test 3)':<38}  {'None':<18}  each measure separate family",
+        f"    {'GEE Sex effect  (Test 5)':<38}  {'None':<18}  single predictor model",
+        "",
+        f"{'─' * W}",
+        "  MEASURES ANALYSED",
+        f"  {'·' * (W - 4)}",
+        "",
+        "    Continuous  (Mixed ANOVA)",
+        "      Total_Weight_Change   cumulative weight change per animal        float  (g)",
+        "      Daily_Weight_Change   weight change per session day              float  (g/day)",
+        "",
+        "    Binary  (Cochran's Q + McNemar + GEE)",
+        "      Nest Made?          present (1) or absent (0) per session",
+        "      Lethargy?           observed (1) or not (0)",
+        "      CA Spot Digging?    observed (1) or not (0)",
+        "      Anxious Behaviors?  observed (1) or not (0)",
+        "",
+        "=" * W,
+    ]
+
+    report = "\n".join(lines)
+    if save_path is not None:
+        Path(save_path).write_text(report, encoding="utf-8")
+        print(f"[OK] Test registry saved -> {save_path}")
+    return report
+
+
+
 def main() -> None:
 	"""Interactive entrypoint: select and load the master CSV, then preview it."""
 	wc = _MLB['within_col']
@@ -5109,6 +5425,18 @@ def main() -> None:
 		print(f"\nWarning: failed to perform two-way ANOVA analysis: {e}")
 		import traceback
 		traceback.print_exc()
+
+	# Optional: Save statistical test registry
+	try:
+		save_registry = input("\nSave statistical test registry (methods documentation)? (y/n): ").strip().lower()
+		if save_registry in ['y', 'yes']:
+			from datetime import datetime as _dt
+			_ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+			registry_path = Path.cwd() / f"behavioral_test_registry_{_ts}.txt"
+			registry_report = generate_test_registry_report(save_path=registry_path)
+			print(registry_report)
+	except KeyboardInterrupt:
+		pass
 
 
 def plot_total_change_by_id(

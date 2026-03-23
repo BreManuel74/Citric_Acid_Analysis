@@ -2135,13 +2135,363 @@ def generate_lick_frontloading_descriptives_report(
 # =============================================================================
 
 # Measures included in the omnibus analysis
-_OMNIBUS_MEASURES = ["Total_Licks", "Total_Bouts", "First_5min_Lick_Pct", "Time_to_50pct_Licks"]
+_OMNIBUS_MEASURES = ["Total_Licks", "Total_Bouts", "First_5min_Lick_Pct", "Time_to_50pct_Licks",
+                    "Fecal_Count_Sqrt"]
 _OMNIBUS_MEASURE_LABELS = {
     "Total_Licks":         "Total Licks",
     "Total_Bouts":         "Total Lick Bouts",
     "First_5min_Lick_Pct": "% Licks in First 5 min",
     "Time_to_50pct_Licks": "Time to 50% Licks (min)",
+    "Fecal_Count_Sqrt":    "Fecal Count (\u221a-transformed)",
 }
+
+
+def _add_sqrt_transforms(df: pd.DataFrame) -> pd.DataFrame:
+    """Add square-root transformed columns for count measures.
+
+    sqrt(Fecal_Count) stabilises variance for count data (0-18 range).
+    clip(lower=0) guards against any rogue negative values before sqrt.
+    """
+    df = df.copy()
+    if 'Fecal_Count' in df.columns:
+        df['Fecal_Count_Sqrt'] = np.sqrt(df['Fecal_Count'].clip(lower=0))
+    return df
+
+
+def _poisson_gof_section(counts: pd.Series, label: str) -> List[str]:
+    """Chi-square GoF test (Poisson) for a single group of fecal counts.
+
+    Bins with expected frequency < 5 are merged from the tails inward.
+    df = n_bins - 2  (one for the normalisation constraint, one for estimated λ).
+    Returns a list of text lines suitable for embedding in a report.
+    """
+    counts = counts.dropna().astype(int)
+    n = len(counts)
+    if n < 5:
+        return [f'  {label}: insufficient data (n={n}), skipping.']
+
+    lam = counts.mean()
+
+    # Build observed frequency table for every integer 0 … max_count
+    max_count = int(counts.max())
+    obs_series = counts.value_counts().sort_index()
+    full_index = range(0, max_count + 1)
+    observed = np.array([obs_series.get(k, 0) for k in full_index], dtype=float)
+    expected = np.array([stats.poisson.pmf(k, lam) * n for k in full_index], dtype=float)
+
+    # Merge right-tail bins with expected < 5
+    while len(expected) > 2 and expected[-1] < 5:
+        observed[-2] += observed[-1]
+        expected[-2] += expected[-1]
+        observed = observed[:-1]
+        expected = expected[:-1]
+
+    # Merge left-tail bins with expected < 5
+    while len(expected) > 2 and expected[0] < 5:
+        observed[1] += observed[0]
+        expected[1] += expected[0]
+        observed = observed[1:]
+        expected = expected[1:]
+
+    n_bins = len(observed)
+    if n_bins < 2:
+        return [f'  {label}: too few bins after merging (n={n}, λ={lam:.2f}), skipping.']
+
+    # Compute chi-square statistic and p-value with df = n_bins - 2
+    chi2_stat = float(np.sum((observed - expected) ** 2 / expected))
+    df = max(n_bins - 2, 1)  # df = bins - 1 (normalisation) - 1 (estimated lambda)
+    p_val = float(stats.chi2.sf(chi2_stat, df))
+
+    sig = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'
+    conclusion = ('SIGNIFICANT departure from Poisson' if p_val < 0.05
+                  else 'No significant departure from Poisson')
+    return [
+        f'  {label} (n={n}, λ_est={lam:.3f}):',
+        f'    χ²({df}) = {chi2_stat:.3f},  p = {p_val:.4f}  [{sig}]  →  {conclusion}',
+        f'    ({n_bins} bins after merging)',
+    ]
+
+
+def generate_fecal_poisson_gof_report(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    save_path: Optional[Path] = None,
+) -> str:
+    """Chi-square goodness-of-fit test: does Fecal_Count follow a Poisson distribution?
+
+    Tests are run overall, by cohort (CA%), by sex, and by cohort × sex.
+    Bins with expected frequency < 5 are merged before testing.
+    One degree of freedom is subtracted for the estimated Poisson mean (λ).
+
+    Parameters
+    ----------
+    cohort_dfs : dict of label → per-animal weekly DataFrame (from combine_lick_cohorts)
+    save_path  : if provided, write the report text to this file
+
+    Returns
+    -------
+    Report as a string
+    """
+    combined = combine_lick_cohorts(cohort_dfs)
+
+    if 'Fecal_Count' not in combined.columns:
+        return '  [WARNING] Fecal_Count column not present in combined data.\n'
+
+    lines: List[str] = [
+        '=' * 80,
+        'FECAL COUNT — CHI-SQUARE GOODNESS-OF-FIT TEST FOR POISSON DISTRIBUTION',
+        '=' * 80,
+        f'Generated : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+        '',
+        'Null hypothesis : Fecal_Count values follow a Poisson distribution.',
+        'Method          : Frequencies tabulated per integer count value.',
+        '                  Bins with expected freq < 5 are merged into adjacent bins.',
+        '                  df = n_bins – 2  (normalisation constraint + estimated λ).',
+        '',
+    ]
+
+    # Overall
+    lines.append('OVERALL')
+    lines.append('-' * 40)
+    lines += _poisson_gof_section(combined['Fecal_Count'], 'All data combined')
+    lines.append('')
+
+    # By cohort (CA%)
+    lines.append('BY COHORT (CA%)')
+    lines.append('-' * 40)
+    if 'CA%' in combined.columns:
+        for ca_val in sorted(combined['CA%'].dropna().unique()):
+            sub = combined[combined['CA%'] == ca_val]['Fecal_Count']
+            lines += _poisson_gof_section(sub, f'CA% = {ca_val}')
+    else:
+        lines.append('  CA% column not available.')
+    lines.append('')
+
+    # By sex
+    lines.append('BY SEX')
+    lines.append('-' * 40)
+    if 'Sex' in combined.columns:
+        for sex_val in sorted(combined['Sex'].dropna().unique()):
+            sub = combined[combined['Sex'] == sex_val]['Fecal_Count']
+            lines += _poisson_gof_section(sub, f'Sex = {sex_val}')
+    else:
+        lines.append('  Sex column not available.')
+    lines.append('')
+
+    # By cohort x sex
+    lines.append('BY COHORT × SEX')
+    lines.append('-' * 40)
+    if 'CA%' in combined.columns and 'Sex' in combined.columns:
+        for ca_val in sorted(combined['CA%'].dropna().unique()):
+            for sex_val in sorted(combined['Sex'].dropna().unique()):
+                sub = combined[
+                    (combined['CA%'] == ca_val) & (combined['Sex'] == sex_val)
+                ]['Fecal_Count']
+                lines += _poisson_gof_section(sub, f'CA% = {ca_val}, Sex = {sex_val}')
+    else:
+        lines.append('  CA% or Sex column not available.')
+    lines.append('')
+
+    lines += [
+        'INTERPRETATION NOTES',
+        '-' * 40,
+        '  * A non-significant result means Poisson is plausible (does not confirm it).',
+        '  * A significant result indicates the observed distribution departs from Poisson',
+        '    (e.g. overdispersion: variance > mean, or excess zeros).',
+        '  * The square-root transform used in the omnibus ANOVAs is the standard',
+        '    variance-stabilising transform for Poisson-like count data and remains',
+        '    appropriate regardless of this test’s outcome.',
+        '',
+    ]
+
+    report = '\n'.join(lines)
+    if save_path is not None:
+        Path(save_path).write_text(report, encoding='utf-8')
+        print(f'[OK] Fecal Poisson GoF report saved -> {save_path}')
+    return report
+
+
+def _shapiro_row(values: pd.Series, label: str, alpha: float = 0.05) -> Tuple[List[str], bool]:
+    """Run Shapiro-Wilk (or D'Agostino-Pearson for n>5000) on *values*.
+
+    Returns (text_lines, passed_normality).
+    """
+    values = values.dropna()
+    n = len(values)
+    if n < 3:
+        return [f'  {label}: n={n} — too few observations, skipping.'], True  # conservative
+    if n > 5000:
+        stat, p = stats.normaltest(values)
+        test_name = "D'Agostino-Pearson k²"
+    else:
+        stat, p = stats.shapiro(values)
+        test_name = 'Shapiro-Wilk W'
+    sig  = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
+    passed = (p >= alpha)
+    conclusion = 'NORMAL (p ≥ 0.05)' if passed else 'NON-NORMAL (p < 0.05)'
+    lines = [
+        f'  {label} (n={n}):',
+        f'    {test_name} = {stat:.4f},  p = {p:.4f}  [{sig}]  →  {conclusion}',
+    ]
+    return lines, passed
+
+
+def generate_fecal_normality_report(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    save_path: Optional[Path] = None,
+) -> str:
+    """Shapiro-Wilk normality tests on raw and √-transformed Fecal_Count data.
+
+    Tests are stratified by Week, Cohort (CA%), Sex, and Cohort × Week to
+    help decide whether parametric mixed ANOVA or the Friedman test is more
+    appropriate for the repeated-measures (Week) factor.
+
+    Parameters
+    ----------
+    cohort_dfs : dict of label → per-animal weekly DataFrame
+    save_path  : if provided, write the report text to this file
+
+    Returns
+    -------
+    Report as a string
+    """
+    combined = combine_lick_cohorts(cohort_dfs)
+    if 'Fecal_Count' not in combined.columns:
+        return '  [WARNING] Fecal_Count column not present in combined data.\n'
+
+    combined = _add_sqrt_transforms(combined)
+
+    lines: List[str] = [
+        '=' * 80,
+        'FECAL COUNT — SHAPIRO-WILK NORMALITY TESTS',
+        '(Evaluating whether the Friedman test is appropriate)',
+        '=' * 80,
+        f'Generated : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+        '',
+        'Tests are run on both raw Fecal_Count and √(Fecal_Count).',
+        'Shapiro-Wilk is used for n ≤ 5000; D\'Agostino-Pearson for larger samples.',
+        'The Friedman test is the non-parametric repeated-measures alternative',
+        'to one-way within-subjects ANOVA, appropriate when normality is violated.',
+        '',
+    ]
+
+    # Track pass/fail counts for the recommendation
+    raw_fails = 0
+    raw_total = 0
+    sqrt_fails = 0
+    sqrt_total = 0
+
+    def _run_pair(subset: pd.Series, label: str) -> None:
+        nonlocal raw_fails, raw_total, sqrt_fails, sqrt_total
+        r_lines, r_passed = _shapiro_row(subset, f'RAW   {label}')
+        lines.extend(r_lines)
+        if subset.dropna().shape[0] >= 3:
+            raw_total  += 1
+            if not r_passed:
+                raw_fails += 1
+
+        sqrt_vals = np.sqrt(subset.clip(lower=0))
+        s_lines, s_passed = _shapiro_row(sqrt_vals, f'SQRT  {label}')
+        lines.extend(s_lines)
+        if sqrt_vals.dropna().shape[0] >= 3:
+            sqrt_total  += 1
+            if not s_passed:
+                sqrt_fails += 1
+
+    # ── Overall ──────────────────────────────────────────────────────────────
+    lines += ['OVERALL', '-' * 40]
+    _run_pair(combined['Fecal_Count'], 'All data combined')
+    lines.append('')
+
+    # ── By Week (most relevant for Friedman decision) ─────────────────────
+    lines += ['BY WEEK  ← key for Friedman decision', '-' * 40]
+    if 'Week' in combined.columns:
+        for wk in sorted(combined['Week'].dropna().unique()):
+            sub = combined[combined['Week'] == wk]['Fecal_Count']
+            _run_pair(sub, f'Week {int(wk) + 1}')
+    else:
+        lines.append('  Week column not available.')
+    lines.append('')
+
+    # ── By Cohort (CA%) ───────────────────────────────────────────────────
+    lines += ['BY COHORT (CA%)', '-' * 40]
+    if 'CA%' in combined.columns:
+        for ca_val in sorted(combined['CA%'].dropna().unique()):
+            sub = combined[combined['CA%'] == ca_val]['Fecal_Count']
+            _run_pair(sub, f'CA% = {ca_val}')
+    else:
+        lines.append('  CA% column not available.')
+    lines.append('')
+
+    # ── By Sex ────────────────────────────────────────────────────────────
+    lines += ['BY SEX', '-' * 40]
+    if 'Sex' in combined.columns:
+        for sex_val in sorted(combined['Sex'].dropna().unique()):
+            sub = combined[combined['Sex'] == sex_val]['Fecal_Count']
+            _run_pair(sub, f'Sex = {sex_val}')
+    else:
+        lines.append('  Sex column not available.')
+    lines.append('')
+
+    # ── By Cohort × Week ──────────────────────────────────────────────────
+    lines += ['BY COHORT × WEEK', '-' * 40]
+    if 'CA%' in combined.columns and 'Week' in combined.columns:
+        for ca_val in sorted(combined['CA%'].dropna().unique()):
+            for wk in sorted(combined['Week'].dropna().unique()):
+                sub = combined[
+                    (combined['CA%'] == ca_val) & (combined['Week'] == wk)
+                ]['Fecal_Count']
+                _run_pair(sub, f'CA% = {ca_val}, Week {int(wk) + 1}')
+    else:
+        lines.append('  CA% or Week column not available.')
+    lines.append('')
+
+    # ── Recommendation ────────────────────────────────────────────────────
+    raw_pct  = 100 * raw_fails  / raw_total  if raw_total  else 0
+    sqrt_pct = 100 * sqrt_fails / sqrt_total if sqrt_total else 0
+
+    lines += [
+        '=' * 80,
+        'RECOMMENDATION',
+        '=' * 80,
+        f'  Groups tested             : {raw_total}',
+        f'  Raw  Fecal_Count — non-normal : {raw_fails}/{raw_total} ({raw_pct:.0f}%)',
+        f'  Sqrt Fecal_Count — non-normal : {sqrt_fails}/{sqrt_total} ({sqrt_pct:.0f}%)',
+        '',
+    ]
+
+    if raw_pct >= 50 and sqrt_pct >= 50:
+        lines += [
+            '  CONCLUSION: The majority of groups fail normality even after √-transform.',
+            '  → The Friedman test (non-parametric repeated-measures) is RECOMMENDED',
+            '    for the Week factor within each cohort/sex stratum.',
+            '  → Consider the Aligned Ranks Transform (ART) ANOVA for a full factorial',
+            '    non-parametric approach, or use the Friedman test per stratum.',
+        ]
+    elif raw_pct >= 50 and sqrt_pct < 50:
+        lines += [
+            '  CONCLUSION: Raw counts violate normality but √-transform fixes most groups.',
+            '  → Parametric mixed ANOVA on √(Fecal_Count) is DEFENSIBLE.',
+            '  → The Friedman test is still a conservative valid alternative if preferred.',
+        ]
+    else:
+        lines += [
+            '  CONCLUSION: Most groups do not significantly depart from normality.',
+            '  → Parametric mixed ANOVA (raw or √-transformed) appears APPROPRIATE.',
+            '  → The Friedman test would be overly conservative here, but remains valid.',
+        ]
+
+    lines += [
+        '',
+        'NOTE: Shapiro-Wilk has low power with very small n — a non-significant result',
+        '      does not guarantee normality. Visual inspection (Q-Q plots) is also advised.',
+        '',
+    ]
+
+    report = '\n'.join(lines)
+    if save_path is not None:
+        Path(save_path).write_text(report, encoding='utf-8')
+        print(f'[OK] Fecal normality report saved -> {save_path}')
+    return report
 
 
 def _bonferroni_paired_ttests(data: pd.DataFrame, measure: str, within: str, subject: str) -> pd.DataFrame:
@@ -2261,6 +2611,7 @@ def perform_omnibus_lick_anova(
     combined_df = combine_lick_cohorts(cohort_dfs)
     if 'Week' not in combined_df.columns:
         combined_df = add_week_column(combined_df)
+    combined_df = _add_sqrt_transforms(combined_df)
 
     all_results: Dict = {}
     week_p_values: List[float] = []
@@ -2556,6 +2907,9 @@ def generate_omnibus_lick_report(
 
         # Descriptive stats — per group (CA% × Sex), collapsed across weeks
         adf = r.get('analysis_df')
+        if m == 'Fecal_Count_Sqrt' and adf is not None:
+            lines.append('  NOTE: Values shown are √(Fecal_Count) transformed. '
+                         'Back-transform by squaring to recover original counts.')
         if adf is not None:
             lines += ['  DESCRIPTIVE STATISTICS (by CA% × Sex, collapsed across weeks)',
                       '  ' + '-' * 70]
@@ -2772,6 +3126,7 @@ def perform_omnibus_lick_anova_sex_stratified(
     combined_df = combine_lick_cohorts(cohort_dfs)
     if 'Week' not in combined_df.columns:
         combined_df = add_week_column(combined_df)
+    combined_df = _add_sqrt_transforms(combined_df)
     combined_df = combined_df[combined_df['Sex'] == sex]
 
     all_results: Dict = {}
@@ -2879,6 +3234,7 @@ def perform_omnibus_lick_anova_ca_stratified(
     combined_df = combine_lick_cohorts(cohort_dfs)
     if 'Week' not in combined_df.columns:
         combined_df = add_week_column(combined_df)
+    combined_df = _add_sqrt_transforms(combined_df)
     combined_df = combined_df[combined_df['CA%'] == ca_percent]
 
     all_results: Dict = {}
@@ -2991,6 +3347,7 @@ def perform_omnibus_lick_anova_2way(
     combined_df = combine_lick_cohorts(cohort_dfs)
     if 'Week' not in combined_df.columns:
         combined_df = add_week_column(combined_df)
+    combined_df = _add_sqrt_transforms(combined_df)
 
     all_results: Dict = {}
     week_ps: List[float] = []
@@ -3327,6 +3684,192 @@ def _format_stratified_omnibus_report(
 # PLOTTING FUNCTIONS
 # =============================================================================
 
+
+def plot_fecal_qq(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    save_dir: Optional[Path] = None,
+    show: bool = False,
+) -> None:
+    """Q-Q plots for raw and √-transformed Fecal_Count.
+
+    Produces two multi-panel figures:
+      1. Raw Fecal_Count — one panel per Week × Cohort (CA%) cell
+      2. √(Fecal_Count)  — same layout
+
+    Each panel shows the Q-Q scatter against the theoretical normal quantiles
+    plus the 45-degree reference line.
+
+    Parameters
+    ----------
+    cohort_dfs : dict of label → per-animal weekly DataFrame
+    save_dir   : directory to save SVGs (created if absent); None = don't save
+    show       : whether to call plt.show()
+    """
+    if not HAS_MATPLOTLIB:
+        print('[WARNING] matplotlib not available — cannot create Q-Q plots.')
+        return
+
+    combined = combine_lick_cohorts(cohort_dfs)
+    if 'Fecal_Count' not in combined.columns:
+        print('[WARNING] Fecal_Count column not present — skipping Q-Q plots.')
+        return
+    combined = _add_sqrt_transforms(combined)
+    if 'Week' not in combined.columns:
+        combined = add_week_column(combined)
+
+    ca_levels = sorted(combined['CA%'].dropna().unique())
+    weeks     = sorted(combined['Week'].dropna().unique())
+    n_cols    = len(ca_levels)
+    n_rows    = len(weeks)
+
+    if save_dir is not None:
+        Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+    for transform_label, col in [('Raw Fecal_Count', 'Fecal_Count'),
+                                  ('√(Fecal_Count)',  'Fecal_Count_Sqrt')]:
+        fig, axes = plt.subplots(
+            n_rows, n_cols,
+            figsize=(4 * n_cols, 3.5 * n_rows),
+            squeeze=False,
+        )
+        fig.suptitle(
+            f'Q-Q Plot — {transform_label}  (normal reference)',
+            fontsize=13, fontweight='bold', y=1.01,
+        )
+
+        for row_idx, wk in enumerate(weeks):
+            for col_idx, ca_val in enumerate(ca_levels):
+                ax = axes[row_idx][col_idx]
+                sub = combined[
+                    (combined['Week'] == wk) & (combined['CA%'] == ca_val)
+                ][col].dropna().values
+
+                ax.set_title(
+                    f'CA% = {ca_val},  Week {int(wk) + 1}  (n={len(sub)})',
+                    fontsize=9,
+                )
+                ax.set_xlabel('Theoretical quantiles', fontsize=8)
+                ax.set_ylabel('Sample quantiles', fontsize=8)
+                ax.tick_params(labelsize=7)
+
+                if len(sub) < 3:
+                    ax.text(0.5, 0.5, 'n < 3\ninsufficient data',
+                            ha='center', va='center', transform=ax.transAxes,
+                            fontsize=8, color='gray')
+                    continue
+
+                # Compute Q-Q coordinates via scipy.stats.probplot
+                (osm, osr), (slope, intercept, _r) = stats.probplot(sub, dist='norm')
+                ax.scatter(osm, osr, s=20, color='steelblue', alpha=0.8, zorder=3)
+
+                # Reference line fitted to 1st–3rd quartile range
+                x_line = np.array([osm[0], osm[-1]])
+                ax.plot(x_line, slope * x_line + intercept,
+                        color='crimson', linewidth=1.2, zorder=2)
+
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+
+        fig.tight_layout()
+
+        if save_dir is not None:
+            fname = f"fecal_qq_{'raw' if col == 'Fecal_Count' else 'sqrt'}.svg"
+            fig.savefig(Path(save_dir) / fname, format='svg', dpi=200, bbox_inches='tight')
+            print(f'[OK] Q-Q plot saved -> {Path(save_dir) / fname}')
+
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+
+
+def plot_fecal_counts_by_week(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    save_path: Optional[Path] = None,
+    show: bool = False,
+) -> Optional[plt.Figure]:
+    """Line plot of mean (±SEM) Fecal_Count across weeks, one line per cohort (CA%).
+
+    Matches the visual style of plot_lick_measure_by_cohort.
+
+    Parameters
+    ----------
+    cohort_dfs : dict of label → per-animal weekly DataFrame
+    save_path  : optional SVG save path
+    show       : whether to call plt.show()
+    """
+    if not HAS_MATPLOTLIB:
+        print('[WARNING] matplotlib not available — cannot create fecal count plot.')
+        return None
+
+    combined = combine_lick_cohorts(cohort_dfs)
+    if 'Fecal_Count' not in combined.columns:
+        print('[WARNING] Fecal_Count column not present — skipping fecal count plot.')
+        return None
+    if 'Week' not in combined.columns:
+        combined = add_week_column(combined)
+
+    _FL_COLORS = {
+        0.0: {'line': 'steelblue',  'face': 'lightblue',  'edge': 'steelblue'},
+        2.0: {'line': 'darkorange', 'face': 'moccasin',   'edge': 'darkorange'},
+    }
+    _DEFAULT_COLORS = [
+        {'line': 'steelblue',  'face': 'lightblue',  'edge': 'steelblue'},
+        {'line': 'darkorange', 'face': 'moccasin',   'edge': 'darkorange'},
+        {'line': 'darkgreen',  'face': 'lightgreen', 'edge': 'darkgreen'},
+        {'line': 'purple',     'face': 'plum',       'edge': 'purple'},
+    ]
+
+    ca_levels = sorted(combined['CA%'].dropna().unique())
+    weeks     = sorted(combined['Week'].dropna().unique())
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+
+    for idx, ca_val in enumerate(ca_levels):
+        grp = combined[combined['CA%'] == ca_val]
+        wk_stats = (
+            grp.groupby('Week')['Fecal_Count']
+            .agg(['mean', 'sem', 'count'])
+            .reset_index()
+        )
+        n_per_wk = int(wk_stats['count'].iloc[0]) if len(wk_stats) > 0 else 0
+        c = _FL_COLORS.get(ca_val, _DEFAULT_COLORS[idx % len(_DEFAULT_COLORS)])
+        ax.errorbar(
+            wk_stats['Week'], wk_stats['mean'],
+            yerr=wk_stats['sem'],
+            label=f'{ca_val:.0f}% CA (n={n_per_wk}/week)',
+            marker='o', markersize=8, linewidth=2, capsize=5,
+            color=c['line'],
+            markerfacecolor=c['face'],
+            markeredgecolor=c['edge'],
+        )
+
+    ax.set_xlabel('Week', fontsize=12, weight='bold')
+    ax.set_ylabel('Fecal Count (mean ±SEM)', fontsize=12, weight='bold')
+    ax.set_title('Fecal Count Across Weeks by Cohort (mean ±SEM)',
+                 fontsize=13, weight='bold')
+    ax.set_xticks(weeks)
+    ax.set_xticklabels([str(int(w) + 1) for w in weeks])
+    ax.set_ylim(bottom=0)
+    ax.legend(loc='best', fontsize=10)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(direction='in', which='both', length=5)
+    fig.tight_layout()
+
+    if save_path is not None:
+        svg_path = Path(save_path).with_suffix('.svg')
+        fig.savefig(svg_path, format='svg', dpi=200, bbox_inches='tight')
+        print(f'[OK] Fecal count plot saved -> {svg_path}')
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig
+
+
 def plot_lick_measure_by_cohort(
     cohort_dfs: Dict[str, pd.DataFrame],
     measure: str = "Total_Licks",
@@ -3578,6 +4121,402 @@ def _detect_lick_comparison_type(cohorts: Dict[str, pd.DataFrame]) -> str:
     return 'unknown'
 
 
+def generate_test_registry_report(save_path=None) -> str:
+    """Generate a formatted plain-text report documenting every statistical
+    test used in across_cohort_lick.py: data/variables consumed, library
+    source, and every parameter with its meaning."""
+
+    W = 80  # report line width
+
+    def _h1(text):
+        return ["=" * W, f"  {text}", "=" * W]
+
+    def _h2(num, title):
+        return [f"\n{'─' * W}", f"  TEST {num}  │  {title}", f"{'─' * W}", ""]
+
+    def _sub(label):
+        pad = W - 4 - len(label) - 2
+        return [f"  {label}  {'·' * max(pad, 4)}", ""]
+
+    def _tbl(rows, w1=12, w2=44, w3=20):
+        hdr  = f"    {'Variable':<{w1}}  {'Description':<{w2}}  Data Type"
+        sep  = f"    {'─'*w1}  {'─'*w2}  {'─'*w3}"
+        body = [f"    {r[0]:<{w1}}  {r[1]:<{w2}}  {r[2]}" for r in rows]
+        return [hdr, sep] + body
+
+    def _out(rows, w1=14, w2=62):
+        hdr  = f"    {'Column':<{w1}}  Meaning"
+        sep  = f"    {'─'*w1}  {'─'*w2}"
+        body = [f"    {r[0]:<{w1}}  {r[1]}" for r in rows]
+        return [hdr, sep] + body
+
+    # ── Header + Quick Reference ──────────────────────────────────────────── #
+    lines = _h1("STATISTICAL TEST REGISTRY  —  across_cohort_lick.py")
+    lines += [
+        "",
+        "  Script: Cross-cohort omnibus lick analysis  (0% CA vs 2% CA cohorts)",
+        "  Within-factor: Week  |  Between-factors: CA% (0 vs 2), Sex  |  α = 0.05",
+        "",
+        f"  QUICK REFERENCE  {'·' * 57}",
+        "",
+        f"    {'#':<3}  {'Test':<44}  Library / Function",
+        f"    {'─'*3}  {'─'*44}  {'─'*26}",
+        "    1    3-Way Mixed ANOVA  (CA% × Week × Sex)          pingouin / pg.mixed_anova()",
+        "    2    2-Way Mixed ANOVA  (CA% × Week, no Sex)         pingouin / pg.mixed_anova()",
+        "    3    Tukey HSD post-hoc  (CA% pairwise)              statsmodels / pairwise_tukeyhsd()",
+        "    4    BH-FDR correction  (across 5 omnibus measures)  internal _bh_fdr()",
+        "    5    Pairwise within  (Week post-hoc)                pingouin / pg.pairwise_tests()",
+        "    6    Pairwise between  (CA% or Sex post-hoc)         scipy / pingouin / ttest_ind()",
+        "    7    Shapiro-Wilk normality  (fecal count)           scipy.stats / shapiro()",
+        "    8    D'Agostino-Pearson normality  (n > 5000)        scipy.stats / normaltest()",
+        "    9    Chi-square Poisson GoF  (fecal count)           scipy.stats / chi2.sf()",
+        "    VIZ  Q-Q Plot  (normality visualisation)             scipy.stats / probplot()",
+        "",
+        "    Multiple comparisons:",
+        "      BH-FDR  — _bh_fdr() across 5 omnibus measures (Test 4)",
+        "      BH-FDR  — padjust=fdr_bh inside pg.pairwise_tests (Test 5)",
+        "      Tukey HSD — statsmodels, α = 0.05 (Test 3)",
+        "    Sphericity : Greenhouse-Geisser auto-correction  (all pingouin tests;",
+        "                 triggered when Mauchly's p-spher < 0.05)",
+        "=" * W,
+    ]
+
+    # ── TEST 1 ───────────────────────────────────────────────────────────── #
+    lines += _h2("1", "3-Way Mixed ANOVA  —  CA% × Week × Sex")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Primary omnibus test.  CA% and Sex are between-subjects factors; Week is",
+        "    within-subjects.  Implemented as three separate 2-way mixed ANOVAs because",
+        "    pingouin does not support two simultaneous between-subjects factors:",
+        "      (a) CA% × Week  —  cohort main effect + time interaction",
+        "      (b) Sex × Week  —  sex main effect + time interaction",
+        "      (c) Group × Week  where Group = 'CA%_Sex'  —  captures CA% × Sex interaction",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += ["    pingouin.mixed_anova()     import pingouin as pg", ""]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("data",    "Long-format DataFrame  (one row per ID × Week)",         "pd.DataFrame"),
+        ("dv",      "Lick measure  e.g. 'Total_Licks', 'Fecal_Count_Sqrt'",  "pd.Series[float64]"),
+        ("within",  "'Week'  — repeated-measures factor",                     "pd.Series[int]"),
+        ("between", "'CA%' | 'Sex' | 'Group'  (one call per factor)",         "pd.Series[str/float]"),
+        ("subject", "'ID'  — unique animal identifier",                       "pd.Series[str]"),
+    ])
+    lines.append("")
+    lines += _sub("PARAMETERS")
+    lines += [
+        "    correction    Not set  (pingouin default).  Mauchly's sphericity test runs",
+        "                  automatically.  GG ε applied when p-spher < 0.05.",
+        "                  Cite p-GG-corr, not p-unc, when sphericity is violated.",
+        "",
+        "    ss_type       Type III SS  (pingouin default; not set explicitly).",
+        "",
+    ]
+    lines += _sub("OUTPUT  (key columns)")
+    lines += _out([
+        ("Source",    "Effect label: 'CA%', 'Sex', 'Group', 'Week', 'Week * CA%', …"),
+        ("F",         "F-statistic"),
+        ("p-unc",     "Unadjusted p  (use p-GG-corr when sphericity is violated)"),
+        ("np2",       "Partial η²  —  small ≥ 0.01  |  medium ≥ 0.06  |  large ≥ 0.14"),
+        ("p-GG-corr", "Greenhouse-Geisser corrected p  (within / interaction rows)"),
+        ("eps",       "GG ε  (1.0 = no correction; lower → larger df reduction)"),
+    ])
+    lines += [
+        "",
+        "    BH-FDR correction via _bh_fdr() is applied ACROSS the 5 omnibus measures",
+        "    separately for each effect  (Week p-values FDR-corrected, CA% p-values, etc.)",
+        "    Measures: First_5min_Lick_Pct, Time_to_50pct_Licks, First_5min_Bout_Pct,",
+        "              Avg_ILI, Fecal_Count_Sqrt",
+        "    Threshold: BH-FDR q = 0.05  across measures  |  α = 0.05 within measure",
+    ]
+
+    # ── TEST 2 ───────────────────────────────────────────────────────────── #
+    lines += _h2("2", "2-Way Mixed ANOVA  —  CA% × Week  (no Sex factor)")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Simpler omnibus collapsing across Sex.  Maximises statistical power to detect",
+        "    the CA% main effect and its interaction with Week.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += ["    pingouin.mixed_anova()     import pingouin as pg", ""]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("data",    "Long-format DataFrame  (one row per ID × Week)",    "pd.DataFrame"),
+        ("dv",      "Lick measure column",                               "pd.Series[float64]"),
+        ("within",  "'Week'",                                            "pd.Series[int]"),
+        ("between", "'CA%'  (0.0 or 2.0)",                              "pd.Series[float64]"),
+        ("subject", "'ID'",                                              "pd.Series[str]"),
+    ])
+    lines.append("")
+    lines += _sub("PARAMETERS")
+    lines += [
+        "    Same structure as Test 1 but without Sex / Group factor.",
+        "    BH-FDR (_bh_fdr) applied across 5 measures for Week, CA%, and Week×CA% p-values.",
+        "    Threshold: BH-FDR q = 0.05  across measures  |  α = 0.05 within measure",
+    ]
+
+    # ── TEST 3 ───────────────────────────────────────────────────────────── #
+    lines += _h2("3", "Tukey HSD  —  CA% pairwise post-hoc")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Pairwise follow-up for a significant CA% main effect.  Compares all pairs of",
+        "    CA% levels on the lick measure (per-animal means across all weeks).",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += [
+        "    statsmodels.stats.multicomp.pairwise_tukeyhsd()",
+        "    from statsmodels.stats.multicomp import pairwise_tukeyhsd",
+        "",
+    ]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("endog",  "Lick measure values for all subjects",  "np.ndarray[float64]"),
+        ("groups", "CA% label per observation",             "np.ndarray[str/float]"),
+    ], w1=8, w2=50, w3=20)
+    lines.append("")
+    lines += _sub("PARAMETERS")
+    lines += [
+        "    endog   — 1-D array of dependent-variable values  (all subjects combined)",
+        "    groups  — parallel array of CA% group labels for each observation",
+        "    alpha   — 0.05  (familywise error rate; controls simultaneous CI width)",
+        "",
+        "    Tukey HSD uses the Studentized range distribution (q) to compute a single",
+        "    critical difference applying simultaneously to all pairwise contrasts at α.",
+        "    Maintains FWER without requiring a fixed number of comparisons k.",
+        "    Threshold: familywise α = 0.05",
+    ]
+
+    # ── TEST 4 ───────────────────────────────────────────────────────────── #
+    lines += _h2("4", "Benjamini-Hochberg FDR  —  correction across omnibus measures")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Controls the false discovery rate when testing 5 lick measures simultaneously",
+        "    in the omnibus ANOVA.  Applied per effect (Week, CA%, Sex) across measures.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += [
+        "    Internal helper: _bh_fdr(p_values)  defined in this script",
+        "    Internally uses: scipy.stats.rankdata + manual BH formula",
+        "",
+    ]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("p_values", "One p-value per omnibus measure for the effect being corrected",
+         "List[float]"),
+    ])
+    lines.append("")
+    lines += _sub("ALGORITHM  &  PARAMETERS")
+    lines += [
+        "    1. Sort p-values ascending; assign ranks 1 … m  (m = number of measures).",
+        "    2. BH threshold for rank i  =  (i / m) × q   where q = 0.05.",
+        "    3. Largest rank i where p(i) ≤ threshold is significant; all smaller ranks too.",
+        "    q = 0.05  (hard-coded at all _bh_fdr call sites)",
+    ]
+
+    # ── TEST 5 ───────────────────────────────────────────────────────────── #
+    lines += _h2("5", "Within-Subjects Pairwise Tests  (Week post-hoc)")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Follow-up for a significant Week main effect.  All pairwise Week comparisons",
+        "    collapsed across between-subjects groups.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += ["    pingouin.pairwise_tests()     import pingouin as pg", ""]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("data",    "Long-format DataFrame  (all subjects × weeks)",    "pd.DataFrame"),
+        ("dv",      "Lick measure column",                              "pd.Series[float64]"),
+        ("within",  "'Week'",                                           "pd.Series[int]"),
+        ("subject", "'ID'",                                             "pd.Series[str]"),
+    ])
+    lines.append("")
+    lines += _sub("PARAMETERS")
+    lines += [
+        "    parametric   True  — paired Student's t-test",
+        "    padjust      'fdr_bh'  — BH-FDR across all Week pairs for this measure",
+        "    effsize      'hedges'  — Hedges' g  (bias-corrected Cohen's d)",
+        "    Threshold: α = 0.05 applied to BH-FDR-corrected p  (padjust column)",
+    ]
+
+    # ── TEST 6 ───────────────────────────────────────────────────────────── #
+    lines += _h2("6", "Between-Subjects Pairwise Tests  (CA% or Sex post-hoc)")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Follow-up for a significant CA% or Sex main effect.  Per-animal lick means",
+        "    are computed across all weeks first, then groups are compared.",
+        "",
+    ]
+    lines += _sub("LIBRARY  (2 groups)")
+    lines += ["    scipy.stats.ttest_ind()     from scipy import stats", ""]
+    lines += _sub("INPUTS  (2-group case)")
+    lines += _tbl([
+        ("group1", "Per-animal means for group 1",  "pd.Series[float64]"),
+        ("group2", "Per-animal means for group 2",  "pd.Series[float64]"),
+    ], w1=8, w2=52, w3=20)
+    lines.append("")
+    lines += _sub("PARAMETERS  (2-group case)")
+    lines += [
+        "    equal_var   True  (default)  —  Student's independent-samples t-test.",
+        "    Cohen's d   = (mean₁ − mean₂) / pooled_SD",
+        "",
+    ]
+    lines += _sub("LIBRARY  (> 2 groups — fallback)")
+    lines += [
+        "    pingouin.pairwise_tests(data, dv, between='CA%' or 'Sex',",
+        "                            parametric=True, padjust='fdr_bh', effsize='cohen')",
+        "",
+        "    Threshold: α = 0.05  (no correction for 2 groups  |  BH-FDR for ≥ 3 groups)",
+    ]
+
+    # ── TEST 7 ───────────────────────────────────────────────────────────── #
+    lines += _h2("7", "Shapiro-Wilk Normality Test  (fecal count)")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Assesses whether raw Fecal_Count and sqrt-transformed Fecal_Count_Sqrt",
+        "    are approximately normally distributed within each subgroup  (Week, CA%,",
+        "    Sex, CA%×Week), informing whether parametric ANOVA is appropriate.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += ["    scipy.stats.shapiro()     from scipy import stats  (n ≤ 5000)", ""]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("values", "Fecal_Count  or  Fecal_Count_Sqrt = sqrt(max(Fecal_Count, 0))",
+         "pd.Series[float64]"),
+    ])
+    lines.append("")
+    lines += _sub("PARAMETERS  &  OUTPUT")
+    lines += [
+        "    values  — 1-D array of observations  (no additional keyword params)",
+        "    W       — Shapiro-Wilk statistic  (float, 0–1; closer to 1 = more normal)",
+        "    p       — p-value for H0: data are from a normal distribution",
+        "    Threshold: p < 0.05 → reject normality",
+    ]
+
+    # ── TEST 8 ───────────────────────────────────────────────────────────── #
+    lines += _h2("8", "D'Agostino-Pearson Normality Test  (n > 5000 fallback)")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Shapiro-Wilk is only reliable for n ≤ 5000.  D'Agostino-Pearson's omnibus",
+        "    test  (skewness + kurtosis components)  substitutes automatically for n > 5000.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += ["    scipy.stats.normaltest()     from scipy import stats", ""]
+    lines += _sub("INPUTS  &  OUTPUT")
+    lines += _tbl([
+        ("values", "1-D array of observations  (same as Test 7)", "pd.Series[float64]"),
+    ])
+    lines += [
+        "",
+        "    axis        default 0  (operates on the 1-D input array)",
+        "    statistic   combined χ²  (skewness² + kurtosis² components)",
+        "    p           p-value for H0: data are from a normal distribution",
+        "    Threshold: p < 0.05 → reject normality",
+    ]
+
+    # ── TEST 9 ───────────────────────────────────────────────────────────── #
+    lines += _h2("9", "Chi-Square Goodness-of-Fit  —  Poisson distribution  (fecal count)")
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Tests whether the discrete distribution of Fecal_Count follows a Poisson",
+        "    distribution with mean λ estimated from data.  Informs the choice of ANOVA",
+        "    vs. Poisson regression for count outcomes.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += [
+        "    scipy.stats.poisson.pmf(k, lam)    expected Poisson probabilities",
+        "    scipy.stats.chi2.sf(chi2_stat, df) p-value  (survival function = 1 − CDF)",
+        "    from scipy import stats",
+        "",
+    ]
+    lines += _sub("INPUTS")
+    lines += _tbl([
+        ("counts", "Fecal_Count values for the group being tested",  "pd.Series[int/float]"),
+        ("lam",    "Poisson mean  =  sample mean of counts  (MLE)", "float"),
+    ], w1=8, w2=50, w3=20)
+    lines.append("")
+    lines += _sub("ALGORITHM  &  PARAMETERS")
+    lines += [
+        "    1.  Estimate λ = mean(counts).",
+        "    2.  Compute expected frequency for each integer k from 0 to max(counts):",
+        "        E_k = n × Poisson.pmf(k, λ)",
+        "    3.  Merge tail bins where E_k < 5  (Cochran's rule for χ² validity).",
+        "    4.  χ² = Σ (O_k − E_k)² / E_k   where O_k = observed frequency of value k.",
+        "    5.  df = (n_bins after merging) − 1 − 1",
+        "        −1 for degrees of freedom of bins; −1 for the estimated λ parameter.",
+        "    6.  p = chi2.sf(χ², df)",
+        "",
+        "    Threshold: p < 0.05 → data depart significantly from a Poisson distribution",
+    ]
+
+    # ── VISUALISATION ─────────────────────────────────────────────────────── #
+    lines += [f"\n{'─' * W}", "  VISUALISATION  │  Q-Q Plot  (Quantile-Quantile)", f"{'─' * W}", ""]
+    lines += _sub("PURPOSE")
+    lines += [
+        "    Graphical (not inferential) assessment of normality.  Grid of Q-Q plots for",
+        "    Fecal_Count (raw) and Fecal_Count_Sqrt, panelled by Week × CA%.  Saved as SVG.",
+        "",
+    ]
+    lines += _sub("LIBRARY")
+    lines += ["    scipy.stats.probplot()     from scipy import stats", ""]
+    lines += _sub("INPUTS  &  PARAMETERS")
+    lines += _tbl([
+        ("values", "Fecal_Count  or  Fecal_Count_Sqrt", "pd.Series[float64]"),
+    ])
+    lines += [
+        "",
+        "    dist   'norm'  — compare against standard normal theoretical quantiles",
+        "    fit    True    — fit a straight reference line through the Q-Q points",
+        "    plot   matplotlib Axes  — draw directly onto the subplot axis",
+        "",
+        "    Interpretation: points near the diagonal → approximate normality;",
+        "    S-curve → excess kurtosis;  concave / convex curve → skewness.",
+    ]
+
+    # ── SUMMARY ──────────────────────────────────────────────────────────── #
+    lines += [
+        "",
+        f"\n{'─' * W}",
+        "  CORRECTION METHODS SUMMARY",
+        f"  {'·' * (W - 4)}",
+        "",
+        f"    {'Context':<38}  {'Method':<18}  Detail",
+        f"    {'─'*38}  {'─'*18}  {'─'*18}",
+        f"    {'Omnibus across 5 measures  (Test 4)':<38}  {'BH-FDR':<18}  q = 0.05  _bh_fdr()",
+        f"    {'Within-measure pairwise  (Test 5)':<38}  {'BH-FDR':<18}  padjust=fdr_bh",
+        f"    {'Between-subjects pairwise  (Test 3)':<38}  {'Tukey HSD':<18}  α = 0.05",
+        f"    {'Sphericity  (all pingouin tests)':<38}  {'GG auto':<18}  Mauchly p < 0.05",
+        "",
+        f"{'─' * W}",
+        "  OMNIBUS MEASURES  (5 frontloading / temporal metrics)",
+        f"  {'·' * (W - 4)}",
+        "",
+        "      1.  First_5min_Lick_Pct   % session licks in first 5 min       float  0–100",
+        "      2.  Time_to_50pct_Licks   min to accumulate 50% of licks        float",
+        "      3.  First_5min_Bout_Pct   % session bouts in first 5 min        float  0–100",
+        "      4.  Avg_ILI               mean inter-lick interval  (ms)         float",
+        "      5.  Fecal_Count_Sqrt      sqrt(max(Fecal_Count, 0))              float",
+        "          ↳  raw Fecal_Count  = integer count of fecal boli per session",
+        "             sqrt transform applied for variance-stabilisation before ANOVA",
+        "",
+        "=" * W,
+    ]
+
+    report = "\n".join(lines)
+    if save_path is not None:
+        Path(save_path).write_text(report, encoding="utf-8")
+        print(f"[OK] Test registry saved -> {save_path}")
+    return report
+
+
+
 def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     """
     Interactive analysis menu for 0% vs 2% nonramp lick comparison.
@@ -3607,15 +4546,17 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  7. Omnibus ANOVA        -- 4 frontloading measures, BH-FDR corrected omnibus + post-hocs")
     print("  8. 2-Way Omnibus ANOVA  -- CA% x Week only (all subjects, no Sex factor)")
     print("  9. Frontloading plots   -- Line plots of % licks in first 5 min & time to 50% licks by cohort")
-    print(" 10. Run all (1-9)")
+    print(" 10. Fecal normality      -- Shapiro-Wilk tests on fecal counts (raw & sqrt); Friedman recommendation")
+    print(" 11. Statistical registry -- Print/save documentation of every test: variables, library, parameters")
+    print(" 12. Run all (1-11)")
     print()
 
-    user_input = input("Select option (1-10) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-12) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '10')
+    run_all = (user_input == '12')
 
     # ------------------------------------------------------------------ #
     # Option 1: Full mixed ANOVA (CA% x Week x Sex)
@@ -3888,6 +4829,14 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 import traceback; traceback.print_exc()
                 combined_report_sections.append(f"[ERROR] CA%-stratified omnibus ({ca_val}%) failed: {e}\n")
 
+        # Fecal count Poisson GoF — appended to combined report
+        try:
+            gof_section = generate_fecal_poisson_gof_report(cohorts)
+            combined_report_sections.append(gof_section)
+        except Exception as e:
+            print(f"  [WARNING] Fecal Poisson GoF failed: {e}")
+            import traceback; traceback.print_exc()
+
         # Combine and save as one file
         divider = "\n\n" + "=" * 80 + "\n" + "=" * 80 + "\n\n"
         full_report = divider.join(combined_report_sections)
@@ -3925,6 +4874,15 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             print(twoway_section)
         except Exception as e:
             print(f"  [WARNING] 2-Way omnibus ANOVA/report failed: {e}")
+            import traceback; traceback.print_exc()
+
+        # Fecal count Poisson GoF (saved separately)
+        try:
+            gof_rpt_path = Path(f"0v2_lick_fecal_poisson_gof_{timestamp}.txt")
+            gof_report = generate_fecal_poisson_gof_report(cohorts, save_path=gof_rpt_path)
+            print(gof_report)
+        except Exception as e:
+            print(f"  [WARNING] Fecal Poisson GoF failed: {e}")
             import traceback; traceback.print_exc()
 
         # Plot significant Week × CA% interactions (separate try so report success is independent)
@@ -4048,6 +5006,52 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
 
             if n_fl_plots:
                 print(f"\n[OK] {n_fl_plots} frontloading plot(s) saved -> {fl_plot_dir}")
+
+    # ------------------------------------------------------------------ #
+    # Option 10: Fecal count normality tests + Friedman recommendation
+    # ------------------------------------------------------------------ #
+    if user_input == '10' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: Fecal Count — Shapiro-Wilk normality tests (raw & √-transformed)")
+        print("=" * 80)
+        try:
+            norm_rpt_path = Path(f"0v2_lick_fecal_normality_{timestamp}.txt")
+            norm_report = generate_fecal_normality_report(cohorts, save_path=norm_rpt_path)
+            print(norm_report)
+        except Exception as e:
+            print(f"  [WARNING] Fecal normality report failed: {e}")
+            import traceback; traceback.print_exc()
+
+        if HAS_MATPLOTLIB:
+            try:
+                qq_dir = Path(f"0v2_lick_fecal_qq_{timestamp}")
+                plot_fecal_qq(cohorts, save_dir=qq_dir, show=False)
+            except Exception as e:
+                print(f"  [WARNING] Q-Q plot generation failed: {e}")
+                import traceback; traceback.print_exc()
+            try:
+                fc_plot_path = Path(f"0v2_lick_fecal_counts_{timestamp}.svg")
+                plot_fecal_counts_by_week(cohorts, save_path=fc_plot_path, show=False)
+            except Exception as e:
+                print(f"  [WARNING] Fecal count line plot failed: {e}")
+                import traceback; traceback.print_exc()
+        else:
+            print("  [INFO] matplotlib not available — skipping Q-Q plots")
+
+    # ------------------------------------------------------------------ #
+    # Option 11: Statistical test registry
+    # ------------------------------------------------------------------ #
+    if user_input == '11' or run_all:
+        print("\n" + "=" * 80)
+        print("STATISTICAL TEST REGISTRY — across_cohort_lick.py")
+        print("=" * 80)
+        try:
+            registry_path = Path(f"0v2_lick_test_registry_{timestamp}.txt")
+            registry_report = generate_test_registry_report(save_path=registry_path)
+            print(registry_report)
+        except Exception as e:
+            print(f"  [WARNING] Registry generation failed: {e}")
+            import traceback; traceback.print_exc()
 
     print("\n" + "=" * 80)
     print("0% vs 2% lick analysis complete.")
