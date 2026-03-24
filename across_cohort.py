@@ -1812,6 +1812,17 @@ def _get_id_ca_map(df: pd.DataFrame) -> dict:
     return {str(k): v for k, v in ca_map.items()}
 
 
+def _get_id_cohort_map(df: pd.DataFrame) -> dict:
+    """
+    Build a mapping from ID -> Cohort label using the first non-null value per ID.
+    """
+    if "ID" not in df.columns or "Cohort" not in df.columns:
+        return {}
+    cdf = clean_cohort(df)
+    cohort_map = cdf.groupby("ID")["Cohort"].first().to_dict()
+    return {str(k): v for k, v in cohort_map.items()}
+
+
 def _sex_to_style(sex: Optional[str]) -> Tuple[str, str]:
     """Return (color, marker) based on sex: M=green/square, F=purple/circle."""
     if sex == "M":
@@ -2537,6 +2548,182 @@ def plot_daily_change_by_ca(
     else:
         plt.close(fig)
     
+    return fig
+
+
+def plot_total_change_by_cohort(
+    df: pd.DataFrame,
+    title: Optional[str] = None,
+    save_path: Optional[Path] = None,
+    show: bool = True,
+) -> plt.Figure:
+    """
+    Plot Cohort-averaged Total Change with SEM error bands.
+    One line per cohort label, grouped by the 'Cohort' column.
+    CA%-agnostic — suitable for comparing 0% nonramp vs ramp where CA% varies over time.
+    """
+    if not HAS_MATPLOTLIB:
+        print("[ERROR] matplotlib is required for plotting")
+        return None
+
+    series_by_id = build_total_change_series_by_id(df)
+    cohort_map = _get_id_cohort_map(df)
+
+    cohort_groups: dict = {}
+    for mid, s in series_by_id.items():
+        cohort_label = cohort_map.get(mid)
+        if cohort_label is not None:
+            cohort_groups.setdefault(cohort_label, {})[mid] = s
+
+    def _compute_mean_sem(series_dict: dict) -> Tuple[pd.Series, pd.Series]:
+        if not series_dict:
+            return pd.Series(), pd.Series()
+        df_temp = pd.DataFrame(series_dict)
+        return df_temp.mean(axis=1), df_temp.sem(axis=1)
+
+    _COLORS  = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd']
+    _MARKERS = ['o', 's', '^', 'D', 'v']
+    sorted_cohorts = sorted(cohort_groups.keys())
+    color_map  = {c: _COLORS[i % len(_COLORS)]  for i, c in enumerate(sorted_cohorts)}
+    marker_map = {c: _MARKERS[i % len(_MARKERS)] for i, c in enumerate(sorted_cohorts)}
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+
+    all_group_means = []
+    all_group_indices = []
+    for cohort_label in sorted_cohorts:
+        color  = color_map[cohort_label]
+        marker = marker_map[cohort_label]
+        mean, sem = _compute_mean_sem(cohort_groups[cohort_label])
+        if not mean.empty:
+            ax.plot(mean.index, mean.values, label=cohort_label,
+                    marker=marker, markersize=4, linewidth=2, alpha=0.9, color=color)
+            ax.fill_between(mean.index, mean - sem, mean + sem, color=color, alpha=0.2)
+            all_group_means.append(mean)
+            all_group_indices.append(mean.index.to_series())
+
+    ax.set_xlabel("Day")
+    ax.set_ylabel("Total Change (Mean +/- SEM)")
+    ax.grid(False)
+    ax.set_title(title or "Total Change by Cohort")
+
+    apply_common_plot_style(ax, start_x_at_zero=False, remove_top_right=True,
+                            remove_x_margins=True, remove_y_margins=True, ticks_in=True)
+
+    if all_group_means:
+        all_means_concat = pd.concat(all_group_means, ignore_index=False)
+        y_data_min = float(all_means_concat.min())
+        y_data_max = float(all_means_concat.max())
+        all_idx_concat = pd.concat(all_group_indices)
+        x_data_min = int(all_idx_concat.min())
+        x_data_max = int(all_idx_concat.max())
+        x_step = _auto_integer_step(x_data_min, x_data_max, target_ticks=10, allow_sub5=True)
+        _apply_integer_axis(ax, axis='x', data_min=x_data_min, data_max=x_data_max,
+                            step=x_step, clamp_min=0, left_pad_steps=0, right_pad_steps=0)
+        y_step = _auto_integer_step(y_data_min, y_data_max, target_ticks=7)
+        _apply_integer_axis(ax, axis='y', data_min=y_data_min, data_max=y_data_max,
+                            step=y_step, left_pad_steps=0, right_pad_steps=1)
+
+    ax.legend(title="Cohort", loc="best")
+    fig.tight_layout()
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
+        print(f"[OK] Saved plot to: {save_path}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig
+
+
+def plot_daily_change_by_cohort(
+    df: pd.DataFrame,
+    title: Optional[str] = None,
+    save_path: Optional[Path] = None,
+    show: bool = True,
+) -> plt.Figure:
+    """
+    Plot Cohort-averaged Daily Change with SEM error bands.
+    One line per cohort label, grouped by the 'Cohort' column.
+    CA%-agnostic — suitable for comparing 0% nonramp vs ramp where CA% varies over time.
+    """
+    if not HAS_MATPLOTLIB:
+        print("[ERROR] matplotlib is required for plotting")
+        return None
+
+    series_by_id = build_daily_change_series_by_id(df)
+    cohort_map = _get_id_cohort_map(df)
+
+    cohort_groups: dict = {}
+    for mid, s in series_by_id.items():
+        cohort_label = cohort_map.get(mid)
+        if cohort_label is not None:
+            cohort_groups.setdefault(cohort_label, {})[mid] = s
+
+    def _compute_mean_sem(series_dict: dict) -> Tuple[pd.Series, pd.Series]:
+        if not series_dict:
+            return pd.Series(), pd.Series()
+        df_temp = pd.DataFrame(series_dict)
+        return df_temp.mean(axis=1), df_temp.sem(axis=1)
+
+    _COLORS  = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd']
+    _MARKERS = ['o', 's', '^', 'D', 'v']
+    sorted_cohorts = sorted(cohort_groups.keys())
+    color_map  = {c: _COLORS[i % len(_COLORS)]  for i, c in enumerate(sorted_cohorts)}
+    marker_map = {c: _MARKERS[i % len(_MARKERS)] for i, c in enumerate(sorted_cohorts)}
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+
+    all_group_means = []
+    all_group_indices = []
+    for cohort_label in sorted_cohorts:
+        color  = color_map[cohort_label]
+        marker = marker_map[cohort_label]
+        mean, sem = _compute_mean_sem(cohort_groups[cohort_label])
+        if not mean.empty:
+            ax.plot(mean.index, mean.values, label=cohort_label,
+                    marker=marker, markersize=4, linewidth=2, alpha=0.9, color=color)
+            ax.fill_between(mean.index, mean - sem, mean + sem, color=color, alpha=0.2)
+            all_group_means.append(mean)
+            all_group_indices.append(mean.index.to_series())
+
+    ax.set_xlabel("Day")
+    ax.set_ylabel("Daily Change (Mean +/- SEM)")
+    ax.grid(False)
+    ax.set_title(title or "Daily Change by Cohort")
+
+    apply_common_plot_style(ax, start_x_at_zero=False, remove_top_right=True,
+                            remove_x_margins=True, remove_y_margins=True, ticks_in=True)
+
+    if all_group_means:
+        all_means_concat = pd.concat(all_group_means, ignore_index=False)
+        y_data_min = float(all_means_concat.min())
+        y_data_max = float(all_means_concat.max())
+        all_idx_concat = pd.concat(all_group_indices)
+        x_data_min = int(all_idx_concat.min())
+        x_data_max = int(all_idx_concat.max())
+        x_step = _auto_integer_step(x_data_min, x_data_max, target_ticks=10, allow_sub5=True)
+        _apply_integer_axis(ax, axis='x', data_min=x_data_min, data_max=x_data_max,
+                            step=x_step, clamp_min=0, left_pad_steps=0, right_pad_steps=0)
+        y_step = _auto_integer_step(y_data_min, y_data_max, target_ticks=7)
+        _apply_integer_axis(ax, axis='y', data_min=y_data_min, data_max=y_data_max,
+                            step=y_step, left_pad_steps=0, right_pad_steps=1)
+
+    ax.legend(title="Cohort", loc="best")
+    fig.tight_layout()
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
+        print(f"[OK] Saved plot to: {save_path}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
     return fig
 
 
@@ -8740,7 +8927,25 @@ def plot_weekly_means_by_cohort(
     ax.set_xlabel("Week")
     ax.set_ylabel(f"{measure} (Mean +/- SEM)")
     ax.set_title(title or f"{measure} by Cohort Across Weeks")
-    ax.legend(title="Cohort", loc="best", framealpha=0.9)
+
+    if by_sex:
+        # Add line-style key entries so the legend explains solid = Males, dashed = Females
+        from matplotlib.lines import Line2D
+        key_handles = [
+            Line2D([0], [0], color='black', linewidth=1.5, linestyle='-',  label='── Males'),
+            Line2D([0], [0], color='black', linewidth=1.5, linestyle='--', label='- - Females'),
+        ]
+        handles, labels = ax.get_legend_handles_labels()
+        ax.legend(
+            handles=handles + key_handles,
+            labels=labels + ['── Males', '- - Females'],
+            title="Cohort",
+            loc="best",
+            framealpha=0.9,
+        )
+    else:
+        ax.legend(title="Cohort", loc="best", framealpha=0.9)
+
     apply_common_plot_style(ax)
     fig.tight_layout()
 
@@ -9557,6 +9762,313 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("=" * 80)
 
 
+def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
+    """
+    Interactive plot menu for the 0% nonramp vs ramp comparison.
+    Statistics are not computed here — plots only.
+    All plots use Week as the time axis.
+    """
+    from datetime import datetime
+
+    MEASURES = ["Total Change", "Daily Change"]
+
+    combined_temp = combine_cohorts_for_analysis(cohorts)
+    available_measures = [m for m in MEASURES if m in combined_temp.columns]
+
+    # Identify which label is ramp vs 0% nonramp
+    ramp_label = next((lbl for lbl in cohorts if 'ramp' in lbl.lower()), None)
+    zero_label = next(
+        (lbl for lbl in cohorts if '0%' in lbl.lower() and 'ramp' not in lbl.lower()),
+        None,
+    )
+
+    # Detect number of experiment weeks from data
+    try:
+        _tmp = clean_cohort(combined_temp.copy())
+        if 'Day' not in _tmp.columns:
+            _tmp = add_day_column_across_cohorts(_tmp)
+        _tmp = _add_week_column_across_cohorts(_tmp)
+        n_weeks = int(_tmp['Week'].dropna().max()) if 'Week' in _tmp.columns else 5
+    except Exception:
+        n_weeks = 5
+
+    # Build cohort_metadata with CA schedules for x-axis tick annotation
+    # Ramp schedule: Week 1 = 0% CA, Week 2 = 1% CA, Week 3 = 2% CA, ...
+    ramp_schedule = {w: w - 1 for w in range(1, n_weeks + 1)}
+    zero_schedule  = {w: 0     for w in range(1, n_weeks + 1)}
+    cohort_metadata: Dict[str, Dict] = {}
+    if zero_label:
+        cohort_metadata[zero_label] = {"ca_schedule": zero_schedule}
+    if ramp_label:
+        cohort_metadata[ramp_label] = {"ca_schedule": ramp_schedule}
+
+    print("\n" + "=" * 80)
+    print("0% NONRAMP vs RAMP — PLOTS MENU")
+    print("=" * 80)
+    print("\nAll plots use Week as the time axis (Week 1 = first measurement week).")
+    print("Plots are saved to a timestamped directory.")
+    print(f"\nAvailable measures : {available_measures}")
+    print(f"Cohorts present    : {list(cohorts.keys())}")
+    print(f"Weeks detected     : {n_weeks}")
+    if ramp_label and ramp_schedule:
+        print(f"Ramp CA schedule   : {ramp_schedule}")
+    print()
+    print("  1. Weight plots by ID     -- Total/Daily Change per animal across time")
+    print("  2. Weight plots by Sex    -- Total/Daily Change averaged by sex across time")
+    print("  3. Cohort x Week plots    -- Weekly group means (+/- SEM) per cohort")
+    print("  4. Behavioral plots       -- Nesting, Lethargy, Anxiety prevalence across weeks")
+    print("  5. Cohort-avg plots       -- Total/Daily Change averaged by cohort (CA%-agnostic)")
+    print("  6. Run all (1-5)")
+    print()
+
+    user_input = input("Select option (1-6) or 'n' to skip: ").strip()
+    if user_input.lower() == 'n':
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_all = (user_input == '6')
+
+    plot_dir = Path(f"0vramp_plots_{timestamp}")
+
+    # ------------------------------------------------------------------ #
+    # Option 1: Weight plots by ID
+    # ------------------------------------------------------------------ #
+    if user_input == '1' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Weight plots by ID (Total Change and Daily Change)")
+            print("=" * 80)
+
+            combined = combine_cohorts_for_analysis(cohorts)
+            combined = clean_cohort(combined)
+            if 'Day' not in combined.columns:
+                combined = add_day_column_across_cohorts(combined)
+            # Ramp has no pre-experiment baseline: shift its days +1 so first real
+            # day aligns to Day 0 (matching the 0% group after baseline removal).
+            if ramp_label and 'Cohort' in combined.columns:
+                ramp_mask = combined['Cohort'] == ramp_label
+                combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
+            combined = combined[combined['Day'] >= 0].copy()  # remove 0% baseline (Day -1)
+
+            plot_dir.mkdir(exist_ok=True)
+            figs = {}
+            for fname, fn in [
+                ("total_change_by_id", plot_total_change_by_id),
+                ("daily_change_by_id", plot_daily_change_by_id),
+            ]:
+                try:
+                    fig = fn(combined, save_path=plot_dir / f"{fname}.svg", show=False)
+                    if fig:
+                        figs[fname] = fig
+                except Exception as e:
+                    print(f"  [WARNING] Plot {fname} failed: {e}")
+
+            print(f"\n[OK] {len(figs)} plot(s) saved -> {plot_dir}")
+            show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                plt.show()
+            else:
+                plt.close('all')
+
+    # ------------------------------------------------------------------ #
+    # Option 2: Weight plots by Sex
+    # ------------------------------------------------------------------ #
+    if user_input == '2' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Weight plots by Sex (Total Change and Daily Change)")
+            print("=" * 80)
+
+            combined = combine_cohorts_for_analysis(cohorts)
+            combined = clean_cohort(combined)
+            if 'Day' not in combined.columns:
+                combined = add_day_column_across_cohorts(combined)
+            # Ramp has no pre-experiment baseline: shift its days +1 so first real
+            # day aligns to Day 0 (matching the 0% group after baseline removal).
+            if ramp_label and 'Cohort' in combined.columns:
+                ramp_mask = combined['Cohort'] == ramp_label
+                combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
+            combined = combined[combined['Day'] >= 0].copy()  # remove 0% baseline (Day -1)
+
+            plot_dir.mkdir(exist_ok=True)
+            figs = {}
+            for fname, fn in [
+                ("total_change_by_sex", plot_total_change_by_sex),
+                ("daily_change_by_sex", plot_daily_change_by_sex),
+            ]:
+                try:
+                    fig = fn(combined, save_path=plot_dir / f"{fname}.svg", show=False)
+                    if fig:
+                        figs[fname] = fig
+                except Exception as e:
+                    print(f"  [WARNING] Plot {fname} failed: {e}")
+
+            print(f"\n[OK] {len(figs)} plot(s) saved -> {plot_dir}")
+            show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                plt.show()
+            else:
+                plt.close('all')
+
+    # ------------------------------------------------------------------ #
+    # Option 3: Cohort x Week interaction plots
+    # ------------------------------------------------------------------ #
+    if user_input == '3' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Cohort x Week weekly mean plots (+/- SEM)")
+            print("=" * 80)
+
+            try:
+                # Build week-aligned dataframe manually so we can apply the
+                # per-cohort day offset before filtering (ramp has no baseline).
+                combined_wk = combine_cohorts_for_analysis(cohorts)
+                combined_wk = clean_cohort(combined_wk)
+                if 'Day' not in combined_wk.columns:
+                    combined_wk = add_day_column_across_cohorts(combined_wk)
+                if ramp_label and 'Cohort' in combined_wk.columns:
+                    ramp_mask = combined_wk['Cohort'] == ramp_label
+                    combined_wk.loc[ramp_mask, 'Day'] = combined_wk.loc[ramp_mask, 'Day'] + 1
+                combined_wk = combined_wk[combined_wk['Day'] >= 0].copy()
+                combined_wk = _add_week_column_across_cohorts(combined_wk)
+            except Exception as e:
+                print(f"  [ERROR] Could not build cohort-week dataframe: {e}")
+                combined_wk = None
+
+            if combined_wk is not None:
+                plot_dir.mkdir(exist_ok=True)
+                figs = {}
+                for measure in available_measures:
+                    # All sexes collapsed
+                    fname = "cohort_week_{}_all.svg".format(
+                        measure.lower().replace(' ', '_')
+                    )
+                    try:
+                        fig = plot_weekly_means_by_cohort(
+                            combined_wk,
+                            measure=measure,
+                            cohort_metadata=cohort_metadata or None,
+                            by_sex=False,
+                            title="{} by Cohort Across Weeks (0% vs Ramp)".format(measure),
+                            save_path=plot_dir / fname,
+                            show=False,
+                        )
+                        if fig:
+                            figs[fname] = fig
+                    except Exception as e:
+                        print(f"  [WARNING] Cohort x Week plot (all) for {measure} failed: {e}")
+
+                    # Sex-stratified
+                    fname_sex = "cohort_week_{}_by_sex.svg".format(
+                        measure.lower().replace(' ', '_')
+                    )
+                    try:
+                        fig_sex = plot_weekly_means_by_cohort(
+                            combined_wk,
+                            measure=measure,
+                            cohort_metadata=cohort_metadata or None,
+                            by_sex=True,
+                            title="{} by Cohort and Sex Across Weeks (0% vs Ramp)".format(measure),
+                            save_path=plot_dir / fname_sex,
+                            show=False,
+                        )
+                        if fig_sex:
+                            figs[fname_sex] = fig_sex
+                    except Exception as e:
+                        print(f"  [WARNING] Cohort x Week plot (by sex) for {measure} failed: {e}")
+
+                print(f"\n[OK] {len(figs)} Cohort x Week plot(s) saved -> {plot_dir}")
+                show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
+                if show_now == 'y':
+                    plt.show()
+                else:
+                    plt.close('all')
+
+    # ------------------------------------------------------------------ #
+    # Option 4: Behavioral plots
+    # ------------------------------------------------------------------ #
+    if user_input == '4' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Behavioral plots (Nesting, Lethargy, Anxiety by week)")
+            print("=" * 80)
+
+            plot_dir.mkdir(exist_ok=True)
+            try:
+                fig = plot_behavioral_metrics_by_cohort(
+                    cohorts,
+                    title="Behavioral Metrics: 0% Nonramp vs Ramp \u2014 Across Weeks",
+                    save_path=plot_dir / "behavioral_metrics_by_cohort.svg",
+                    show=False,
+                )
+                if fig:
+                    print(
+                        f"\n[OK] Behavioral plot saved -> "
+                        f"{plot_dir / 'behavioral_metrics_by_cohort.svg'}"
+                    )
+            except Exception as e:
+                print(f"  [WARNING] Behavioral plot failed: {e}")
+
+            show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                plt.show()
+            else:
+                plt.close('all')
+
+    # ------------------------------------------------------------------ #
+    # Option 5: Cohort-averaged weight plots (CA%-agnostic)
+    # ------------------------------------------------------------------ #
+    if user_input == '5' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Cohort-averaged weight plots (Total Change and Daily Change)")
+            print("=" * 80)
+
+            combined = combine_cohorts_for_analysis(cohorts)
+            combined = clean_cohort(combined)
+            if 'Day' not in combined.columns:
+                combined = add_day_column_across_cohorts(combined)
+            # Apply same day alignment: shift ramp +1 so both cohorts start at Day 0
+            if ramp_label and 'Cohort' in combined.columns:
+                ramp_mask = combined['Cohort'] == ramp_label
+                combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
+            combined = combined[combined['Day'] >= 0].copy()
+
+            plot_dir.mkdir(exist_ok=True)
+            figs = {}
+            for fname, fn in [
+                ("total_change_by_cohort", plot_total_change_by_cohort),
+                ("daily_change_by_cohort", plot_daily_change_by_cohort),
+            ]:
+                try:
+                    fig = fn(combined, save_path=plot_dir / f"{fname}.svg", show=False)
+                    if fig:
+                        figs[fname] = fig
+                except Exception as e:
+                    print(f"  [WARNING] Plot {fname} failed: {e}")
+
+            print(f"\n[OK] {len(figs)} plot(s) saved -> {plot_dir}")
+            show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                plt.show()
+            else:
+                plt.close('all')
+
+    print("\n" + "=" * 80)
+    print("0% vs Ramp plots complete.")
+    print("=" * 80)
+
+
 def _run_unknown_menu(cohorts: Dict[str, pd.DataFrame], comparison: str) -> None:
     """Placeholder menu for comparison types not yet implemented."""
     label_map = {
@@ -9635,5 +10147,7 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------ #
     if comparison == '0v2':
         _run_0v2_menu(cohorts)
+    elif comparison == '0vramp':
+        _run_0vramp_menu(cohorts)
     else:
         _run_unknown_menu(cohorts, comparison)
