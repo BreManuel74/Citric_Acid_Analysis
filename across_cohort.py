@@ -7,7 +7,7 @@ Each cohort is loaded from a separate master CSV file (e.g., master_data_0%.csv,
 Main features:
 - Load multiple cohort CSV files into separate dataframes
 - Clean and standardize data across cohorts
-- Compare metrics (weights, behavioral measures, fecal counts) across cohorts
+- Compare metrics (weights, behavioral measures) across cohorts
 - Aggregate and summarize cross-cohort data
 
 Usage:
@@ -7326,7 +7326,8 @@ def generate_omnibus_weight_report_2way(
 def calculate_animal_slopes(
     cohort_dfs: Dict[str, pd.DataFrame],
     measure: str = "Total Change",
-    time_unit: str = "Week"
+    time_unit: str = "Week",
+    combined_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     Calculate linear regression slope for each animal's weight change over time.
@@ -7338,6 +7339,9 @@ def calculate_animal_slopes(
         cohort_dfs: Dictionary mapping cohort labels to DataFrames
         measure: Weight measure to analyze ('Total Change', 'Daily Change', 'Weight')
         time_unit: Time variable to use ('Week' or 'Day')
+        combined_df: Optional pre-built, properly aligned combined dataframe. When
+            provided the internal combine/clean/align steps are skipped. For
+            time_unit='Week' the dataframe must already have a 'Week' column.
         
     Returns:
         DataFrame with columns: ID, Sex, CA (%), Cohort, Slope, Intercept, R2, N_points
@@ -7352,32 +7356,48 @@ def calculate_animal_slopes(
     print(f"CALCULATING INDIVIDUAL ANIMAL SLOPES: {measure} vs {time_unit}")
     print("="*80)
     
-    # Combine cohorts
-    print("\nStep 1: Combining cohort dataframes...")
-    combined_df = combine_cohorts_for_analysis(cohort_dfs)
-    combined_df = clean_cohort(combined_df)
+    if combined_df is not None:
+        # Use pre-built, properly aligned dataframe (e.g. with ramp day offset applied)
+        print("\nStep 1: Using pre-built combined dataframe...")
+        working_df = combined_df.copy()
+    else:
+        # Build from raw cohort dicts
+        print("\nStep 1: Combining cohort dataframes...")
+        working_df = combine_cohorts_for_analysis(cohort_dfs)
+        working_df = clean_cohort(working_df)
+        if 'Day' not in working_df.columns:
+            working_df = add_day_column_across_cohorts(working_df)
+        if time_unit == "Week" and 'Week' not in working_df.columns:
+            working_df = _add_week_column_across_cohorts(working_df)
     
-    # Add time columns if needed
-    if 'Day' not in combined_df.columns:
-        combined_df = add_day_column_across_cohorts(combined_df)
-    
-    if time_unit == "Week" and 'Week' not in combined_df.columns:
-        combined_df = _add_week_column_across_cohorts(combined_df)
-    
-    # Check required columns
-    required_cols = ['ID', 'Sex', 'CA (%)', 'Cohort', time_unit, measure]
-    missing_cols = [col for col in required_cols if col not in combined_df.columns]
+    required_cols = ['ID', 'Sex', 'Cohort', time_unit, measure]
+    missing_cols = [col for col in required_cols if col not in working_df.columns]
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
     
-    # Prepare data
-    analysis_df = combined_df[required_cols].copy()
-    analysis_df = analysis_df.dropna()
+    # When using Week as the time axis, aggregate to one representative value per
+    # animal per week (mean across days) so each animal contributes exactly one
+    # data point per week to the regression rather than 7 repeated x-values.
+    if time_unit == "Week":
+        print("\nAggregating to weekly means (one value per animal per week)...")
+        agg_dict: dict = {measure: 'mean', 'Sex': 'first', 'Cohort': 'first'}
+        if 'CA (%)' in working_df.columns:
+            agg_dict['CA (%)'] = 'first'
+        analysis_df = (
+            working_df.groupby(['ID', 'Week'])
+            .agg(agg_dict)
+            .reset_index()
+            .dropna(subset=[measure])
+        )
+    else:
+        keep_cols = [c for c in ['ID', 'Sex', 'CA (%)', 'Cohort', time_unit, measure]
+                     if c in working_df.columns]
+        analysis_df = working_df[keep_cols].copy().dropna(subset=[measure])
     
     print(f"\nAnalyzing: {measure} vs {time_unit}")
-    print(f"  Total observations: {len(analysis_df)}")
+    print(f"  Total observations (rows): {len(analysis_df)}")
     print(f"  Unique animals: {analysis_df['ID'].nunique()}")
-    print(f"  CA% levels: {sorted(analysis_df['CA (%)'].unique())}")
+    print(f"  Cohorts: {sorted(analysis_df['Cohort'].unique())}")
     
     # Calculate slopes for each animal
     print(f"\nStep 2: Fitting linear regression for each animal...")
@@ -7426,14 +7446,14 @@ def calculate_animal_slopes(
     print("SLOPE SUMMARY BY COHORT")
     print("="*80)
     
-    for ca_val in sorted(slopes_df['CA (%)'].unique()):
-        cohort_slopes = slopes_df[slopes_df['CA (%)'] == ca_val]['Slope']
-        print(f"\n{ca_val}% CA (n={len(cohort_slopes)} animals):")
+    for cohort_label in sorted(slopes_df['Cohort'].unique()):
+        cohort_slopes = slopes_df[slopes_df['Cohort'] == cohort_label]['Slope']
+        print(f"\n{cohort_label} (n={len(cohort_slopes)} animals):")
         print(f"  Mean Slope:   {cohort_slopes.mean():.4f} {measure} per {time_unit}")
         print(f"  Median Slope: {cohort_slopes.median():.4f} {measure} per {time_unit}")
         print(f"  SD:           {cohort_slopes.std():.4f}")
         print(f"  Range:        [{cohort_slopes.min():.4f}, {cohort_slopes.max():.4f}]")
-        print(f"  Mean R^2:      {slopes_df[slopes_df['CA (%)'] == ca_val]['R2'].mean():.4f}")
+        print(f"  Mean R^2:      {slopes_df[slopes_df['Cohort'] == cohort_label]['R2'].mean():.4f}")
     
     return slopes_df
 
@@ -7461,12 +7481,16 @@ def compare_slopes_within_cohorts(slopes_df: pd.DataFrame) -> Dict:
         'levene_test': None
     }
     
-    # Descriptive statistics by cohort
-    for ca_val in sorted(slopes_df['CA (%)'].unique()):
-        cohort_slopes = slopes_df[slopes_df['CA (%)'] == ca_val]['Slope'].values
+    # Descriptive statistics + one-sample t-test vs zero by cohort
+    for cohort_label in sorted(slopes_df['Cohort'].unique()):
+        cohort_slopes = slopes_df[slopes_df['Cohort'] == cohort_label]['Slope'].values
+        
+        # One-sample t-test: is the mean slope different from zero?
+        t_stat_zero, p_val_zero = stats.ttest_1samp(cohort_slopes, popmean=0)
+        df_zero = len(cohort_slopes) - 1
         
         cohort_stat = {
-            'CA (%)': ca_val,
+            'Cohort': cohort_label,
             'N': len(cohort_slopes),
             'Mean': cohort_slopes.mean(),
             'Median': np.median(cohort_slopes),
@@ -7475,35 +7499,46 @@ def compare_slopes_within_cohorts(slopes_df: pd.DataFrame) -> Dict:
             'Min': cohort_slopes.min(),
             'Max': cohort_slopes.max(),
             'IQR': np.percentile(cohort_slopes, 75) - np.percentile(cohort_slopes, 25),
-            'CV': (cohort_slopes.std() / cohort_slopes.mean() * 100) if cohort_slopes.mean() != 0 else np.nan
+            'CV': (cohort_slopes.std() / cohort_slopes.mean() * 100) if cohort_slopes.mean() != 0 else np.nan,
+            'ttest_vs_zero': {
+                'statistic': t_stat_zero,
+                'p_value': p_val_zero,
+                'df': df_zero,
+            },
         }
         
         results['cohort_stats'].append(cohort_stat)
         
-        print(f"\n{ca_val}% CA Cohort (n={cohort_stat['N']}):")
+        print(f"\n{cohort_label} (n={cohort_stat['N']}):")
         print(f"  Mean +/- SEM:         {cohort_stat['Mean']:.4f} +/- {cohort_stat['SEM']:.4f}")
         print(f"  Median (IQR):       {cohort_stat['Median']:.4f} ({cohort_stat['IQR']:.4f})")
         print(f"  SD:                 {cohort_stat['SD']:.4f}")
         print(f"  Coefficient of Var: {cohort_stat['CV']:.2f}%")
         print(f"  Range:              [{cohort_stat['Min']:.4f}, {cohort_stat['Max']:.4f}]")
+        print(f"  One-sample t-test (slope vs 0): t({df_zero}) = {t_stat_zero:.4f}, p = {p_val_zero:.4f}")
+        direction = 'gaining' if cohort_slopes.mean() > 0 else 'losing'
+        if p_val_zero < 0.05:
+            print(f"    -> Cohort is significantly {direction} weight over time (p < 0.05)")
+        else:
+            print(f"    -> Slope does not significantly differ from zero (p >= 0.05)")
     
     # Levene's test for equality of variances between cohorts
-    ca_groups = sorted(slopes_df['CA (%)'].unique())
+    cohort_groups = sorted(slopes_df['Cohort'].unique())
     
-    if len(ca_groups) >= 2:
+    if len(cohort_groups) >= 2:
         print("\n" + "-"*80)
         print("LEVENE'S TEST: Equality of Variances Between Cohorts")
         print("-"*80)
         
-        group_slopes = [slopes_df[slopes_df['CA (%)'] == ca]['Slope'].values 
-                       for ca in ca_groups]
+        group_slopes = [slopes_df[slopes_df['Cohort'] == c]['Slope'].values
+                       for c in cohort_groups]
         
         levene_stat, levene_p = stats.levene(*group_slopes)
         
         results['levene_test'] = {
             'statistic': levene_stat,
             'p_value': levene_p,
-            'ca_groups': ca_groups
+            'cohort_groups': cohort_groups
         }
         
         print(f"Levene's statistic: W = {levene_stat:.4f}")
@@ -7538,7 +7573,7 @@ def compare_slopes_between_cohorts(slopes_df: pd.DataFrame) -> Dict:
     print("BETWEEN-COHORT SLOPE COMPARISON")
     print("="*80)
     
-    ca_groups = sorted(slopes_df['CA (%)'].unique())
+    ca_groups = sorted(slopes_df['Cohort'].unique())
     
     if len(ca_groups) != 2:
         print(f"Warning: Expected 2 cohorts, found {len(ca_groups)}. Returning empty results.")
@@ -7547,12 +7582,12 @@ def compare_slopes_between_cohorts(slopes_df: pd.DataFrame) -> Dict:
     ca_0 = ca_groups[0]
     ca_1 = ca_groups[1]
     
-    slopes_0 = slopes_df[slopes_df['CA (%)'] == ca_0]['Slope'].values
-    slopes_1 = slopes_df[slopes_df['CA (%)'] == ca_1]['Slope'].values
+    slopes_0 = slopes_df[slopes_df['Cohort'] == ca_0]['Slope'].values
+    slopes_1 = slopes_df[slopes_df['Cohort'] == ca_1]['Slope'].values
     
-    print(f"\nComparing: {ca_0}% CA (n={len(slopes_0)}) vs {ca_1}% CA (n={len(slopes_1)})")
-    print(f"  {ca_0}% CA: Mean = {slopes_0.mean():.4f}, SD = {slopes_0.std():.4f}")
-    print(f"  {ca_1}% CA: Mean = {slopes_1.mean():.4f}, SD = {slopes_1.std():.4f}")
+    print(f"\nComparing: {ca_0} (n={len(slopes_0)}) vs {ca_1} (n={len(slopes_1)})")
+    print(f"  {ca_0}: Mean = {slopes_0.mean():.4f}, SD = {slopes_0.std():.4f}")
+    print(f"  {ca_1}: Mean = {slopes_1.mean():.4f}, SD = {slopes_1.std():.4f}")
     print(f"  Difference in means: {slopes_1.mean() - slopes_0.mean():.4f}")
     
     results = {
@@ -7711,7 +7746,7 @@ def plot_slopes_comparison(
     
     import matplotlib.ticker as mticker
     
-    ca_groups = sorted(slopes_df['CA (%)'].unique())
+    ca_groups = sorted(slopes_df['Cohort'].unique())
     
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
     
@@ -7719,7 +7754,7 @@ def plot_slopes_comparison(
     ax1 = axes[0]
     
     positions = list(range(len(ca_groups)))
-    box_data = [slopes_df[slopes_df['CA (%)'] == ca]['Slope'].values for ca in ca_groups]
+    box_data = [slopes_df[slopes_df['Cohort'] == c]['Slope'].values for c in ca_groups]
     
     bp = ax1.boxplot(box_data, positions=positions, widths=0.5, patch_artist=True,
                      boxprops=dict(facecolor='lightblue', alpha=0.7),
@@ -7729,28 +7764,27 @@ def plot_slopes_comparison(
     
     # Overlay individual points
     for i, ca_val in enumerate(ca_groups):
-        cohort_slopes = slopes_df[slopes_df['CA (%)'] == ca_val]['Slope'].values
+        cohort_slopes = slopes_df[slopes_df['Cohort'] == ca_val]['Slope'].values
         x_jitter = np.random.normal(i, 0.04, size=len(cohort_slopes))
         ax1.scatter(x_jitter, cohort_slopes, alpha=0.6, s=50, color='darkblue', edgecolors='black', linewidths=0.5)
     
     ax1.set_xticks(positions)
-    ax1.set_xticklabels([f'{ca}%' for ca in ca_groups])
+    ax1.set_xticklabels(ca_groups)
     ax1.set_xlim(-0.7, len(ca_groups) - 1 + 0.7)
-    ax1.set_xlabel('CA% Concentration')
+    ax1.set_xlabel('Cohort')
     ax1.set_ylabel(f'Slope ({measure} per {time_unit})')
     ax1.set_title('Slope Distribution by Cohort')
     ax1.grid(False)
     ax1.tick_params(direction='in', length=6)
-    ax1.set_ylim(bottom=0)
     ax1.spines['top'].set_visible(False)
     ax1.spines['right'].set_visible(False)
     
     # Subplot 2: Bar plot with error bars (Mean +/- SEM)
     ax2 = axes[1]
     
-    means = [slopes_df[slopes_df['CA (%)'] == ca]['Slope'].mean() for ca in ca_groups]
-    sems = [slopes_df[slopes_df['CA (%)'] == ca]['Slope'].std() / 
-            np.sqrt(len(slopes_df[slopes_df['CA (%)'] == ca])) for ca in ca_groups]
+    means = [slopes_df[slopes_df['Cohort'] == c]['Slope'].mean() for c in ca_groups]
+    sems = [slopes_df[slopes_df['Cohort'] == c]['Slope'].std() / 
+            np.sqrt(len(slopes_df[slopes_df['Cohort'] == c])) for c in ca_groups]
     
     colors = ['dodgerblue', 'orangered']
     bars = ax2.bar(positions, means, yerr=sems, capsize=8, width=0.6, 
@@ -7758,14 +7792,14 @@ def plot_slopes_comparison(
                    edgecolor='black', linewidth=1.5, error_kw={'linewidth': 2})
     
     ax2.set_xticks(positions)
-    ax2.set_xticklabels([f'{ca}%' for ca in ca_groups])
+    ax2.set_xticklabels(ca_groups)
     ax2.set_xlim(-0.7, len(ca_groups) - 1 + 0.7)
-    ax2.set_xlabel('CA% Concentration')
+    ax2.set_xlabel('Cohort')
     ax2.set_ylabel(f'Mean Slope +/- SEM ({measure} per {time_unit})')
     ax2.set_title('Mean Slopes by Cohort')
     ax2.grid(False)
     ax2.tick_params(direction='in', length=6)
-    ax2.set_ylim(bottom=0)
+    ax2.axhline(0, color='black', linewidth=0.8, linestyle='--')
     ax2.spines['top'].set_visible(False)
     ax2.spines['right'].set_visible(False)
     
@@ -7773,17 +7807,17 @@ def plot_slopes_comparison(
     ax3 = axes[2]
     
     for i, ca_val in enumerate(ca_groups):
-        cohort_slopes = slopes_df[slopes_df['CA (%)'] == ca_val]['Slope'].values
-        ax3.hist(cohort_slopes, bins=8, alpha=0.6, label=f'{ca_val}% CA (n={len(cohort_slopes)})',
+        cohort_slopes = slopes_df[slopes_df['Cohort'] == ca_val]['Slope'].values
+        ax3.hist(cohort_slopes, bins=8, alpha=0.6, label=f'{ca_val} (n={len(cohort_slopes)})',
                 color=colors[i], edgecolor='black', linewidth=1)
     
     ax3.set_xlabel(f'Slope ({measure} per {time_unit})')
     ax3.set_ylabel('Frequency')
     ax3.set_title('Slope Distribution Comparison')
     ax3.legend(loc='best')
+    ax3.axvline(0, color='black', linewidth=0.8, linestyle='--')
     ax3.grid(False)
     ax3.tick_params(direction='in', length=6)
-    ax3.set_xlim(left=0)
     ax3.spines['top'].set_visible(False)
     ax3.spines['right'].set_visible(False)
     
@@ -7847,9 +7881,9 @@ def generate_slope_analysis_report(
     lines.append("Individual Animal Results:")
     lines.append("-" * 80)
     
-    for ca_val in sorted(slopes_df['CA (%)'].unique()):
-        cohort_data = slopes_df[slopes_df['CA (%)'] == ca_val].sort_values('Slope', ascending=False)
-        lines.append(f"\n{ca_val}% CA Cohort (n={len(cohort_data)}):")
+    for ca_val in sorted(slopes_df['Cohort'].unique()):
+        cohort_data = slopes_df[slopes_df['Cohort'] == ca_val].sort_values('Slope', ascending=False)
+        lines.append(f"\n{ca_val} (n={len(cohort_data)}):")
         
         for _, row in cohort_data.iterrows():
             lines.append(f"  {row['ID']:8s} ({row['Sex']}): "
@@ -7864,7 +7898,7 @@ def generate_slope_analysis_report(
     lines.append("\nThis section examines the variability of slopes within each cohort.")
     
     for cohort_stat in within_results['cohort_stats']:
-        lines.append(f"\n{cohort_stat['CA (%)']}% CA Cohort:")
+        lines.append(f"\n{cohort_stat['Cohort']}:")
         lines.append(f"  Sample Size:           n = {cohort_stat['N']}")
         lines.append(f"  Mean Slope:            {cohort_stat['Mean']:.4f} {measure} per {time_unit}")
         lines.append(f"  Standard Error (SEM):  {cohort_stat['SEM']:.4f}")
@@ -7873,6 +7907,19 @@ def generate_slope_analysis_report(
         lines.append(f"  Interquartile Range:   {cohort_stat['IQR']:.4f}")
         lines.append(f"  Range:                 [{cohort_stat['Min']:.4f}, {cohort_stat['Max']:.4f}]")
         lines.append(f"  Coefficient of Var:    {cohort_stat['CV']:.2f}%")
+        if 'ttest_vs_zero' in cohort_stat:
+            t0 = cohort_stat['ttest_vs_zero']
+            lines.append(f"  One-Sample t-test (slope vs 0):")
+            lines.append(f"    t({t0['df']}) = {t0['statistic']:.4f}, p = {t0['p_value']:.4f}")
+            direction = 'gaining' if cohort_stat['Mean'] > 0 else 'losing'
+            if t0['p_value'] < 0.001:
+                lines.append(f"    Result: Cohort is significantly {direction} weight over time (p < 0.001)")
+            elif t0['p_value'] < 0.01:
+                lines.append(f"    Result: Cohort is significantly {direction} weight over time (p < 0.01)")
+            elif t0['p_value'] < 0.05:
+                lines.append(f"    Result: Cohort is significantly {direction} weight over time (p < 0.05)")
+            else:
+                lines.append(f"    Result: Slope does not significantly differ from zero (p >= 0.05)")
     
     if within_results['levene_test']:
         levene = within_results['levene_test']
@@ -7896,10 +7943,10 @@ def generate_slope_analysis_report(
         ca_0 = between_results['ca_groups'][0]
         ca_1 = between_results['ca_groups'][1]
         
-        lines.append(f"\nCohort Comparison: {ca_0}% CA vs {ca_1}% CA")
+        lines.append(f"\nCohort Comparison: {ca_0} vs {ca_1}")
         lines.append("-" * 80)
-        lines.append(f"  {ca_0}% CA: Mean = {between_results['mean_0']:.4f}, SD = {between_results['sd_0']:.4f} (n={between_results['n_0']})")
-        lines.append(f"  {ca_1}% CA: Mean = {between_results['mean_1']:.4f}, SD = {between_results['sd_1']:.4f} (n={between_results['n_1']})")
+        lines.append(f"  {ca_0}: Mean = {between_results['mean_0']:.4f}, SD = {between_results['sd_0']:.4f} (n={between_results['n_0']})")
+        lines.append(f"  {ca_1}: Mean = {between_results['mean_1']:.4f}, SD = {between_results['sd_1']:.4f} (n={between_results['n_1']})")
         lines.append(f"  Difference in means: {between_results['mean_diff']:.4f}")
         
         # T-test results
@@ -7967,9 +8014,9 @@ def generate_slope_analysis_report(
     
     if between_results and 't_test' in between_results and between_results['t_test']['p_value'] < 0.05:
         lines.append(f"\nThe two cohorts show SIGNIFICANTLY DIFFERENT rates of weight change.")
-        lines.append(f"The {between_results['ca_groups'][1]}% CA group has a mean slope that is")
+        lines.append(f"The {between_results['ca_groups'][1]} group has a mean slope that is")
         lines.append(f"{abs(between_results['mean_diff']):.4f} {measure} per {time_unit} {'higher' if between_results['mean_diff'] > 0 else 'lower'}")
-        lines.append(f"than the {between_results['ca_groups'][0]}% CA group (p = {between_results['t_test']['p_value']:.4f}).")
+        lines.append(f"than the {between_results['ca_groups'][0]} group (p = {between_results['t_test']['p_value']:.4f}).")
     elif between_results and 't_test' in between_results:
         lines.append(f"\nThe two cohorts show NO SIGNIFICANT DIFFERENCE in rates of weight change.")
         lines.append(f"Both groups put on weight at approximately the same rate (p = {between_results['t_test']['p_value']:.4f}).")
@@ -7991,7 +8038,8 @@ def perform_complete_slope_analysis(
     time_unit: str = "Week",
     save_plot: bool = True,
     save_report: bool = True,
-    output_dir: Optional[Path] = None
+    output_dir: Optional[Path] = None,
+    combined_df: Optional[pd.DataFrame] = None,
 ) -> Dict:
     """
     Perform complete slope analysis: calculate slopes, compare within/between cohorts,
@@ -8006,6 +8054,7 @@ def perform_complete_slope_analysis(
         save_plot: Whether to save the visualization
         save_report: Whether to save the text report
         output_dir: Directory for saving outputs (default: current directory)
+        combined_df: Optional pre-built combined dataframe (see calculate_animal_slopes).
         
     Returns:
         Dictionary with all analysis results
@@ -8015,7 +8064,9 @@ def perform_complete_slope_analysis(
     print("="*80)
     
     # Step 1: Calculate individual slopes
-    slopes_df = calculate_animal_slopes(cohort_dfs, measure=measure, time_unit=time_unit)
+    slopes_df = calculate_animal_slopes(
+        cohort_dfs, measure=measure, time_unit=time_unit, combined_df=combined_df
+    )
     
     # Step 2: Compare within cohorts
     within_results = compare_slopes_within_cohorts(slopes_df)
@@ -9764,9 +9815,8 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
 
 def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     """
-    Interactive plot menu for the 0% nonramp vs ramp comparison.
-    Statistics are not computed here — plots only.
-    All plots use Week as the time axis.
+    Interactive analysis menu for the 0% nonramp vs ramp comparison.
+    All analyses use Week as the time axis.
     """
     from datetime import datetime
 
@@ -9803,10 +9853,10 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
         cohort_metadata[ramp_label] = {"ca_schedule": ramp_schedule}
 
     print("\n" + "=" * 80)
-    print("0% NONRAMP vs RAMP — PLOTS MENU")
+    print("0% NONRAMP vs RAMP — ANALYSIS MENU")
     print("=" * 80)
-    print("\nAll plots use Week as the time axis (Week 1 = first measurement week).")
-    print("Plots are saved to a timestamped directory.")
+    print("\nAll analyses use Week as the time axis (Week 1 = first measurement week).")
+    print("Outputs are saved to a timestamped directory.")
     print(f"\nAvailable measures : {available_measures}")
     print(f"Cohorts present    : {list(cohorts.keys())}")
     print(f"Weeks detected     : {n_weeks}")
@@ -9818,15 +9868,16 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  3. Cohort x Week plots    -- Weekly group means (+/- SEM) per cohort")
     print("  4. Behavioral plots       -- Nesting, Lethargy, Anxiety prevalence across weeks")
     print("  5. Cohort-avg plots       -- Total/Daily Change averaged by cohort (CA%-agnostic)")
-    print("  6. Run all (1-5)")
+    print("  6. Slope analysis         -- Per-animal fitted slopes within cohorts + between-cohort comparison")
+    print("  7. Run all (1-6)")
     print()
 
-    user_input = input("Select option (1-6) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-7) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '6')
+    run_all = (user_input == '7')
 
     plot_dir = Path(f"0vramp_plots_{timestamp}")
 
@@ -10064,8 +10115,54 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             else:
                 plt.close('all')
 
+    # ------------------------------------------------------------------ #
+    # Option 6: Slope analysis (per-animal OLS within cohorts + between-cohort)
+    # ------------------------------------------------------------------ #
+    if user_input == '6' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: Slope analysis (per-animal fitted slopes, within- and between-cohort)")
+        print("=" * 80)
+        print("  Fits OLS regression (Total Change ~ Week) per animal using weekly means.")
+        print("  Within each cohort: variability of slopes + Levene's test.")
+        print("  Between cohorts   : Welch's t-test, Mann-Whitney U, Cohen's d.")
+
+        # Build the same properly aligned week-level dataframe that Option 3 uses,
+        # so the ramp day-offset is applied before week numbers are assigned.
+        try:
+            combined_wk = combine_cohorts_for_analysis(cohorts)
+            combined_wk = clean_cohort(combined_wk)
+            if 'Day' not in combined_wk.columns:
+                combined_wk = add_day_column_across_cohorts(combined_wk)
+            if ramp_label and 'Cohort' in combined_wk.columns:
+                ramp_mask = combined_wk['Cohort'] == ramp_label
+                combined_wk.loc[ramp_mask, 'Day'] = combined_wk.loc[ramp_mask, 'Day'] + 1
+            combined_wk = combined_wk[combined_wk['Day'] >= 0].copy()
+            combined_wk = _add_week_column_across_cohorts(combined_wk)
+        except Exception as e:
+            print(f"  [ERROR] Could not build cohort-week dataframe: {e}")
+            import traceback; traceback.print_exc()
+            combined_wk = None
+
+        if combined_wk is not None and 'Total Change' in combined_wk.columns:
+            plot_dir.mkdir(exist_ok=True)
+            try:
+                perform_complete_slope_analysis(
+                    cohorts,
+                    measure='Total Change',
+                    time_unit='Week',
+                    save_plot=True,
+                    save_report=True,
+                    output_dir=plot_dir,
+                    combined_df=combined_wk,
+                )
+            except Exception as e:
+                print(f"  [WARNING] Slope analysis failed: {e}")
+                import traceback; traceback.print_exc()
+
+            print(f"\n[OK] Slope analysis outputs saved -> {plot_dir}")
+
     print("\n" + "=" * 80)
-    print("0% vs Ramp plots complete.")
+    print("0% vs Ramp analysis complete.")
     print("=" * 80)
 
 
