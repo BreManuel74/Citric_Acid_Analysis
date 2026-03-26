@@ -4282,607 +4282,1030 @@ def perform_complete_slope_analysis_cah(
 	}
 
 
+def perform_mixed_anova_ca_x_week(
+	df: pd.DataFrame,
+	measure: str = "Total Change",
+	padjust: str = 'fdr_bh',
+) -> dict:
+	"""
+	2-Way Mixed ANOVA: CA% (between) × Week (within), all animals combined.
+
+	Post-hoc tests (correction method = padjust):
+	  1. Pairwise Week comparisons (main effect of Week, all CA% pooled)
+	  2. Simple effects: 0% vs 2% CA% at each individual Week
+	     (independent-samples Welch t-tests, corrected across all weeks)
+	  3. Pairwise Week comparisons within each CA% group separately
+
+	Parameters
+	----------
+	df      : DataFrame with 'ID', 'Week', 'CA (%)', and *measure* columns.
+	          If 'Week' is absent, add_week_column() is called first.
+	measure : Dependent variable column name.
+	padjust : Multiple-comparison correction method ('fdr_bh', 'bonf', 'holm').
+
+	Returns
+	-------
+	dict with keys: anova_table, time, ca_percent, interaction,
+	                posthoc_week_pairwise, posthoc_ca_per_week,
+	                posthoc_within_ca, analysis_df
+	"""
+	print("\n" + "="*80)
+	print(f"2-WAY MIXED ANOVA: CA% (BETWEEN) × WEEK (WITHIN) — {measure}")
+	print(f"All animals combined  |  Correction: {padjust.upper()}")
+	print("="*80)
+
+	if not HAS_PINGOUIN:
+		print("\n[ERROR] pingouin is required for mixed ANOVA.")
+		print("Install with: pip install pingouin")
+		return {}
+
+	df = df.copy()
+	if "Week" not in df.columns:
+		df = add_week_column(df)
+
+	required = {"ID", "Week", "CA (%)", measure}
+	missing = required - set(df.columns)
+	if missing:
+		print(f"\n[ERROR] Missing columns: {missing}")
+		return {}
+
+	analysis_df = df[["ID", "Week", "CA (%)", measure]].copy().dropna()
+	analysis_df["CA (%)"] = pd.to_numeric(analysis_df["CA (%)"], errors="coerce")
+	analysis_df = analysis_df.dropna(subset=["CA (%)"])
+
+	weeks     = sorted(analysis_df["Week"].unique())
+	ca_levels = sorted(analysis_df["CA (%)"].unique())
+
+	print(f"\n  Weeks      : {[int(w) for w in weeks]}")
+	print(f"  CA% levels : {[int(c) for c in ca_levels]}")
+	print(f"  Animals    : {analysis_df['ID'].nunique()}")
+
+	# ── Descriptive statistics ────────────────────────────────────────────────
+	print(f"\nDESCRIPTIVE STATISTICS  ({measure}  mean ± SEM  by CA% × Week)")
+	print("-"*72)
+	for ca in ca_levels:
+		for wk in weeks:
+			grp = analysis_df[
+				(analysis_df["CA (%)"] == ca) & (analysis_df["Week"] == wk)
+			][measure]
+			n   = len(grp)
+			mn  = grp.mean()
+			sem = grp.sem()
+			print(f"  CA% {int(ca):2d},  Week {int(wk):2d} : n={n},  M={mn:.3f},  SEM={sem:.3f}")
+
+	# ── Mixed ANOVA ───────────────────────────────────────────────────────────
+	print(f"\nMIXED ANOVA TABLE")
+	print("-"*72)
+	try:
+		aov = pg.mixed_anova(
+			data=analysis_df,
+			dv=measure,
+			within="Week",
+			between="CA (%)",
+			subject="ID",
+			correction=True,   # force Greenhouse-Geisser correction
+		)
+		print(aov.to_string())
+	except Exception as e:
+		print(f"\n[ERROR] Mixed ANOVA failed: {e}")
+		import traceback; traceback.print_exc()
+		return {}
+
+	p_col = "p-unc" if "p-unc" in aov.columns else "p_unc"
+
+	def _find_row(label):
+		for lbl in [label, f"Week * {label}", f"{label} * Week"]:
+			rows = aov[aov["Source"].str.strip() == lbl]
+			if not rows.empty:
+				return rows.iloc[0]
+		return None
+
+	week_row  = _find_row("Week")
+	ca_row    = _find_row("CA (%)")
+	inter_row = None
+	for src in aov["Source"]:
+		s = str(src).strip()
+		if "Interaction" in s or ("Week" in s and "CA" in s):
+			inter_row = aov[aov["Source"] == src].iloc[0]
+			break
+
+	def _gg_p(row):
+		if row is None:
+			return np.nan, False
+		p_gg = row.get("p-GG-corr", np.nan)
+		if not pd.isna(p_gg):
+			return float(p_gg), True
+		return float(row[p_col]), False
+
+	week_p,  week_gg  = _gg_p(week_row)
+	ca_p              = float(ca_row[p_col]) if ca_row is not None else np.nan
+	inter_p, inter_gg = _gg_p(inter_row)
+
+	eps_val = np.nan
+	if week_row is not None:
+		eps_val = week_row.get("eps", np.nan)
+
+	print(f"\nFORMATTED RESULTS")
+	print("-"*72)
+	if week_row is not None:
+		sig  = "***" if week_p < 0.001 else "**" if week_p < 0.01 else "*" if week_p < 0.05 else "ns"
+		note = " (GG-corrected)" if week_gg else ""
+		print(f"  Week       : F({week_row['DF1']:.0f},{week_row['DF2']:.0f}) = {week_row['F']:.3f},  p = {week_p:.4f} {sig}{note}")
+	if ca_row is not None:
+		sig  = "***" if ca_p < 0.001 else "**" if ca_p < 0.01 else "*" if ca_p < 0.05 else "ns"
+		print(f"  CA%        : F({ca_row['DF1']:.0f},{ca_row['DF2']:.0f}) = {ca_row['F']:.3f},  p = {ca_p:.4f} {sig}")
+	if inter_row is not None:
+		sig  = "***" if inter_p < 0.001 else "**" if inter_p < 0.01 else "*" if inter_p < 0.05 else "ns"
+		note = " (GG-corrected)" if inter_gg else ""
+		print(f"  Week × CA% : F({inter_row['DF1']:.0f},{inter_row['DF2']:.0f}) = {inter_row['F']:.3f},  p = {inter_p:.4f} {sig}{note}")
+	if not pd.isna(eps_val):
+		print(f"\n  Sphericity : Greenhouse-Geisser ε = {float(eps_val):.4f}", end="")
+		if float(eps_val) < 0.75:
+			print("  ← violated, GG correction applied")
+		else:
+			print("  ← acceptable")
+
+	results = {
+		"measure": measure,
+		"type": "mixed_anova_ca_x_week",
+		"padjust": padjust,
+		"anova_table": aov,
+		"analysis_df": analysis_df,
+		"time": {
+			"F":            week_row["F"]   if week_row  is not None else np.nan,
+			"p":            week_p,
+			"gg_corrected": week_gg,
+			"eps":          float(eps_val) if not pd.isna(eps_val) else np.nan,
+			"df1":          float(week_row["DF1"]) if week_row  is not None else np.nan,
+			"df2":          float(week_row["DF2"]) if week_row  is not None else np.nan,
+			"significant":  week_p < 0.05 if not np.isnan(week_p) else False,
+		},
+		"ca_percent": {
+			"F":           ca_row["F"]   if ca_row is not None else np.nan,
+			"p":           ca_p,
+			"df1":         float(ca_row["DF1"]) if ca_row is not None else np.nan,
+			"df2":         float(ca_row["DF2"]) if ca_row is not None else np.nan,
+			"significant": ca_p < 0.05 if not np.isnan(ca_p) else False,
+		},
+		"interaction": {
+			"F":            inter_row["F"]   if inter_row is not None else np.nan,
+			"p":            inter_p,
+			"gg_corrected": inter_gg,
+			"df1":          float(inter_row["DF1"]) if inter_row is not None else np.nan,
+			"df2":          float(inter_row["DF2"]) if inter_row is not None else np.nan,
+			"significant":  inter_p < 0.05 if not np.isnan(inter_p) else False,
+		},
+	}
+
+	# ── POST-HOC 1: Pairwise Week comparisons (main effect of Week) ───────────
+	print(f"\n{'='*80}")
+	print(f"POST-HOC 1: PAIRWISE WEEK COMPARISONS")
+	print(f"(Main effect of Week — all CA% pooled — {padjust.upper()} corrected)")
+	print("="*80)
+	try:
+		week_pw = pg.pairwise_tests(
+			data=analysis_df,
+			dv=measure,
+			within="Week",
+			subject="ID",
+			parametric=True,
+			padjust=padjust,
+			return_desc=True,
+		)
+		week_pw   = week_pw[week_pw["Contrast"] == "Week"].copy()
+		padj_col  = "p-corr" if "p-corr" in week_pw.columns else padjust
+		p_raw_col = "p-unc"  if "p-unc"  in week_pw.columns else "p"
+		sig_n     = (week_pw[padj_col] < 0.05).sum() if padj_col in week_pw.columns else 0
+		print(f"\n  {len(week_pw)} pairs — {sig_n} significant after correction\n")
+		for _, row in week_pw.iterrows():
+			a, b   = int(row["A"]), int(row["B"])
+			p_adj  = row.get(padj_col, np.nan)
+			p_raw_val = row.get(p_raw_col, np.nan)
+			sig    = "***" if p_adj < 0.001 else "**" if p_adj < 0.01 else "*" if p_adj < 0.05 else "ns"
+			print(f"  Week {a:2d} vs Week {b:2d}: p-raw = {p_raw_val:.4f},  p-adj = {p_adj:.4f}  [{sig}]")
+		results["posthoc_week_pairwise"] = week_pw
+	except Exception as e:
+		print(f"\n  [ERROR] Pairwise Week post-hoc failed: {e}")
+		results["posthoc_week_pairwise"] = pd.DataFrame()
+
+	# ── POST-HOC 2: Simple effects — CA% at each Week ────────────────────────
+	print(f"\n{'='*80}")
+	print(f"POST-HOC 2: SIMPLE EFFECTS — CA% AT EACH WEEK")
+	print(f"(Welch t-test: 0% vs 2% per week — {padjust.upper()} corrected across weeks)")
+	print("="*80)
+	simple_rows = []
+	for wk in weeks:
+		wk_data = analysis_df[analysis_df["Week"] == wk]
+		if len(ca_levels) == 2:
+			g1 = wk_data[wk_data["CA (%)"] == ca_levels[0]][measure].dropna().values
+			g2 = wk_data[wk_data["CA (%)"] == ca_levels[1]][measure].dropna().values
+			if len(g1) < 2 or len(g2) < 2:
+				print(f"  Week {int(wk):2d}: insufficient data — skipping")
+				continue
+			from scipy.stats import ttest_ind
+			t_stat, p_raw = ttest_ind(g1, g2, equal_var=False)
+			simple_rows.append({
+				"Week":   int(wk),
+				"CA_A":   int(ca_levels[0]),
+				"CA_B":   int(ca_levels[1]),
+				"n_A":    len(g1),
+				"n_B":    len(g2),
+				"mean_A": g1.mean(),
+				"mean_B": g2.mean(),
+				"t":      t_stat,
+				"p_raw":  p_raw,
+			})
+
+	if simple_rows:
+		from statsmodels.stats.multitest import multipletests
+		p_raws = [r["p_raw"] for r in simple_rows]
+		reject, p_adj_arr, _, _ = multipletests(p_raws, method=padjust)
+		for i, row in enumerate(simple_rows):
+			row["p_adj"]      = p_adj_arr[i]
+			row["significant"] = bool(reject[i])
+		ca_per_week_df = pd.DataFrame(simple_rows)
+		results["posthoc_ca_per_week"] = ca_per_week_df
+		n_sig = ca_per_week_df["significant"].sum()
+		print(f"\n  {len(simple_rows)} tests — {n_sig} significant after correction\n")
+		for _, row in ca_per_week_df.iterrows():
+			sig = "***" if row["p_adj"] < 0.001 else "**" if row["p_adj"] < 0.01 else "*" if row["p_adj"] < 0.05 else "ns"
+			print(
+				f"  Week {int(row['Week']):2d}: "
+				f"CA% {int(row['CA_A'])}% (n={int(row['n_A'])}, M={row['mean_A']:.3f}) vs "
+				f"{int(row['CA_B'])}% (n={int(row['n_B'])}, M={row['mean_B']:.3f}):  "
+				f"t = {row['t']:.3f},  p-raw = {row['p_raw']:.4f},  p-adj = {row['p_adj']:.4f}  [{sig}]"
+			)
+	else:
+		print("  [WARNING] No valid week-level comparisons could be performed.")
+		results["posthoc_ca_per_week"] = pd.DataFrame()
+
+	# ── POST-HOC 3: Pairwise Week comparisons within each CA% group ───────────
+	print(f"\n{'='*80}")
+	print(f"POST-HOC 3: WEEK PAIRWISE WITHIN EACH CA% GROUP")
+	print(f"(Simple effects of Time — {padjust.upper()} corrected)")
+	print("="*80)
+	within_ca_posthoc = {}
+	for ca in ca_levels:
+		ca_data = analysis_df[analysis_df["CA (%)"] == ca].copy()
+		print(f"\n  CA% = {int(ca)}%:")
+		try:
+			ca_pw = pg.pairwise_tests(
+				data=ca_data,
+				dv=measure,
+				within="Week",
+				subject="ID",
+				parametric=True,
+				padjust=padjust,
+				return_desc=True,
+			)
+			ca_pw    = ca_pw[ca_pw["Contrast"] == "Week"].copy()
+			padj_col = "p-corr" if "p-corr" in ca_pw.columns else padjust
+			p_raw_col = "p-unc" if "p-unc" in ca_pw.columns else "p"
+			sig_n    = (ca_pw[padj_col] < 0.05).sum() if padj_col in ca_pw.columns else 0
+			print(f"  {len(ca_pw)} pairs — {sig_n} significant after correction")
+			for _, row in ca_pw.iterrows():
+				a, b  = int(row["A"]), int(row["B"])
+				p_adj = row.get(padj_col, np.nan)
+				p_unc = row.get(p_raw_col, np.nan)
+				sig   = "***" if p_adj < 0.001 else "**" if p_adj < 0.01 else "*" if p_adj < 0.05 else "ns"
+				print(f"    Week {a:2d} vs Week {b:2d}: p-raw = {p_unc:.4f},  p-adj = {p_adj:.4f}  [{sig}]")
+			within_ca_posthoc[int(ca)] = ca_pw
+		except Exception as e:
+			print(f"    [ERROR] Failed for CA% {int(ca)}%: {e}")
+			within_ca_posthoc[int(ca)] = pd.DataFrame()
+	results["posthoc_within_ca"] = within_ca_posthoc
+
+	print(f"\n{'='*80}")
+	print(f"CA% × WEEK MIXED ANOVA COMPLETE")
+	print(f"{'='*80}")
+	return results
+
+
+def _save_report(report_text: str, filename: str) -> Path:
+	"""Save a report string to the analysis output directory and return the path."""
+	report_path = Path(__file__).parent / filename
+	with open(report_path, 'w', encoding='utf-8') as f:
+		f.write(report_text)
+	print(f"\n[OK] Report saved to: {report_path}")
+	return report_path
+
+
+# ── Omnibus-style report helpers ─────────────────────────────────────────────
+
+def _fmt_p(p: float) -> str:
+	"""Format a p-value: show '< 0.0001' for very small values."""
+	if np.isnan(p):
+		return "n/a"
+	if p < 0.0001:
+		return "< 0.0001"
+	return f"{p:.4f}"
+
+
+def _sig_stars(p: float) -> str:
+	if np.isnan(p):
+		return ""
+	if p < 0.001:
+		return "***"
+	if p < 0.01:
+		return "**"
+	if p < 0.05:
+		return "*"
+	return "ns"
+
+
+def _omnibus_header(title: str, design: str, correction_name: str,
+                    timestamp: str, measures: list) -> str:
+	"""Return a formatted report header block."""
+	W = 80
+	lines = [
+		"=" * W,
+		f"CAH COHORT — {title}",
+		"=" * W,
+		f"Generated  : {timestamp}",
+		f"Design     : {design}",
+		f"Correction : {correction_name}",
+		f"Measures   : {', '.join(measures)}",
+		"",
+	]
+	return "\n".join(lines)
+
+
+def _omnibus_measure_header(measure: str) -> str:
+	"""Return thick-separator section header for a measure."""
+	W = 80
+	thick = "━" * W
+	return f"\n{thick}\n  MEASURE: {measure}\n{thick}\n"
+
+
+def _omnibus_desc_stats_block(dm: pd.DataFrame, measure: str,
+                               group_cols: list) -> str:
+	"""Build a descriptive-stats table for the given grouping columns."""
+	lines = []
+	header_parts = group_cols + ["n", "Mean", "SD", "SEM", "95% CI"]
+	col_widths = [max(12, len(c) + 2) for c in header_parts]
+	# header row
+	header = "  " + "".join(f"{h:<{w}}" for h, w in zip(header_parts, col_widths))
+	lines.append(header)
+	lines.append("  " + "-" * (sum(col_widths)))
+	for keys, grp in dm.groupby(group_cols)[measure]:
+		if not isinstance(keys, tuple):
+			keys = (keys,)
+		vals = grp.dropna()
+		n = len(vals)
+		if n == 0:
+			continue
+		m = vals.mean()
+		sd = vals.std(ddof=1)
+		sem = sd / np.sqrt(n)
+		ci_lo = m - 1.96 * sem
+		ci_hi = m + 1.96 * sem
+		key_strs = [str(k) for k in keys]
+		row_vals = key_strs + [str(n), f"{m:.3f}", f"{sd:.3f}", f"{sem:.3f}",
+		                        f"[{ci_lo:.3f}, {ci_hi:.3f}]"]
+		row = "  " + "".join(f"{v:<{w}}" for v, w in zip(row_vals, col_widths))
+		lines.append(row)
+	return "\n".join(lines)
+
+
+def _omnibus_anova_block(results: dict, effect_map: list) -> str:
+	"""
+	Return a formatted ANOVA effects block.
+	effect_map: list of (label, key) pairs — key is the results dict key.
+	"""
+	lines = ["  ANOVA Results:", "  " + "-" * 74]
+	for label, key in effect_map:
+		r = results.get(key, {})
+		if not r:
+			continue
+		F = r.get('F', np.nan)
+		p = r.get('p', np.nan)
+		df1 = r.get('df1', np.nan)
+		df2 = r.get('df2', np.nan)
+		gg = r.get('gg_corrected', False)
+		stars = _sig_stars(p)
+		gg_tag = " (GG-corrected)" if gg else ""
+		eta2 = r.get('np2', np.nan)
+		eta_str = f", ηp² = {eta2:.3f}" if not np.isnan(eta2) else ""
+		lines.append(f"  {label}:")
+		lines.append(f"    F({df1:.0f}, {df2:.0f}) = {F:.3f},  p = {_fmt_p(p)}  {stars}{gg_tag}{eta_str}")
+	return "\n".join(lines)
+
+
+def _omnibus_interpretation(results: dict, effect_map: list, analysis_desc: str) -> str:
+	"""Return a plain-English INTERPRETATION block."""
+	lines = ["", "  INTERPRETATION", "  " + "-" * 74]
+	for i, (label, key) in enumerate(effect_map, start=1):
+		r = results.get(key, {})
+		if not r:
+			continue
+		p = r.get('p', np.nan)
+		stars = _sig_stars(p)
+		sig_word = "significant" if p < 0.05 else "not significant"
+		lines.append(f"  {i}. {label}: p = {_fmt_p(p)} {stars} — {sig_word}.")
+	lines.append("")
+	lines.append(f"  Analysis: {analysis_desc}")
+	return "\n".join(lines)
+
+
+def _omnibus_posthoc_block(title: str, ph_df) -> str:
+	"""Format a post-hoc DataFrame as a clean aligned table (not raw to_string)."""
+	if ph_df is None or len(ph_df) == 0:
+		return f"  {title}\n  (no pairs to report)\n"
+	lines = [f"  {title}", "  " + "-" * 74]
+	# Determine which columns to show based on what's available
+	want_cols = ['A', 'B', 'Contrast', 'mean(A)', 'mean(B)', 'T', 't', 'dof',
+	             'p-unc', 'p-corr', 'p_raw', 'p_adj', 'significant',
+	             'Week', 'CA_A', 'CA_B', 'mean_A', 'mean_B', 'hedges']
+	show_cols = [c for c in want_cols if c in ph_df.columns]
+	if not show_cols:
+		show_cols = list(ph_df.columns)
+	sub = ph_df[show_cols].copy()
+
+	# Add a significance-stars column based on the adjusted p-value
+	adj_col = next((c for c in ('p-corr', 'p_adj') if c in sub.columns), None)
+	if adj_col is None:
+		adj_col = next((c for c in ('p-unc', 'p_raw') if c in sub.columns), None)
+	if adj_col is not None:
+		def _stars(val):
+			try:
+				v = float(val)
+			except (TypeError, ValueError):
+				return ""
+			if v < 0.001:
+				return "***"
+			if v < 0.01:
+				return "**"
+			if v < 0.05:
+				return "*"
+			return "ns"
+		sub.insert(show_cols.index(adj_col) + 1, 'sig', sub[adj_col].apply(_stars))
+		show_cols = list(sub.columns)
+
+	# Format float columns to 4 decimal places
+	for col in sub.select_dtypes(include=[float]).columns:
+		sub[col] = sub[col].apply(lambda x: f"{x:.4f}" if not pd.isna(x) else "n/a")
+	# Build fixed-width table
+	col_widths = [max(len(str(c)), sub[c].astype(str).str.len().max()) + 2
+	              for c in show_cols]
+	header = "  " + "".join(f"{c:<{w}}" for c, w in zip(show_cols, col_widths))
+	lines.append(header)
+	lines.append("  " + "-" * sum(col_widths))
+	for _, row in sub.iterrows():
+		r_str = "  " + "".join(f"{str(row[c]):<{w}}" for c, w in zip(show_cols, col_widths))
+		lines.append(r_str)
+	return "\n".join(lines) + "\n"
+
+
+def _omnibus_summary_table(measures: list, all_results: list, effect_labels: list) -> str:
+	"""
+	Build a summary table showing key p-values for each measure.
+	all_results: list of result dicts (one per measure, same order as measures).
+	effect_labels: list of (column_header, key) pairs.
+	"""
+	W = 80
+	lines = [
+		"",
+		"=" * W,
+		"  SUMMARY TABLE — KEY p-VALUES (α = 0.05)",
+		"=" * W,
+	]
+	# Determine column widths
+	mw = max(len("Measure"), max(len(m) for m in measures)) + 2
+	ew = [max(len(lbl), 10) + 2 for lbl, _ in effect_labels]
+	dw = max(len("Decision"), 20) + 2
+	# Header row
+	hdr = f"  {'Measure':<{mw}}" + "".join(f"{lbl:<{w}}" for (lbl, _), w in zip(effect_labels, ew)) + f"{'Decision':<{dw}}"
+	lines.append(hdr)
+	lines.append("  " + "-" * (mw + sum(ew) + dw))
+	for measure, res in zip(measures, all_results):
+		if not res:
+			row = f"  {measure:<{mw}}" + "".join(f"{'n/a':<{w}}" for w in ew) + f"{'no results':<{dw}}"
+			lines.append(row)
+			continue
+		sig_effects = []
+		p_strs = []
+		for (lbl, key), w in zip(effect_labels, ew):
+			r = res.get(key, {})
+			p = r.get('p', np.nan) if isinstance(r, dict) else np.nan
+			stars = _sig_stars(p)
+			cell = f"{_fmt_p(p)} {stars}"
+			p_strs.append(f"{cell:<{w}}")
+			if p < 0.05:
+				sig_effects.append(lbl)
+		if sig_effects:
+			decision = "Sig: " + ", ".join(sig_effects)
+		else:
+			decision = "No significant effects"
+		row = f"  {measure:<{mw}}" + "".join(p_strs) + f"{decision:<{dw}}"
+		lines.append(row)
+	lines.append("=" * W)
+	return "\n".join(lines)
+
+
 def main():
 	"""
 	Main function: Load, clean, and summarize CAH cohort data.
+	Presents a menu to run individual analyses, each saving its own report.
 	"""
-	# Define path to master CSV
-	# Adjust this path as needed
 	csv_path = Path(__file__).parent.parent / "CAH_cohort" / "master_data_CAH.csv"
-	
+
 	print("="*80)
 	print("CAH COHORT WEIGHT ANALYSIS")
 	print("="*80)
-	
-	# Load data
+
+	# ── Load and clean ────────────────────────────────────────────────────────
 	df_raw = load_cah_data(csv_path)
-	
-	# Clean and process
 	print("\nCleaning data...")
 	df = clean_cah_dataframe(df_raw)
-	
-	# Add Day column
 	print("Adding per-animal day numbering...")
 	df = add_day_number_column(df)
-	
-	# Summarize
 	summarize_dataframe(df)
-	
-	# Show sample data
+
+	# ── Global settings ───────────────────────────────────────────────────────
 	print("\n" + "="*80)
-	print("SAMPLE DATA (first 10 rows)")
+	print("GLOBAL SETTINGS")
 	print("="*80)
-	with pd.option_context('display.max_columns', None, 
-						   'display.width', 200,
-						   'display.max_colwidth', 30):
-		print(df.head(10))
-	
-	# Example: Show data for one animal
-	if "ID" in df.columns and len(df) > 0:
-		sample_id = df["ID"].iloc[0]
-		print("\n" + "="*80)
-		print(f"EXAMPLE: All measurements for {sample_id}")
-		print("="*80)
-		sample_data = df[df["ID"] == sample_id][["Date", "Day", "Sex", "Strain", "CA (%)", 
-												  "Weight", "Daily Change", "Total Change"]]
-		with pd.option_context('display.max_rows', None):
-			print(sample_data.to_string(index=False))
-	
-	# Check ANOVA readiness
-	print("\n" + "="*80)
-	print("ANOVA READINESS CHECK")
-	print("="*80)
-	
-	if not HAS_PINGOUIN:
-		print("\n⚠ WARNING: pingouin not installed. ANOVA will not be available.")
-		print("Install with: pip install pingouin")
-	else:
-		print("\n[OK] pingouin is installed and ready")
-	
-	# Check for required columns
-	required_cols = ["ID", "Sex", "CA (%)", "Day", "Daily Change", "Total Change"]
-	missing_cols = [col for col in required_cols if col not in df.columns]
-	
-	if missing_cols:
-		print(f"\n⚠ WARNING: Missing required columns for ANOVA: {missing_cols}")
-	else:
-		print(f"\n[OK] All required columns present")
-	
-	# Check for complete cases
-	if all(col in df.columns for col in required_cols):
-		complete_df = df.dropna(subset=required_cols)
-		print(f"\n[OK] Complete cases (non-null): {len(complete_df)} / {len(df)} rows")
-		
-		# Check experimental design
-		subjects_per_ca = complete_df.groupby('ID')['CA (%)'].nunique()
-		
-		if all(subjects_per_ca == 1):
-			print(f"\n[OK] BETWEEN-SUBJECTS DESIGN (CA% is between-subjects)")
-			print(f"  Available analyses:")
-			print(f"    1. Between-subjects ANOVA: Sex × CA% (at single time point or averaged)")
-			print(f"    2. Mixed ANOVA: Time (within) × Sex (between) × CA% (between)")
-			print(f"    3. Sex-stratified Mixed ANOVA: Time (within) × CA% (between), holding sex constant")
-			print(f"    4. CA%-stratified Mixed ANOVA: Time (within) × Sex (between), holding CA% constant")
-			
-			# Check time series completeness
-			total_days = complete_df['Day'].nunique()
-			subjects_per_day = complete_df.groupby('ID')['Day'].nunique()
-			complete_time = (subjects_per_day == total_days).sum()
-			
-			print(f"\n  Time series completeness: {complete_time} / {complete_df['ID'].nunique()} animals")
-			if complete_time < complete_df['ID'].nunique():
-				print(f"  ⚠ {complete_df['ID'].nunique() - complete_time} animals have missing time points")
-				print(f"    (will be excluded from mixed ANOVA)")
-		else:
-			print(f"\n[OK] WITHIN-SUBJECTS DESIGN (CA% is within-subjects)")
-			print(f"  Available analyses:")
-			print(f"    1. Mixed ANOVA with CA% as within-subjects factor")
-	
-	# ========================================================================
-	# DEMONSTRATE ANOVA ANALYSES
-	# ========================================================================
-	
-	print("\n" + "="*80)
-	print("EXAMPLE ANALYSES")
-	print("="*80)
-	
-	user_input = input("\nWould you like to run example ANOVA analyses? (y/n): ").strip().lower()
-	
-	if user_input == 'y':
-		# Ask user for time unit
-		print("\nChoose time unit for longitudinal analysis:")
-		print("  [1] Days (default, most granular)")
-		print("  [2] Weeks (averaged by week, more conservative, Day 0 excluded)")
-		time_unit_choice = input("Enter choice (1 or 2): ").strip()
-		
-		use_weeks = (time_unit_choice == '2')
-		time_unit = 'week' if use_weeks else 'day'
-		time_label = 'Week' if use_weeks else 'Day'
-		
-		# If using weeks, add week column
-		if use_weeks:
-			print("\nProcessing data for week-based analysis...")
-			print("  - Adding week column (Day 0 excluded)")
-			
-			df = add_week_column(df)
-			
-			# Show week distribution
-			if "Week" in df.columns:
-				week_counts = df.groupby('Week')['Day'].apply(lambda x: (x.min(), x.max()))
-				print(f"\nWeek mapping:")
-				for week, (d_min, d_max) in week_counts.items():
-					if pd.notna(week):
-						print(f"  Week {int(week)}: Days {int(d_min)}-{int(d_max)}")
-		
-		# Ask user for multiple comparison correction method
-		print("\nChoose multiple comparison correction for post-hoc tests:")
-		print("  [1] FDR-BH (Benjamini-Hochberg) - balanced, recommended for many comparisons")
-		print("  [2] Bonferroni - very conservative, controls family-wise error rate")
-		correction_choice = input("Enter choice (1 or 2, default=1): ").strip()
-		
-		padjust_method = 'bonf' if correction_choice == '2' else 'fdr_bh'
-		correction_name = 'Bonferroni' if correction_choice == '2' else 'FDR-BH'
-		
-		print(f"\nUsing {correction_name} correction for post-hoc tests")
-		
-		# ====================================================================
-		# ANALYZE BOTH MEASURES: Total Change and Daily Change
-		# ====================================================================
-		measures_to_analyze = ["Total Change", "Daily Change"]
-		all_results = {}  # Store results for each measure
-		
-		# Only ask once about post-hoc tests
-		run_posthoc = input("\nWould you like to run post-hoc tests for stratified mixed ANOVAs (both measures)? (y/n): ").strip().lower()
-		
-		for measure in measures_to_analyze:
-			print("\n\n" + "="*80)
-			print(f"ANALYZING MEASURE: {measure}")
-			print("="*80)
-			
-			# Make a copy of the data for this measure
-			df_measure = df.copy()
-			
-			# If using weeks, average by week for this measure
+
+	print("\nChoose time unit for longitudinal analyses:")
+	print("  [1] Days (most granular)")
+	print("  [2] Weeks (averaged by week, Day 0 excluded)")
+	time_unit_choice = input("Enter choice (1 or 2, default=2): ").strip()
+	use_weeks  = (time_unit_choice != '1')
+	time_unit  = 'week' if use_weeks else 'day'
+	time_label = 'Week'  if use_weeks else 'Day'
+
+	if use_weeks:
+		df = add_week_column(df)
+		week_counts = df.groupby('Week')['Day'].apply(lambda x: (x.min(), x.max()))
+		print(f"\nWeek mapping:")
+		for week, (d_min, d_max) in week_counts.items():
+			if pd.notna(week):
+				print(f"  Week {int(week)}: Days {int(d_min)}-{int(d_max)}")
+
+	print("\nChoose multiple-comparison correction method:")
+	print("  [1] FDR-BH — Benjamini-Hochberg (recommended)")
+	print("  [2] Bonferroni — conservative, controls family-wise error rate")
+	correction_choice = input("Enter choice (1 or 2, default=1): ").strip()
+	padjust_method  = 'bonf' if correction_choice == '2' else 'fdr_bh'
+	correction_name = 'Bonferroni' if padjust_method == 'bonf' else 'FDR-BH'
+	print(f"  → Using {correction_name} correction")
+
+	measures_to_analyze = ["Total Change", "Daily Change"]
+
+	time_col  = "Week" if use_weeks else "Day"
+	timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+	time_sfx  = "weekly" if use_weeks else "daily"
+	corr_sfx  = "bonf"   if padjust_method == 'bonf' else "fdr"
+	out_dir   = Path(__file__).parent
+
+	# ── Menu loop ─────────────────────────────────────────────────────────────
+	MENU = """
+================================================================================
+  CAH ANALYSIS MENU
+================================================================================
+  [1]  Between-subjects ANOVA — Sex × CA% (grand average across time)
+  [2]  3-Way Mixed ANOVA      — Time × Sex × CA%
+  [3]  Sex-stratified Mixed ANOVA — Time × CA% (Males)
+  [4]  Sex-stratified Mixed ANOVA — Time × CA% (Females)
+  [5]  CA%-stratified Mixed ANOVA — Time × Sex (0% CA)
+  [6]  CA%-stratified Mixed ANOVA — Time × Sex (2% CA)
+  [7]  2-Way Mixed ANOVA — CA% × {time} (all animals, sex collapsed){week_only}
+  [8]  Slope analysis — rate of weight change between CA% groups
+  [9]  Interaction plots for significant effects
+  [A]  Run ALL analyses (1-8) and save all reports
+  [Q]  Quit
+================================================================================"""
+
+	week_only_note = "  ← weeks only" if not use_weeks else ""
+
+	while True:
+		print(MENU.format(time=time_label, week_only=week_only_note))
+		choice = input("Select option: ").strip().upper()
+
+		if choice == 'Q':
+			print("\nExiting.")
+			break
+
+		# ── Helper: prepare df_measure for each measure ───────────────────────
+		def _prep(measure):
+			dm = df.copy()
 			if use_weeks:
-				print(f"\n  - Averaging {measure} within each week per animal")
-				df_measure = average_by_week(df_measure, measure=measure)
-				print(f"  - Data shape after averaging: {df_measure.shape}")
-				print(f"  - Weeks available: {sorted(df_measure['Week'].dropna().unique())}")
-			
-			# Store results for this measure
-			measure_results = {}
-			
-			# Example 1: Between-subjects ANOVA at final time point
-			final_time = 4 if use_weeks else 27
-			print("\n\n" + "="*80)
-			print(f"[{measure}] Between-Subjects ANOVA at Final Time Point ({time_label} {final_time})")
-			print("="*80)
-			results_final = perform_two_way_between_anova(
-				df_measure, 
-				measure=measure,
-				time_point=final_time,
-				average_over_days=False
-			)
-			
-			# Example 2: Between-subjects ANOVA with averaged data
-			print("\n\n" + "="*80)
-			print(f"[{measure}] Between-Subjects ANOVA with {time_label}-Averaged Data")
-			print("="*80)
-			results_avg = perform_two_way_between_anova(
-				df_measure,
-				measure=measure,
-				average_over_days=True
-			)
-			measure_results['between'] = results_avg
-			
-			# Example 3: Mixed ANOVA with Time
-			print("\n\n" + "="*80)
-			print(f"[{measure}] Mixed ANOVA - Time × Sex × CA%")
-			print("="*80)
-			print(f"Note: Using all available {time_label.lower()}s for complete analysis")
-			results_mixed = perform_mixed_anova_time(
-				df_measure,
-				measure=measure,
-				time_points=None,  # Use all available time points
-				time_unit=time_unit
-			)
-			measure_results['mixed'] = results_mixed
-			
-			# Example 4: Sex-stratified Mixed ANOVA - Males only
-			print("\n\n" + "="*80)
-			print(f"[{measure}] Sex-Stratified Mixed ANOVA - Time × CA% (MALES ONLY)")
-			print("="*80)
-			results_males = perform_mixed_anova_sex_stratified(
-				df_measure,
-				sex="M",
-				measure=measure,
-				time_points=None,
-				time_unit=time_unit
-			)
-			measure_results['males'] = results_males
-			
-			# Example 5: Sex-stratified Mixed ANOVA - Females only
-			print("\n\n" + "="*80)
-			print(f"[{measure}] Sex-Stratified Mixed ANOVA - Time × CA% (FEMALES ONLY)")
-			print("="*80)
-			results_females = perform_mixed_anova_sex_stratified(
-				df_measure,
-				sex="F",
-				measure=measure,
-				time_points=None,
-				time_unit=time_unit
-			)
-			measure_results['females'] = results_females
-			
-			# Example 6: CA%-stratified Mixed ANOVA - 0% CA only
-			print("\n\n" + "="*80)
-			print(f"[{measure}] CA%-Stratified Mixed ANOVA - Time × Sex (0% CA ONLY)")
-			print("="*80)
-			results_ca0 = perform_mixed_anova_ca_stratified(
-				df_measure,
-				ca_percent=0,
-				measure=measure,
-				time_points=None,
-				time_unit=time_unit
-			)
-			measure_results['ca0'] = results_ca0
-			
-			# Example 7: CA%-stratified Mixed ANOVA - 2% CA only
-			print("\n\n" + "="*80)
-			print(f"[{measure}] CA%-Stratified Mixed ANOVA - Time × Sex (2% CA ONLY)")
-			print("="*80)
-			results_ca2 = perform_mixed_anova_ca_stratified(
-				df_measure,
-				ca_percent=2,
-				measure=measure,
-				time_points=None,
-				time_unit=time_unit
-			)
-			measure_results['ca2'] = results_ca2
-			
-			# Post-hoc tests if main effects are significant
-			tukey_results = None
-			
-			if results_avg and results_avg.get('sex', {}).get('significant'):
-				print(f"\n\n[{measure}] Sex effect is significant. Running Tukey HSD...")
-				avg_df = df_measure.groupby(["ID", "Sex", "CA (%)"])[measure].mean().reset_index()
-				tukey_sex = perform_tukey_hsd(avg_df, measure, "Sex")
-			
-			if results_avg and results_avg.get('ca_percent', {}).get('significant'):
-				print(f"\n\n[{measure}] CA% effect is significant. Running Tukey HSD...")
-				avg_df = df_measure.groupby(["ID", "Sex", "CA (%)"])[measure].mean().reset_index()
-				avg_df["CA (%) Group"] = avg_df["CA (%)"].astype(str) + "%"
-				tukey_results = perform_tukey_hsd(avg_df, measure, "CA (%) Group")
-			
-			measure_results['tukey'] = tukey_results
-			
-			# Run post-hoc tests for stratified mixed ANOVAs if significant interaction
-			mixed_posthoc_males = None
-			mixed_posthoc_females = None
-			mixed_posthoc_ca0 = None
-			mixed_posthoc_ca2 = None
-			
-			# Determine which time column to use for post-hoc
-			time_col = "Week" if use_weeks else "Day"
-			
-			if run_posthoc == 'y':
-				# Post-hoc for males (Time x CA%)
-				if results_males and results_males.get('interaction', {}).get('significant'):
-					print(f"\n\n[{measure}] Time × CA% interaction significant in males. Running post-hoc tests...")
-					male_df = df_measure[df_measure['Sex'] == 'M'].copy()
-					mixed_posthoc_males = perform_mixed_anova_posthoc(
-						male_df,
-						measure=measure,
-						within=time_col,
-						between="CA (%)",
-						subject="ID",
-						padjust=padjust_method
-					)
-				
-				# Post-hoc for females (Time x CA%)
-				if results_females and results_females.get('interaction', {}).get('significant'):
-					print(f"\n\n[{measure}] Time × CA% interaction significant in females. Running post-hoc tests...")
-					female_df = df_measure[df_measure['Sex'] == 'F'].copy()
-					mixed_posthoc_females = perform_mixed_anova_posthoc(
-						female_df,
-						measure=measure,
-						within=time_col,
-						between="CA (%)",
-						subject="ID",
-						padjust=padjust_method
-					)
-				
-				# Post-hoc for 0% CA (Time x Sex)
-				if results_ca0 and results_ca0.get('interaction', {}).get('significant'):
-					print(f"\n\n[{measure}] Time × Sex interaction significant at 0% CA. Running post-hoc tests...")
-					ca0_df = df_measure[df_measure['CA (%)'] == 0].copy()
-					mixed_posthoc_ca0 = perform_mixed_anova_posthoc(
-						ca0_df,
-						measure=measure,
-						within=time_col,
-						between="Sex",
-						subject="ID",
-						padjust=padjust_method
-					)
-				
-				# Post-hoc for 2% CA (Time x Sex)
-				if results_ca2 and results_ca2.get('interaction', {}).get('significant'):
-					print(f"\n\n[{measure}] Time × Sex interaction significant at 2% CA. Running post-hoc tests...")
-					ca2_df = df_measure[df_measure['CA (%)'] == 2].copy()
-					mixed_posthoc_ca2 = perform_mixed_anova_posthoc(
-						ca2_df,
-						measure=measure,
-						within=time_col,
-						between="Sex",
-						subject="ID",
-						padjust=padjust_method
-					)
-			
-			measure_results['posthoc_males'] = mixed_posthoc_males
-			measure_results['posthoc_females'] = mixed_posthoc_females
-			measure_results['posthoc_ca0'] = mixed_posthoc_ca0
-			measure_results['posthoc_ca2'] = mixed_posthoc_ca2
-			
-			# Store all results for this measure
-			all_results[measure] = measure_results
-		
-		print("\n" + "="*80)
-		print("ANALYSIS COMPLETE FOR BOTH MEASURES")
-		print("="*80)
-		
-		# Generate comprehensive reports for both measures
-		print("\n\n" + "="*80)
-		print("GENERATING COMPREHENSIVE STATISTICAL REPORTS")
-		print("="*80)
-		
-		combined_report = ""
-		
-		for measure in measures_to_analyze:
-			print(f"\nGenerating report for {measure}...")
-			results = all_results[measure]
-			
-			report = generate_analysis_report(
-				between_results=results['between'],
-				mixed_results=results['mixed'],
-				results_males=results['males'],
-				results_females=results['females'],
-				results_ca0=results['ca0'],
-				results_ca2=results['ca2'],
-				tukey_results=results['tukey'],
-				mixed_posthoc_males=results['posthoc_males'],
-				mixed_posthoc_females=results['posthoc_females'],
-				mixed_posthoc_ca0=results['posthoc_ca0'],
-				mixed_posthoc_ca2=results['posthoc_ca2'],
-				df=df
-			)
-			
-			combined_report += f"\n{'='*80}\n"
-			combined_report += f"MEASURE: {measure}\n"
-			combined_report += f"{'='*80}\n"
-			combined_report += report
-			combined_report += "\n\n"
-		
-		print("\n" + combined_report)
-		
-		# Offer to save report
-		save_report = input("\nWould you like to save this combined report to a file? (y/n): ").strip().lower()
-		if save_report == 'y':
-			from datetime import datetime
-			timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-			time_suffix = "weekly" if use_weeks else "daily"
-			correction_suffix = "bonf" if padjust_method == 'bonf' else "fdr"
-			report_filename = f"CAH_statistical_report_{time_suffix}_{correction_suffix}_{timestamp}.txt"
-			report_path = Path(__file__).parent / report_filename
-			
-			with open(report_path, 'w', encoding='utf-8') as f:
-				f.write(combined_report)
-			
-			print(f"\n[OK] Report saved to: {report_path}")
-		
-		# ====================================================================
-		# AUTOMATICALLY GENERATE PLOTS FOR ALL SIGNIFICANT INTERACTIONS
-		# ====================================================================
-		print("\n\n" + "="*80)
-		print("GENERATING INTERACTION PLOTS FOR SIGNIFICANT RESULTS")
-		print("="*80)
-		
-		plot_choice = input("\nWould you like to generate plots for all significant interactions? (y/n): ").strip().lower()
-		
-		if plot_choice == 'y':
-			# Ask about saving plots
-			save_plots = input("Save plots to files? (y/n): ").strip().lower()
-			save_dir = Path(__file__).parent if save_plots == 'y' else None
-			
-			# Ask whether to show plots interactively
-			show_plots = input("Display plots interactively? (y/n): ").strip().lower() == 'y'
-			
-			total_plots = 0
-			
+				dm = average_by_week(dm, measure=measure)
+			return dm
+
+		# ── Helper: build a timestamped filename ──────────────────────────────
+		def _fname(tag):
+			return f"CAH_{tag}_{time_sfx}_{corr_sfx}_{timestamp}.txt"
+
+		# ── Option 1: Between-subjects ANOVA ─────────────────────────────────
+		if choice in ('1', 'A'):
+			effect_map_1 = [('Sex', 'sex'), ('CA%', 'ca_percent'), ('Sex × CA%', 'interaction')]
+			all_res_1 = []
+			report_1  = _omnibus_header(
+				"BETWEEN-SUBJECTS ANOVA — Sex × CA% (grand average)",
+				"Sex (between) × CA% (between), grand mean across " + time_label.lower() + "s",
+				correction_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+				measures_to_analyze)
 			for measure in measures_to_analyze:
+				dm = _prep(measure)
 				print(f"\n{'='*80}")
-				print(f"CHECKING SIGNIFICANT INTERACTIONS FOR: {measure}")
-				print(f"{'='*80}")
-				
-				results = all_results[measure]
-				
-				# Get the appropriate data for this measure
-				df_measure = df.copy()
-				if use_weeks:
-					df_measure = average_by_week(df_measure, measure=measure)
-				
-				time_col = "Week" if use_weeks else "Day"
-				
-				# 1. Between-subjects Sex × CA% interaction
-				if results['between'] and results['between'].get('interaction', {}).get('significant'):
-					print(f"\n✓ Sex × CA% interaction significant (p = {results['between']['interaction']['p']:.4f})")
-					print("  Generating interaction plot...")
-					plot_interaction_effects(
-						between_results=results['between'],
-						df=df,
-						save_dir=save_dir,
-						show=show_plots
-					)
-					total_plots += 1
-				
-				# 2. Time × Sex interaction (from full mixed ANOVA)
-				if results['mixed'] and results['mixed'].get('time_sex', {}).get('significant'):
-					print(f"\n✓ {time_col} × Sex interaction significant (p = {results['mixed']['time_sex']['p']:.4f})")
-					print("  Generating interaction plot...")
-					plot_time_by_sex_interaction(
-						df=df_measure,
-						measure=measure,
-						time_col=time_col,
-						results={'interaction': results['mixed']['time_sex']},
-						save_dir=save_dir,
-						show=show_plots
-					)
-					total_plots += 1
-				
-				# 3. Time × CA% interaction (from full mixed ANOVA)
-				if results['mixed'] and results['mixed'].get('time_ca', {}).get('significant'):
-					print(f"\n✓ {time_col} × CA% interaction significant (p = {results['mixed']['time_ca']['p']:.4f})")
-					print("  Generating interaction plot...")
-					plot_time_by_ca_interaction(
-						df=df_measure,
-						measure=measure,
-						time_col=time_col,
-						results={'interaction': results['mixed']['time_ca']},
-						save_dir=save_dir,
-						show=show_plots
-					)
-					total_plots += 1
-				
-				# 4. Time × CA% interaction in MALES (sex-stratified)
-				if results['males'] and results['males'].get('interaction', {}).get('significant'):
-					print(f"\n✓ {time_col} × CA% interaction in MALES significant (p = {results['males']['interaction']['p']:.4f})")
-					print("  Generating interaction plot...")
-					male_df = df_measure[df_measure['Sex'] == 'M'].copy()
-					plot_time_by_ca_stratified(
-						df=male_df,
-						measure=measure,
-						sex='M',
-						time_col=time_col,
-						results=results['males'],
-						save_dir=save_dir,
-						show=show_plots
-					)
-					total_plots += 1
-				
-				# 5. Time × CA% interaction in FEMALES (sex-stratified)
-				if results['females'] and results['females'].get('interaction', {}).get('significant'):
-					print(f"\n✓ {time_col} × CA% interaction in FEMALES significant (p = {results['females']['interaction']['p']:.4f})")
-					print("  Generating interaction plot...")
-					female_df = df_measure[df_measure['Sex'] == 'F'].copy()
-					plot_time_by_ca_stratified(
-						df=female_df,
-						measure=measure,
-						sex='F',
-						time_col=time_col,
-						results=results['females'],
-						save_dir=save_dir,
-						show=show_plots
-					)
-					total_plots += 1
-				
-				# 6. Time × Sex interaction at 0% CA (CA%-stratified)
-				if results['ca0'] and results['ca0'].get('interaction', {}).get('significant'):
-					print(f"\n✓ {time_col} × Sex interaction at 0% CA significant (p = {results['ca0']['interaction']['p']:.4f})")
-					print("  Generating interaction plot...")
-					ca0_df = df_measure[df_measure['CA (%)'] == 0].copy()
-					plot_time_by_sex_stratified(
-						df=ca0_df,
-						measure=measure,
-						ca_percent=0,
-						time_col=time_col,
-						results=results['ca0'],
-						save_dir=save_dir,
-						show=show_plots
-					)
-					total_plots += 1
-				
-				# 7. Time × Sex interaction at 2% CA (CA%-stratified)
-				if results['ca2'] and results['ca2'].get('interaction', {}).get('significant'):
-					print(f"\n✓ {time_col} × Sex interaction at 2% CA significant (p = {results['ca2']['interaction']['p']:.4f})")
-					print("  Generating interaction plot...")
-					ca2_df = df_measure[df_measure['CA (%)'] == 2].copy()
-					plot_time_by_sex_stratified(
-						df=ca2_df,
-						measure=measure,
-						ca_percent=2,
-						time_col=time_col,
-						results=results['ca2'],
-						save_dir=save_dir,
-						show=show_plots
-					)
-					total_plots += 1
-			
-			print(f"\n{'='*80}")
-			print(f"PLOTTING COMPLETE")
-			print(f"{'='*80}")
-			print(f"\nTotal plots generated: {total_plots}")
-			if save_dir:
-				print(f"All plots saved to: {save_dir.resolve()}")
+				print(f"[{measure}] BETWEEN-SUBJECTS ANOVA — Sex × CA% (grand average)")
+				print("="*80)
+				results_avg = perform_two_way_between_anova(dm, measure=measure, average_over_days=True)
+				all_res_1.append(results_avg)
+
+				tukey_results = None
+				if results_avg and results_avg.get('ca_percent', {}).get('significant'):
+					avg_df = dm.groupby(["ID", "Sex", "CA (%)"])[measure].mean().reset_index()
+					avg_df["CA (%) Group"] = avg_df["CA (%)"].astype(str) + "%"
+					tukey_results = perform_tukey_hsd(avg_df, measure, "CA (%) Group")
+
+				report_1 += _omnibus_measure_header(measure)
+				if results_avg:
+					# Descriptive stats
+					avg_dm = dm.groupby(["ID", "Sex", "CA (%)"])[measure].mean().reset_index()
+					report_1 += "  Descriptive Statistics by Sex:\n"
+					report_1 += _omnibus_desc_stats_block(avg_dm, measure, ["Sex"]) + "\n"
+					report_1 += "  Descriptive Statistics by CA%:\n"
+					report_1 += _omnibus_desc_stats_block(avg_dm, measure, ["CA (%)"]) + "\n"
+					report_1 += "  Descriptive Statistics by Sex × CA%:\n"
+					report_1 += _omnibus_desc_stats_block(avg_dm, measure, ["Sex", "CA (%)"]) + "\n\n"
+					report_1 += _omnibus_anova_block(results_avg, effect_map_1) + "\n"
+					sig_eff = [l for l, k in effect_map_1 if results_avg.get(k, {}).get('significant')]
+					desc = ("Significant between-subjects effects: " + ", ".join(sig_eff))\
+					       if sig_eff else "No significant between-subjects effects."
+					report_1 += _omnibus_interpretation(results_avg, effect_map_1, desc) + "\n"
+				else:
+					report_1 += "  Analysis did not complete.\n"
+				if tukey_results:
+					ph_df = tukey_results.get('results')
+					report_1 += _omnibus_posthoc_block("Post-hoc: Tukey HSD — CA% pairwise  [Tukey's HSD]", ph_df)
+			report_1 += _omnibus_summary_table(measures_to_analyze, all_res_1, effect_map_1)
+			report_1 += "\n" + "=" * 80 + "\nEND OF REPORT\n" + "=" * 80 + "\n"
+			_save_report(report_1, _fname("between_anova"))
+			if choice != 'A':
+				continue
+
+		# ── Option 2: 3-Way Mixed ANOVA ───────────────────────────────────────
+		if choice in ('2', 'A'):
+			# 3-way ANOVA returns time_point_interactions dict; use raw anova_table
+			all_res_2 = []
+			report_2  = _omnibus_header(
+				f"3-WAY MIXED ANOVA — {time_label} × Sex × CA%",
+				f"{time_label} (within) × Sex (between) × CA% (between)",
+				correction_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+				measures_to_analyze)
+			for measure in measures_to_analyze:
+				dm = _prep(measure)
+				print(f"\n{'='*80}")
+				print(f"[{measure}] 3-WAY MIXED ANOVA — Time × Sex × CA%")
+				print("="*80)
+				results_mixed = perform_mixed_anova_time(dm, measure=measure,
+				                                         time_points=None, time_unit=time_unit)
+				all_res_2.append(results_mixed)
+				report_2 += _omnibus_measure_header(measure)
+				if results_mixed:
+					report_2 += f"  N animals: {dm['ID'].nunique()}\n\n"
+					report_2 += "  Descriptive Statistics by Sex:\n"
+					report_2 += _omnibus_desc_stats_block(dm, measure, ["Sex"]) + "\n"
+					report_2 += "  Descriptive Statistics by CA%:\n"
+					report_2 += _omnibus_desc_stats_block(dm, measure, ["CA (%)"]) + "\n\n"
+					aov = results_mixed.get('anova_table')
+					if aov is not None:
+						report_2 += "  ANOVA Table:\n"
+						for line in aov.to_string().splitlines():
+							report_2 += "    " + line + "\n"
+						report_2 += "\n"
+					# Interaction summary
+					time_sex_p = results_mixed.get('time_sex', {}).get('p', np.nan)
+					time_ca_p  = results_mixed.get('time_ca',  {}).get('p', np.nan)
+					time_ca_sex_p = results_mixed.get('time_ca_sex', {}).get('p', np.nan)
+					report_2 += "  INTERPRETATION\n  " + "-"*74 + "\n"
+					report_2 += f"  Time × Sex:       p = {_fmt_p(time_sex_p)}  {_sig_stars(time_sex_p)}\n"
+					report_2 += f"  Time × CA%:       p = {_fmt_p(time_ca_p)}  {_sig_stars(time_ca_p)}\n"
+					report_2 += f"  Time × Sex × CA%: p = {_fmt_p(time_ca_sex_p)}  {_sig_stars(time_ca_sex_p)}\n"
+				else:
+					report_2 += "  Analysis did not complete.\n"
+			# No clean summary table for 3-way (non-standard effect keys)
+			report_2 += "\n" + "=" * 80 + "\nEND OF REPORT\n" + "=" * 80 + "\n"
+			_save_report(report_2, _fname("3way_mixed_anova"))
+			if choice != 'A':
+				continue
+
+		# ── Option 3: Sex-stratified — Males ──────────────────────────────────
+		if choice in ('3', 'A'):
+			effect_map_3  = [('Time', 'time'), ('CA%', 'ca_percent'), ('Time × CA%', 'interaction')]
+			all_res_3     = []
+			report_3 = _omnibus_header(
+				f"SEX-STRATIFIED MIXED ANOVA — {time_label} × CA% (Males)",
+				f"{time_label} (within) × CA% (between), Males only",
+				correction_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+				measures_to_analyze)
+			for measure in measures_to_analyze:
+				dm = _prep(measure)
+				print(f"\n{'='*80}")
+				print(f"[{measure}] SEX-STRATIFIED MIXED ANOVA — Time × CA% (Males)")
+				print("="*80)
+				results_males = perform_mixed_anova_sex_stratified(dm, sex="M", measure=measure,
+				                                                    time_points=None, time_unit=time_unit)
+				all_res_3.append(results_males)
+				posthoc_males = None
+				if results_males and results_males.get('interaction', {}).get('significant'):
+					male_df = dm[dm['Sex'] == 'M'].copy()
+					posthoc_males = perform_mixed_anova_posthoc(male_df, measure=measure,
+					                    within=time_col, between="CA (%)", subject="ID",
+					                    padjust=padjust_method)
+				report_3 += _omnibus_measure_header(measure)
+				if results_males:
+					male_dm = dm[dm['Sex'] == 'M'].copy()
+					report_3 += f"  N animals (M): {male_dm['ID'].nunique()}\n\n"
+					report_3 += "  Descriptive Statistics by CA%:\n"
+					report_3 += _omnibus_desc_stats_block(male_dm, measure, ["CA (%)"]) + "\n\n"
+					report_3 += _omnibus_anova_block(results_males, effect_map_3) + "\n"
+					sig_eff = [l for l, k in effect_map_3 if results_males.get(k, {}).get('significant')]
+					desc = ("Significant effects (Males): " + ", ".join(sig_eff)) if sig_eff else "No significant effects in males."
+					report_3 += _omnibus_interpretation(results_males, effect_map_3, desc) + "\n"
+				else:
+					report_3 += "  Analysis did not complete.\n"
+				if posthoc_males:
+					ph_df = posthoc_males.get('results') if isinstance(posthoc_males, dict) else posthoc_males
+					report_3 += _omnibus_posthoc_block(f"Post-hoc: {time_label} × CA% pairwise (Males)  [paired t-test, {correction_name}]", ph_df)
+			report_3 += _omnibus_summary_table(measures_to_analyze, all_res_3, effect_map_3)
+			report_3 += "\n" + "=" * 80 + "\nEND OF REPORT\n" + "=" * 80 + "\n"
+			_save_report(report_3, _fname("sex_strat_males"))
+			if choice != 'A':
+				continue
+
+		# ── Option 4: Sex-stratified — Females ────────────────────────────────
+		if choice in ('4', 'A'):
+			effect_map_4  = [('Time', 'time'), ('CA%', 'ca_percent'), ('Time × CA%', 'interaction')]
+			all_res_4     = []
+			report_4 = _omnibus_header(
+				f"SEX-STRATIFIED MIXED ANOVA — {time_label} × CA% (Females)",
+				f"{time_label} (within) × CA% (between), Females only",
+				correction_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+				measures_to_analyze)
+			for measure in measures_to_analyze:
+				dm = _prep(measure)
+				print(f"\n{'='*80}")
+				print(f"[{measure}] SEX-STRATIFIED MIXED ANOVA — Time × CA% (Females)")
+				print("="*80)
+				results_females = perform_mixed_anova_sex_stratified(dm, sex="F", measure=measure,
+				                                                      time_points=None, time_unit=time_unit)
+				all_res_4.append(results_females)
+				posthoc_females = None
+				if results_females and results_females.get('interaction', {}).get('significant'):
+					female_df = dm[dm['Sex'] == 'F'].copy()
+					posthoc_females = perform_mixed_anova_posthoc(female_df, measure=measure,
+					                      within=time_col, between="CA (%)", subject="ID",
+					                      padjust=padjust_method)
+				report_4 += _omnibus_measure_header(measure)
+				if results_females:
+					female_dm = dm[dm['Sex'] == 'F'].copy()
+					report_4 += f"  N animals (F): {female_dm['ID'].nunique()}\n\n"
+					report_4 += "  Descriptive Statistics by CA%:\n"
+					report_4 += _omnibus_desc_stats_block(female_dm, measure, ["CA (%)"]) + "\n\n"
+					report_4 += _omnibus_anova_block(results_females, effect_map_4) + "\n"
+					sig_eff = [l for l, k in effect_map_4 if results_females.get(k, {}).get('significant')]
+					desc = ("Significant effects (Females): " + ", ".join(sig_eff)) if sig_eff else "No significant effects in females."
+					report_4 += _omnibus_interpretation(results_females, effect_map_4, desc) + "\n"
+				else:
+					report_4 += "  Analysis did not complete.\n"
+				if posthoc_females:
+					ph_df = posthoc_females.get('results') if isinstance(posthoc_females, dict) else posthoc_females
+					report_4 += _omnibus_posthoc_block(f"Post-hoc: {time_label} × CA% pairwise (Females)  [paired t-test, {correction_name}]", ph_df)
+			report_4 += _omnibus_summary_table(measures_to_analyze, all_res_4, effect_map_4)
+			report_4 += "\n" + "=" * 80 + "\nEND OF REPORT\n" + "=" * 80 + "\n"
+			_save_report(report_4, _fname("sex_strat_females"))
+			if choice != 'A':
+				continue
+
+		# ── Option 5: CA%-stratified — 0% CA ──────────────────────────────────
+		if choice in ('5', 'A'):
+			effect_map_5 = [('Time', 'time'), ('Sex', 'sex'), ('Time × Sex', 'interaction')]
+			all_res_5    = []
+			report_5 = _omnibus_header(
+				f"CA%-STRATIFIED MIXED ANOVA — {time_label} × Sex (0% CA)",
+				f"{time_label} (within) × Sex (between), 0% CA only",
+				correction_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+				measures_to_analyze)
+			for measure in measures_to_analyze:
+				dm = _prep(measure)
+				print(f"\n{'='*80}")
+				print(f"[{measure}] CA%-STRATIFIED MIXED ANOVA — Time × Sex (0% CA)")
+				print("="*80)
+				results_ca0 = perform_mixed_anova_ca_stratified(dm, ca_percent=0, measure=measure,
+				                                                 time_points=None, time_unit=time_unit)
+				all_res_5.append(results_ca0)
+				posthoc_ca0 = None
+				if results_ca0 and results_ca0.get('interaction', {}).get('significant'):
+					ca0_df = dm[dm['CA (%)'] == 0].copy()
+					posthoc_ca0 = perform_mixed_anova_posthoc(ca0_df, measure=measure,
+					                  within=time_col, between="Sex", subject="ID",
+					                  padjust=padjust_method)
+				report_5 += _omnibus_measure_header(measure)
+				if results_ca0:
+					ca0_dm = dm[dm['CA (%)'] == 0].copy()
+					report_5 += f"  N animals (0% CA): {ca0_dm['ID'].nunique()}\n\n"
+					report_5 += "  Descriptive Statistics by Sex:\n"
+					report_5 += _omnibus_desc_stats_block(ca0_dm, measure, ["Sex"]) + "\n\n"
+					report_5 += _omnibus_anova_block(results_ca0, effect_map_5) + "\n"
+					sig_eff = [l for l, k in effect_map_5 if results_ca0.get(k, {}).get('significant')]
+					desc = ("Significant effects (0% CA): " + ", ".join(sig_eff)) if sig_eff else "No significant effects in 0% CA group."
+					report_5 += _omnibus_interpretation(results_ca0, effect_map_5, desc) + "\n"
+				else:
+					report_5 += "  Analysis did not complete.\n"
+				if posthoc_ca0:
+					ph_df = posthoc_ca0.get('results') if isinstance(posthoc_ca0, dict) else posthoc_ca0
+					report_5 += _omnibus_posthoc_block(f"Post-hoc: {time_label} × Sex pairwise (0% CA)  [paired t-test, {correction_name}]", ph_df)
+			report_5 += _omnibus_summary_table(measures_to_analyze, all_res_5, effect_map_5)
+			report_5 += "\n" + "=" * 80 + "\nEND OF REPORT\n" + "=" * 80 + "\n"
+			_save_report(report_5, _fname("ca_strat_0pct"))
+			if choice != 'A':
+				continue
+
+		# ── Option 6: CA%-stratified — 2% CA ──────────────────────────────────
+		if choice in ('6', 'A'):
+			effect_map_6 = [('Time', 'time'), ('Sex', 'sex'), ('Time × Sex', 'interaction')]
+			all_res_6    = []
+			report_6 = _omnibus_header(
+				f"CA%-STRATIFIED MIXED ANOVA — {time_label} × Sex (2% CA)",
+				f"{time_label} (within) × Sex (between), 2% CA only",
+				correction_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+				measures_to_analyze)
+			for measure in measures_to_analyze:
+				dm = _prep(measure)
+				print(f"\n{'='*80}")
+				print(f"[{measure}] CA%-STRATIFIED MIXED ANOVA — Time × Sex (2% CA)")
+				print("="*80)
+				results_ca2 = perform_mixed_anova_ca_stratified(dm, ca_percent=2, measure=measure,
+				                                                 time_points=None, time_unit=time_unit)
+				all_res_6.append(results_ca2)
+				posthoc_ca2 = None
+				if results_ca2 and results_ca2.get('interaction', {}).get('significant'):
+					ca2_df = dm[dm['CA (%)'] == 2].copy()
+					posthoc_ca2 = perform_mixed_anova_posthoc(ca2_df, measure=measure,
+					                  within=time_col, between="Sex", subject="ID",
+					                  padjust=padjust_method)
+				report_6 += _omnibus_measure_header(measure)
+				if results_ca2:
+					ca2_dm = dm[dm['CA (%)'] == 2].copy()
+					report_6 += f"  N animals (2% CA): {ca2_dm['ID'].nunique()}\n\n"
+					report_6 += "  Descriptive Statistics by Sex:\n"
+					report_6 += _omnibus_desc_stats_block(ca2_dm, measure, ["Sex"]) + "\n\n"
+					report_6 += _omnibus_anova_block(results_ca2, effect_map_6) + "\n"
+					sig_eff = [l for l, k in effect_map_6 if results_ca2.get(k, {}).get('significant')]
+					desc = ("Significant effects (2% CA): " + ", ".join(sig_eff)) if sig_eff else "No significant effects in 2% CA group."
+					report_6 += _omnibus_interpretation(results_ca2, effect_map_6, desc) + "\n"
+				else:
+					report_6 += "  Analysis did not complete.\n"
+				if posthoc_ca2:
+					ph_df = posthoc_ca2.get('results') if isinstance(posthoc_ca2, dict) else posthoc_ca2
+					report_6 += _omnibus_posthoc_block(f"Post-hoc: {time_label} × Sex pairwise (2% CA)  [paired t-test, {correction_name}]", ph_df)
+			report_6 += _omnibus_summary_table(measures_to_analyze, all_res_6, effect_map_6)
+			report_6 += "\n" + "=" * 80 + "\nEND OF REPORT\n" + "=" * 80 + "\n"
+			_save_report(report_6, _fname("ca_strat_2pct"))
+			if choice != 'A':
+				continue
+
+		# ── Option 7: 2-Way Mixed ANOVA — CA% × Week ─────────────────────────
+		if choice in ('7', 'A'):
+			if not use_weeks:
+				print("\n[INFO] Option 7 requires weekly data. Re-run with time unit = Weeks.")
 			else:
-				print("Plots were displayed but not saved to files")
-		
-		# ====================================================================
-		# SLOPE ANALYSIS - Compare rate of weight change between CA% groups
-		# ====================================================================
-		print("\n\n" + "="*80)
-		print("SLOPE ANALYSIS - RATE OF WEIGHT CHANGE")
-		print("="*80)
-		print("\nThis analysis compares how fast the 0% CA and 2% CA groups gain weight.")
-		print("For each animal, a linear regression slope is calculated (measure ~ time).")
-		print("Then the average slopes are statistically compared between groups.")
-		
-		slope_choice = input("\nWould you like to run slope analysis? (y/n): ").strip().lower()
-		
-		if slope_choice == 'y':
-			# Ask which measure to analyze
-			print("\nSelect measure to analyze:")
+				effect_map_7 = [('Week (within)', 'time'), ('CA%', 'ca_percent'),
+				                ('Week × CA%', 'interaction')]
+				all_res_7    = []
+				report_7 = _omnibus_header(
+					"2-WAY MIXED ANOVA — CA% × Week (all animals, sex collapsed)",
+					"Week (within) × CA% (between), all animals",
+					correction_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+					measures_to_analyze)
+				for measure in measures_to_analyze:
+					dm = _prep(measure)
+					print(f"\n{'='*80}")
+					print(f"[{measure}] 2-WAY MIXED ANOVA — CA% × Week (all animals, sex collapsed)")
+					print("="*80)
+					results_caw = perform_mixed_anova_ca_x_week(dm, measure=measure,
+					                                             padjust=padjust_method)
+					all_res_7.append(results_caw)
+					report_7 += _omnibus_measure_header(measure)
+					if results_caw:
+						n_animals = dm['ID'].nunique()
+						report_7 += f"  N animals: {n_animals}\n\n"
+						# Descriptive stats by CA% and by Week
+						report_7 += "  Descriptive Statistics by CA%:\n"
+						report_7 += _omnibus_desc_stats_block(dm, measure, ["CA (%)"]) + "\n"
+						report_7 += "  Descriptive Statistics by Week:\n"
+						report_7 += _omnibus_desc_stats_block(dm, measure, ["Week"]) + "\n\n"
+						# ANOVA effects block
+						report_7 += _omnibus_anova_block(results_caw, effect_map_7) + "\n"
+						# Interpretation
+						sig_eff = [l for l, k in effect_map_7 if results_caw.get(k, {}).get('significant')]
+						desc = ("Significant effects: " + ", ".join(sig_eff)) if sig_eff else "No significant effects."
+						report_7 += _omnibus_interpretation(results_caw, effect_map_7, desc) + "\n"
+						# Post-hoc 1: Week pairwise
+						ph1 = results_caw.get("posthoc_week_pairwise")
+						if ph1 is not None and len(ph1):
+							report_7 += _omnibus_posthoc_block(
+								f"Post-hoc 1 — Pairwise Week comparisons (all CA% pooled)  [paired t-test, {correction_name}]", ph1)
+						# Post-hoc 2: CA% at each week
+						ph2 = results_caw.get("posthoc_ca_per_week")
+						if ph2 is not None and len(ph2):
+							report_7 += _omnibus_posthoc_block(
+								f"Post-hoc 2 — CA% simple effects at each Week  [independent samples t-test, {correction_name}]", ph2)
+						# Post-hoc 3: Week pairwise within each CA%
+						ph3 = results_caw.get("posthoc_within_ca", {})
+						for ca_val, df_ph in ph3.items():
+							if df_ph is not None and len(df_ph):
+								report_7 += _omnibus_posthoc_block(
+									f"Post-hoc 3 — Week pairwise within CA% = {ca_val}%  [paired t-test, {correction_name}]", df_ph)
+					else:
+						report_7 += "  Analysis did not complete.\n"
+				report_7 += _omnibus_summary_table(measures_to_analyze, all_res_7, effect_map_7)
+				report_7 += "\n" + "=" * 80 + "\nEND OF REPORT\n" + "=" * 80 + "\n"
+				_save_report(report_7, _fname("ca_x_week_mixed_anova"))
+			if choice != 'A':
+				continue
+
+		# ── Option 8: Slope analysis ──────────────────────────────────────────
+		if choice in ('8', 'A'):
+			print("\nSelect measure for slope analysis:")
 			print("  [1] Total Change (default)")
 			print("  [2] Daily Change")
 			print("  [3] Weight")
-			measure_choice = input("Enter choice (1-3, default=1): ").strip()
-			
-			if measure_choice == '2':
-				slope_measure = "Daily Change"
-			elif measure_choice == '3':
-				slope_measure = "Weight"
-			else:
+			if choice == 'A':
 				slope_measure = "Total Change"
-			
-			# Use the same time unit choice from before
-			slope_time_unit = time_unit.capitalize()  # 'day' -> 'Day', 'week' -> 'Week'
-			
-			print(f"\nRunning slope analysis:")
-			print(f"  Measure: {slope_measure}")
-			print(f"  Time unit: {slope_time_unit}")
-			
-			# Prepare data
+				print("  (Running with Total Change for 'Run All')")
+			else:
+				mc = input("Enter choice (1-3, default=1): ").strip()
+				slope_measure = {"2": "Daily Change", "3": "Weight"}.get(mc, "Total Change")
+
+			slope_time_unit = time_unit.capitalize()
 			df_slope = df.copy()
-			if use_weeks and slope_time_unit == "Week":
-				# Need to add Week column if not already present
-				if "Week" not in df_slope.columns:
-					df_slope = add_week_column(df_slope)
-			
-			# Run complete slope analysis
-			slope_results = perform_complete_slope_analysis_cah(
+			if use_weeks and "Week" not in df_slope.columns:
+				df_slope = add_week_column(df_slope)
+
+			perform_complete_slope_analysis_cah(
 				df_slope,
 				measure=slope_measure,
 				time_unit=slope_time_unit,
 				save_plot=True,
 				save_report=True,
-				output_dir=Path(__file__).parent
+				output_dir=out_dir,
 			)
-			
+			if choice != 'A':
+				continue
+
+		# ── Option 9: Interaction plots ───────────────────────────────────────
+		if choice == '9':
+			print("\nThis option requires analyses to have been run first.")
+			print("Running between-subjects ANOVA and 3-way mixed ANOVA to obtain results...")
+
+			save_plots  = input("Save plots to files? (y/n, default=y): ").strip().lower() != 'n'
+			show_plots  = input("Display plots interactively? (y/n, default=n): ").strip().lower() == 'y'
+			save_dir_p  = out_dir if save_plots else None
+			total_plots = 0
+
+			for measure in measures_to_analyze:
+				dm = _prep(measure)
+				r_between = perform_two_way_between_anova(dm, measure=measure, average_over_days=True)
+				r_mixed   = perform_mixed_anova_time(dm, measure=measure,
+				                                     time_points=None, time_unit=time_unit)
+
+				if r_between and r_between.get('interaction', {}).get('significant'):
+					plot_interaction_effects(between_results=r_between, df=df,
+					                         save_dir=save_dir_p, show=show_plots)
+					total_plots += 1
+
+				if r_mixed and r_mixed.get('time_sex', {}).get('significant'):
+					plot_time_by_sex_interaction(df=dm, measure=measure, time_col=time_col,
+					                             results={'interaction': r_mixed['time_sex']},
+					                             save_dir=save_dir_p, show=show_plots)
+					total_plots += 1
+
+				if r_mixed and r_mixed.get('time_ca', {}).get('significant'):
+					plot_time_by_ca_interaction(df=dm, measure=measure, time_col=time_col,
+					                            results={'interaction': r_mixed['time_ca']},
+					                            save_dir=save_dir_p, show=show_plots)
+					total_plots += 1
+
+			print(f"\nTotal plots generated: {total_plots}")
+			if save_dir_p:
+				print(f"Plots saved to: {out_dir.resolve()}")
+			continue
+
+		# ── 'A' — clean-up message ────────────────────────────────────────────
+		if choice == 'A':
 			print("\n" + "="*80)
-			print("SLOPE ANALYSIS COMPLETE")
+			print("RUN ALL COMPLETE")
+			print(f"All reports saved to: {out_dir.resolve()}")
 			print("="*80)
-			print(f"\nResults saved to:")
-			print(f"  Report: CAH_slope_analysis_report_{slope_measure.replace(' ', '_')}_*.txt")
-			print(f"  Plot:   CAH_slope_analysis_{slope_measure.replace(' ', '_')}_*.svg")
-	
+			continue
+
+		if choice not in ('1','2','3','4','5','6','7','8','9','A','Q'):
+			print(f"  [!] Unknown option '{choice}'. Enter a number 1-9, A, or Q.")
+
 	return df
 
 
