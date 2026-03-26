@@ -4872,6 +4872,7 @@ def main():
   [7]  2-Way Mixed ANOVA — CA% × {time} (all animals, sex collapsed){week_only}
   [8]  Slope analysis — rate of weight change between CA% groups
   [9]  Interaction plots for significant effects
+  [N]  Normality tests — Shapiro-Wilk & Levene's (both measures, all groups)
   [A]  Run ALL analyses (1-8) and save all reports
   [Q]  Quit
 ================================================================================"""
@@ -5295,6 +5296,123 @@ def main():
 				print(f"Plots saved to: {out_dir.resolve()}")
 			continue
 
+		# ── Option N: Normality tests ─────────────────────────────────────────
+		if choice == 'N':
+			ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+			W = 80
+			thick = "━" * W
+			report_n  = "=" * W + "\n"
+			report_n += "CAH COHORT — NORMALITY & VARIANCE HOMOGENEITY TESTS\n"
+			report_n += "=" * W + "\n"
+			report_n += f"Generated  : {ts}\n"
+			report_n += f"Tests      : Shapiro-Wilk (normality per group), Levene (variance homogeneity)\n"
+			report_n += f"Groupings  : Overall, by CA%, by Sex, by Sex × CA%\n"
+			report_n += f"Measures   : {', '.join(measures_to_analyze)}\n\n"
+
+			# Grand-average per animal (avoids repeated-measures inflation of n)
+			summary_rows = []
+
+			for measure in measures_to_analyze:
+				dm = _prep(measure)
+				avg_dm = dm.groupby(["ID", "Sex", "CA (%)"])[measure].mean().reset_index()
+
+				report_n += f"\n{thick}\n  MEASURE: {measure}\n{thick}\n"
+
+				# ── Shapiro-Wilk ──────────────────────────────────────────
+				report_n += "\n  SHAPIRO-WILK TEST (H₀: data are normally distributed)\n"
+				report_n += "  " + "-" * 74 + "\n"
+
+				groupings = {
+					"Overall":       avg_dm[measure].dropna(),
+					"CA% = 0":       avg_dm.loc[avg_dm["CA (%)"] == 0,  measure].dropna(),
+					"CA% = 2":       avg_dm.loc[avg_dm["CA (%)"] == 2,  measure].dropna(),
+					"Sex = M":       avg_dm.loc[avg_dm["Sex"] == "M",   measure].dropna(),
+					"Sex = F":       avg_dm.loc[avg_dm["Sex"] == "F",   measure].dropna(),
+					"M × CA% = 0":   avg_dm.loc[(avg_dm["Sex"] == "M") & (avg_dm["CA (%)"] == 0), measure].dropna(),
+					"M × CA% = 2":   avg_dm.loc[(avg_dm["Sex"] == "M") & (avg_dm["CA (%)"] == 2), measure].dropna(),
+					"F × CA% = 0":   avg_dm.loc[(avg_dm["Sex"] == "F") & (avg_dm["CA (%)"] == 0), measure].dropna(),
+					"F × CA% = 2":   avg_dm.loc[(avg_dm["Sex"] == "F") & (avg_dm["CA (%)"] == 2), measure].dropna(),
+				}
+
+				gc = max(len(k) for k in groupings) + 2
+				report_n += f"  {'Group':<{gc}}{'n':<5}{'W':<10}{'p':<12}{'sig':<6}{'Normal?'}\n"
+				report_n += "  " + "-" * 74 + "\n"
+				sw_details = {}
+				for grp_name, vals in groupings.items():
+					n = len(vals)
+					if n < 3:
+						report_n += f"  {grp_name:<{gc}}{n:<5}{'—':<10}{'—':<12}{'—':<6}insufficient n\n"
+						sw_details[grp_name] = (n, np.nan, np.nan)
+						continue
+					W_stat, p_val = stats.shapiro(vals)
+					stars = _sig_stars(p_val)
+					normal = "YES" if p_val > 0.05 else "NO *"
+					report_n += f"  {grp_name:<{gc}}{n:<5}{W_stat:<10.4f}{_fmt_p(p_val):<12}{stars:<6}{normal}\n"
+					sw_details[grp_name] = (n, W_stat, p_val)
+					summary_rows.append({
+						'Measure': measure, 'Group': grp_name, 'Test': 'Shapiro-Wilk',
+						'n': n, 'Statistic': W_stat, 'p': p_val, 'Normal': p_val > 0.05
+					})
+
+				# ── Levene's test (variance homogeneity) ──────────────────
+				report_n += "\n  LEVENE'S TEST (H₀: group variances are equal)\n"
+				report_n += "  " + "-" * 74 + "\n"
+
+				levene_groups = {
+					"CA% (0 vs 2)":          (avg_dm.loc[avg_dm["CA (%)"] == 0, measure].dropna(),
+					                           avg_dm.loc[avg_dm["CA (%)"] == 2, measure].dropna()),
+					"Sex (M vs F)":           (avg_dm.loc[avg_dm["Sex"] == "M",  measure].dropna(),
+					                           avg_dm.loc[avg_dm["Sex"] == "F",  measure].dropna()),
+					"4 groups (M×0, M×2, F×0, F×2)": (
+						avg_dm.loc[(avg_dm["Sex"]=="M") & (avg_dm["CA (%)"]==0), measure].dropna(),
+						avg_dm.loc[(avg_dm["Sex"]=="M") & (avg_dm["CA (%)"]==2), measure].dropna(),
+						avg_dm.loc[(avg_dm["Sex"]=="F") & (avg_dm["CA (%)"]==0), measure].dropna(),
+						avg_dm.loc[(avg_dm["Sex"]=="F") & (avg_dm["CA (%)"]==2), measure].dropna(),
+					),
+				}
+
+				lc = max(len(k) for k in levene_groups) + 2
+				report_n += f"  {'Comparison':<{lc}}{'W':<10}{'p':<12}{'sig':<6}{'Equal var?'}\n"
+				report_n += "  " + "-" * 74 + "\n"
+				for comp_name, groups in levene_groups.items():
+					# Skip if any group has < 2 values
+					if any(len(g) < 2 for g in groups):
+						report_n += f"  {comp_name:<{lc}}{'—':<10}{'—':<12}{'—':<6}insufficient n\n"
+						continue
+					lev_stat, lev_p = stats.levene(*groups)
+					stars = _sig_stars(lev_p)
+					eq_var = "YES" if lev_p > 0.05 else "NO *"
+					report_n += f"  {comp_name:<{lc}}{lev_stat:<10.4f}{_fmt_p(lev_p):<12}{stars:<6}{eq_var}\n"
+					summary_rows.append({
+						'Measure': measure, 'Group': comp_name, 'Test': "Levene's",
+						'n': sum(len(g) for g in groups), 'Statistic': lev_stat,
+						'p': lev_p, 'Normal': lev_p > 0.05
+					})
+
+			# ── Summary table ──────────────────────────────────────────────
+			report_n += "\n" + "=" * W + "\n"
+			report_n += "  SUMMARY TABLE\n"
+			report_n += "=" * W + "\n"
+			report_n += "  Note: Shapiro-Wilk p > 0.05 → normality assumption satisfied.\n"
+			report_n += "        Levene's p > 0.05 → homogeneity of variance satisfied.\n"
+			report_n += "        Stars on p-value indicate the assumption is VIOLATED.\n\n"
+
+			if summary_rows:
+				mw = max(len(r['Measure']) for r in summary_rows) + 2
+				gw = max(len(r['Group'])   for r in summary_rows) + 2
+				tw = max(len(r['Test'])    for r in summary_rows) + 2
+				report_n += f"  {'Measure':<{mw}}{'Group':<{gw}}{'Test':<{tw}}{'n':<5}{'Statistic':<12}{'p':<14}{'Assumption OK?'}\n"
+				report_n += "  " + "-" * (mw + gw + tw + 31) + "\n"
+				for r in summary_rows:
+					ok = "YES" if r['Normal'] else "NO *"
+					stars = _sig_stars(r['p'])
+					report_n += (f"  {r['Measure']:<{mw}}{r['Group']:<{gw}}{r['Test']:<{tw}}"
+					             f"{r['n']:<5}{r['Statistic']:<12.4f}{_fmt_p(r['p']) + ' ' + stars:<14}{ok}\n")
+
+			report_n += "\n" + "=" * W + "\nEND OF REPORT\n" + "=" * W + "\n"
+			_save_report(report_n, _fname("normality_tests"))
+			continue
+
 		# ── 'A' — clean-up message ────────────────────────────────────────────
 		if choice == 'A':
 			print("\n" + "="*80)
@@ -5303,8 +5421,8 @@ def main():
 			print("="*80)
 			continue
 
-		if choice not in ('1','2','3','4','5','6','7','8','9','A','Q'):
-			print(f"  [!] Unknown option '{choice}'. Enter a number 1-9, A, or Q.")
+		if choice not in ('1','2','3','4','5','6','7','8','9','N','A','Q'):
+			print(f"  [!] Unknown option '{choice}'. Enter a number 1-9, N, A, or Q.")
 
 	return df
 
