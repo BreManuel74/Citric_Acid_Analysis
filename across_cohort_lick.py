@@ -2136,13 +2136,13 @@ def generate_lick_frontloading_descriptives_report(
 
 # Measures included in the omnibus analysis
 _OMNIBUS_MEASURES = ["Total_Licks", "Total_Bouts", "First_5min_Lick_Pct", "Time_to_50pct_Licks",
-                    "Fecal_Count_Sqrt"]
+                    "Fecal_Count"]
 _OMNIBUS_MEASURE_LABELS = {
     "Total_Licks":         "Total Licks",
     "Total_Bouts":         "Total Lick Bouts",
     "First_5min_Lick_Pct": "% Licks in First 5 min",
     "Time_to_50pct_Licks": "Time to 50% Licks (min)",
-    "Fecal_Count_Sqrt":    "Fecal Count (\u221a-transformed)",
+    "Fecal_Count":         "Fecal Count",
 }
 
 
@@ -2907,9 +2907,6 @@ def generate_omnibus_lick_report(
 
         # Descriptive stats — per group (CA% × Sex), collapsed across weeks
         adf = r.get('analysis_df')
-        if m == 'Fecal_Count_Sqrt' and adf is not None:
-            lines.append('  NOTE: Values shown are √(Fecal_Count) transformed. '
-                         'Back-transform by squaring to recover original counts.')
         if adf is not None:
             lines += ['  DESCRIPTIVE STATISTICS (by CA% × Sex, collapsed across weeks)',
                       '  ' + '-' * 70]
