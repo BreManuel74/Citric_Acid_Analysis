@@ -3149,6 +3149,195 @@ def save_frontloading_analysis_to_file(weekly_averages: Dict, anova_output: str,
     return save_path
 
 
+def generate_lick_normality_report(weekly_averages: Dict, save_path: Optional[Path] = None) -> str:
+    """Shapiro-Wilk normality and Levene's equal-variance tests on all lick measures.
+
+    Builds a per-animal long-format DataFrame from weekly_averages and tests each
+    measure stratified by Week (nonramp) or CA_Percent (ramp).
+
+    Parameters
+    ----------
+    weekly_averages : output of compute_weekly_averages()
+    save_path       : if provided, write the report text to this file
+
+    Returns
+    -------
+    Report as a string
+    """
+    sorted_keys = sort_dates_chronologically(list(weekly_averages.keys()))
+    rows = []
+    for week_idx, date in enumerate(sorted_keys):
+        data = weekly_averages[date]
+        n = len(data.get('avg_licks_per_animal', []))
+        animal_ids   = data.get('animal_ids',   [f'Animal_{i+1}' for i in range(n)])
+        animal_sexes = data.get('animal_sexes', ['Unknown'] * n)
+        ca_pct       = data.get('ca_percent', 0.0)
+        licks        = np.asarray(data.get('avg_licks_per_animal',         np.zeros(n)), dtype=float)
+        bouts        = np.asarray(data.get('avg_bouts_per_animal',         np.zeros(n)), dtype=float)
+        fecal        = np.asarray(data.get('avg_fecal_per_animal',         np.zeros(n)), dtype=float)
+        bottle_wt    = np.asarray(data.get('avg_bottle_weight_per_animal', np.zeros(n)), dtype=float)
+        total_wt     = np.asarray(data.get('avg_total_weight_per_animal',  np.zeros(n)), dtype=float)
+        fl_lick_pct  = np.asarray(data.get('first_5min_lick_pcts_per_animal', np.zeros(n)), dtype=float)
+        fl_bout_pct  = np.asarray(data.get('first_5min_bout_pcts_per_animal', np.zeros(n)), dtype=float)
+        t50          = np.asarray(data.get('time_to_50pct_licks_per_animal',  np.full(n, np.nan)), dtype=float)
+
+        for i in range(len(animal_ids)):
+            sex = animal_sexes[i] if i < len(animal_sexes) else 'Unknown'
+            bw  = float(bottle_wt[i]) if bottle_wt[i] > 0 else np.nan
+            rows.append({
+                'Animal':          animal_ids[i],
+                'Sex':             sex,
+                'CA_Percent':      ca_pct,
+                'Week':            week_idx + 1,
+                'Total_Licks':     float(licks[i]),
+                'Total_Bouts':     float(bouts[i]),
+                'Fecal_Count':     float(fecal[i]),
+                'Bottle_Weight':   bw,
+                'Total_Weight':    float(total_wt[i]),
+                'First5min_Lick%': float(fl_lick_pct[i]),
+                'First5min_Bout%': float(fl_bout_pct[i]),
+                'Time_to_50pct':   float(t50[i]),
+            })
+
+    if not rows:
+        return '  [WARNING] No per-animal data found in weekly_averages.\n'
+
+    df_long = pd.DataFrame(rows)
+
+    MEASURES = [
+        ('Total_Licks',     'Total Licks'),
+        ('Total_Bouts',     'Total Bouts'),
+        ('Fecal_Count',     'Fecal Count'),
+        ('Bottle_Weight',   'Bottle Weight Loss (g)'),
+        ('Total_Weight',    'Total Weight Loss (g)'),
+        ('First5min_Lick%', '% Licks in First 5 min'),
+        ('First5min_Bout%', '% Bouts in First 5 min'),
+        ('Time_to_50pct',   'Time to 50% Licks (min)'),
+    ]
+    available = [(col, lbl) for col, lbl in MEASURES if col in df_long.columns]
+
+    within_col   = 'CA_Percent' if EXPERIMENT_MODE == 'ramp' else 'Week'
+    within_label = 'CA%'        if EXPERIMENT_MODE == 'ramp' else 'Week'
+
+    def _sw_row(values: pd.Series, label: str, alpha: float = 0.05):
+        """Shapiro-Wilk (or D'Agostino-Pearson for n>5000). Returns (lines, passed)."""
+        values = values.dropna()
+        n = len(values)
+        if n < 3:
+            return [f'  {label}: n={n} \u2014 too few observations, skipping.'], True
+        if n > 5000:
+            stat, p = stats.normaltest(values)
+            test_name = "D'Agostino-Pearson k\u00b2"
+        else:
+            stat, p = stats.shapiro(values)
+            test_name = 'Shapiro-Wilk W'
+        sig = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
+        passed = p >= alpha
+        conclusion = 'NORMAL (p \u2265 0.05)' if passed else 'NON-NORMAL (p < 0.05)'
+        return [
+            f'  {label} (n={n}):',
+            f'    {test_name} = {stat:.4f},  p = {p:.4f}  [{sig}]  \u2192  {conclusion}',
+        ], passed
+
+    lines: List[str] = [
+        '=' * 80,
+        "LICK MEASURES \u2014 SHAPIRO-WILK NORMALITY & MAUCHLY'S SPHERICITY TEST",
+        '=' * 80,
+        f'Generated : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+        f'Mode      : {EXPERIMENT_MODE.upper()} (within-subjects factor = {within_label})',
+        '',
+        'Shapiro-Wilk: tests normality within each condition (per CA% level or week).',
+        "Mauchly's test: tests the sphericity assumption for repeated-measures ANOVA.",
+        '  Sphericity violated -> use Greenhouse-Geisser or Huynh-Feldt correction.',
+        "Shapiro-Wilk is used for n \u2264 5000; D'Agostino-Pearson for larger samples.",
+        '',
+    ]
+
+    summary_rows: List[Tuple[str, str, str, str]] = []
+
+    for col, lbl in available:
+        lines += ['\u2500' * 80, f'MEASURE: {lbl}', '\u2500' * 80, '']
+
+        # Build stratification groups
+        within_groups: Dict = {}
+
+        for wval in sorted(df_long[within_col].dropna().unique()):
+            within_groups[wval] = df_long[df_long[within_col] == wval][col]
+
+        # ── Shapiro-Wilk ──────────────────────────────────────────────────
+        lines += ['  SHAPIRO-WILK (normality within groups)', '  ' + '-' * 40]
+
+        for wval, grp in within_groups.items():
+            if EXPERIMENT_MODE == 'ramp':
+                w_display = f'CA% = {wval}'
+            else:
+                w_display = f'Week {int(wval)}'
+            r_lines, passed = _sw_row(grp, w_display)
+            lines.extend(r_lines)
+            summary_rows.append((lbl, w_display, 'Shapiro-Wilk',
+                                  'NORMAL' if passed else 'NON-NORMAL *'))
+
+        lines.append('')
+
+        # ── Mauchly's test of sphericity ──────────────────────────────────
+        lines += ["  MAUCHLY'S TEST OF SPHERICITY (repeated measures)", '  ' + '-' * 40]
+
+        n_within_levels = len(within_groups)
+        if n_within_levels < 2:
+            lines.append(f'  {within_label} has only {n_within_levels} level \u2014 Mauchly\'s test not applicable.')
+        elif n_within_levels == 2:
+            lines.append(f'  {within_label} has 2 levels \u2014 sphericity is trivially satisfied (no test needed).')
+        elif not HAS_PINGOUIN:
+            lines.append("  Requires pingouin \u2014 install with: pip install pingouin")
+        else:
+            sub_df = df_long[['Animal', within_col, col]].dropna()
+            n_subj = sub_df['Animal'].nunique()
+            if n_subj < 2:
+                lines.append(f"  Mauchly's test requires \u2265 2 subjects (found {n_subj}) \u2014 skipping.")
+            else:
+                try:
+                    result = pg.sphericity(sub_df, dv=col, within=within_col, subject='Animal')
+                    W, chi2, dof, p = result.W, result.chi2, result.dof, result.pval
+                    sig = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
+                    passed = (p >= 0.05)
+                    conclusion = ('SPHERICITY MET (p \u2265 0.05)' if passed
+                                  else 'SPHERICITY VIOLATED (p < 0.05)')
+                    lines += [
+                        f'  {within_label} conditions (n={n_subj} animals, {n_within_levels} levels):',
+                        f"    Mauchly's W = {W:.4f},  chi2 = {chi2:.4f},  df = {dof},  p = {p:.4f}  [{sig}]  \u2192  {conclusion}",
+                    ]
+                    summary_rows.append((lbl, f'{within_label} (sphericity)', "Mauchly's",
+                                          'MET' if passed else 'VIOLATED *'))
+                except Exception as e:
+                    lines.append(f"  Mauchly's test failed: {e}")
+
+        lines.append('')
+
+    # ── Summary table ──────────────────────────────────────────────────────
+    lines += [
+        '=' * 80,
+        'SUMMARY TABLE',
+        '=' * 80,
+        f'  {"Measure":<28} {"Grouping":<28} {"Test":<14} {"Result"}',
+        '  ' + '-' * 80,
+    ]
+    for row in summary_rows:
+        lines.append(f'  {row[0]:<28} {row[1]:<28} {row[2]:<14} {row[3]}')
+
+    lines += [
+        '',
+        'NOTE: Shapiro-Wilk has low power with small n \u2014 a non-significant result',
+        '      does not guarantee normality. Visual inspection (Q-Q plots) is advised.',
+        '',
+    ]
+
+    report = '\n'.join(lines)
+    if save_path is not None:
+        Path(save_path).write_text(report, encoding='utf-8')
+        print(f'[OK] Lick normality report saved -> {save_path}')
+    return report
+
+
 def parse_date_string(date_str: str) -> datetime:
     """Parse MM/DD/YY date string to datetime object for proper sorting.
     
@@ -5351,7 +5540,14 @@ def main():
         if fig_50pct_lines:
             plt.close(fig_50pct_lines)
             print(f"Saved time to 50% plot with trajectories to: {save_path_50pct_lines}")
-    
+
+    # Optional: Run normality tests on lick measures
+    run_normality = input("\nRun Shapiro-Wilk & Levene's normality tests on lick measures? (y/n): ").strip().lower()
+    if run_normality in ['y', 'yes']:
+        normality_path = master_csv.parent / "lick_normality_report.txt"
+        normality_report = generate_lick_normality_report(weekly_averages, save_path=normality_path)
+        print(normality_report)
+
     print("\n" + "=" * 80)
     print("COMPREHENSIVE STATISTICAL ANALYSIS COMPLETED")
     print("=" * 80)
