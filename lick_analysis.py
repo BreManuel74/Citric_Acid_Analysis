@@ -3221,7 +3221,7 @@ def generate_lick_normality_report(weekly_averages: Dict, save_path: Optional[Pa
 
     def _sw_row(values: pd.Series, label: str, alpha: float = 0.05):
         """Shapiro-Wilk (or D'Agostino-Pearson for n>5000). Returns (lines, passed)."""
-        values = values.dropna()
+        values = pd.Series(values).dropna()
         n = len(values)
         if n < 3:
             return [f'  {label}: n={n} \u2014 too few observations, skipping.'], True
@@ -3239,14 +3239,25 @@ def generate_lick_normality_report(weekly_averages: Dict, save_path: Optional[Pa
             f'    {test_name} = {stat:.4f},  p = {p:.4f}  [{sig}]  \u2192  {conclusion}',
         ], passed
 
+    def _rm_residuals(df: pd.DataFrame, col: str) -> pd.Series:
+        """Compute within-subject residuals: y_ij - animal_mean_i - condition_mean_j + grand_mean."""
+        sub = df[['Animal', within_col, col]].dropna().copy()
+        grand = sub[col].mean()
+        sub['_animal_mean'] = sub.groupby('Animal')[col].transform('mean')
+        sub['_cond_mean']   = sub.groupby(within_col)[col].transform('mean')
+        return sub[col] - sub['_animal_mean'] - sub['_cond_mean'] + grand
+
     lines: List[str] = [
         '=' * 80,
-        "LICK MEASURES \u2014 SHAPIRO-WILK NORMALITY & MAUCHLY'S SPHERICITY TEST",
+        "LICK MEASURES \u2014 SHAPIRO-WILK NORMALITY (RESIDUALS) & MAUCHLY'S SPHERICITY TEST",
         '=' * 80,
         f'Generated : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
         f'Mode      : {EXPERIMENT_MODE.upper()} (within-subjects factor = {within_label})',
         '',
-        'Shapiro-Wilk: tests normality within each condition (per CA% level or week).',
+        'Normality is tested on MODEL RESIDUALS, not raw data.',
+        '  Residual = y_ij - animal_mean_i - condition_mean_j + grand_mean',
+        '  This isolates the pure error term to which the rm-ANOVA normality',
+        '  assumption applies (removes between-subject and condition effects).',
         "Mauchly's test: tests the sphericity assumption for repeated-measures ANOVA.",
         '  Sphericity violated -> use Greenhouse-Geisser or Huynh-Feldt correction.',
         "Shapiro-Wilk is used for n \u2264 5000; D'Agostino-Pearson for larger samples.",
@@ -3258,24 +3269,19 @@ def generate_lick_normality_report(weekly_averages: Dict, save_path: Optional[Pa
     for col, lbl in available:
         lines += ['\u2500' * 80, f'MEASURE: {lbl}', '\u2500' * 80, '']
 
-        # Build stratification groups
+        # Build within_groups dict (still needed for Mauchly's test below)
         within_groups: Dict = {}
-
         for wval in sorted(df_long[within_col].dropna().unique()):
             within_groups[wval] = df_long[df_long[within_col] == wval][col]
 
-        # ── Shapiro-Wilk ──────────────────────────────────────────────────
-        lines += ['  SHAPIRO-WILK (normality within groups)', '  ' + '-' * 40]
+        # ── Shapiro-Wilk on residuals ─────────────────────────────────────
+        lines += ['  SHAPIRO-WILK ON MODEL RESIDUALS (pooled)', '  ' + '-' * 40]
 
-        for wval, grp in within_groups.items():
-            if EXPERIMENT_MODE == 'ramp':
-                w_display = f'CA% = {wval}'
-            else:
-                w_display = f'Week {int(wval)}'
-            r_lines, passed = _sw_row(grp, w_display)
-            lines.extend(r_lines)
-            summary_rows.append((lbl, w_display, 'Shapiro-Wilk',
-                                  'NORMAL' if passed else 'NON-NORMAL *'))
+        residuals = _rm_residuals(df_long, col)
+        r_lines, passed = _sw_row(residuals, 'Pooled residuals')
+        lines.extend(r_lines)
+        summary_rows.append((lbl, 'Pooled residuals', 'Shapiro-Wilk',
+                              'NORMAL' if passed else 'NON-NORMAL *'))
 
         lines.append('')
 
@@ -3328,6 +3334,8 @@ def generate_lick_normality_report(weekly_averages: Dict, save_path: Optional[Pa
         '',
         'NOTE: Shapiro-Wilk has low power with small n \u2014 a non-significant result',
         '      does not guarantee normality. Visual inspection (Q-Q plots) is advised.',
+        'NOTE: Residuals = y_ij - animal_mean - condition_mean + grand_mean.',
+        '      This is the error term to which the rm-ANOVA normality assumption applies.',
         '',
     ]
 
@@ -3336,6 +3344,147 @@ def generate_lick_normality_report(weekly_averages: Dict, save_path: Optional[Pa
         Path(save_path).write_text(report, encoding='utf-8')
         print(f'[OK] Lick normality report saved -> {save_path}')
     return report
+
+
+def generate_lick_normality_qq_plots(
+    weekly_averages: Dict,
+    save_dir: Optional[Path] = None,
+    show: bool = False,
+) -> None:
+    """Generate Q-Q plots of model residuals for each lick measure.
+
+    Produces one SVG figure per measure showing a single Q-Q panel of the
+    pooled within-subject residuals:
+
+      residual_ij = y_ij - animal_mean_i - condition_mean_j + grand_mean
+
+    This is the error term the rm-ANOVA normality assumption applies to.
+
+    Parameters
+    ----------
+    weekly_averages : output of compute_weekly_averages()
+    save_dir        : directory to save SVG files (created if absent).
+                      If None the figures are only shown (requires show=True).
+    show            : whether to call plt.show() for each figure
+    """
+    # ── Build long-format DataFrame (same as in generate_lick_normality_report) ──
+    sorted_keys = sort_dates_chronologically(list(weekly_averages.keys()))
+    rows = []
+    for week_idx, date in enumerate(sorted_keys):
+        data = weekly_averages[date]
+        n = len(data.get('avg_licks_per_animal', []))
+        animal_ids   = data.get('animal_ids',   [f'Animal_{i+1}' for i in range(n)])
+        animal_sexes = data.get('animal_sexes', ['Unknown'] * n)
+        ca_pct       = data.get('ca_percent', 0.0)
+        licks        = np.asarray(data.get('avg_licks_per_animal',            np.zeros(n)), dtype=float)
+        bouts        = np.asarray(data.get('avg_bouts_per_animal',            np.zeros(n)), dtype=float)
+        fecal        = np.asarray(data.get('avg_fecal_per_animal',            np.zeros(n)), dtype=float)
+        bottle_wt    = np.asarray(data.get('avg_bottle_weight_per_animal',    np.zeros(n)), dtype=float)
+        total_wt     = np.asarray(data.get('avg_total_weight_per_animal',     np.zeros(n)), dtype=float)
+        fl_lick_pct  = np.asarray(data.get('first_5min_lick_pcts_per_animal', np.zeros(n)), dtype=float)
+        fl_bout_pct  = np.asarray(data.get('first_5min_bout_pcts_per_animal', np.zeros(n)), dtype=float)
+        t50          = np.asarray(data.get('time_to_50pct_licks_per_animal',  np.full(n, np.nan)), dtype=float)
+
+        for i in range(len(animal_ids)):
+            bw = float(bottle_wt[i]) if bottle_wt[i] > 0 else np.nan
+            rows.append({
+                'Animal':          animal_ids[i],
+                'Sex':             animal_sexes[i] if i < len(animal_sexes) else 'Unknown',
+                'CA_Percent':      ca_pct,
+                'Week':            week_idx + 1,
+                'Total_Licks':     float(licks[i]),
+                'Total_Bouts':     float(bouts[i]),
+                'Fecal_Count':     float(fecal[i]),
+                'Bottle_Weight':   bw,
+                'Total_Weight':    float(total_wt[i]),
+                'First5min_Lick%': float(fl_lick_pct[i]),
+                'First5min_Bout%': float(fl_bout_pct[i]),
+                'Time_to_50pct':   float(t50[i]),
+            })
+
+    if not rows:
+        print('[WARNING] No per-animal data found — cannot create Q-Q plots.')
+        return
+
+    df_long = pd.DataFrame(rows)
+
+    MEASURES = [
+        ('Total_Licks',     'Total Licks'),
+        ('Total_Bouts',     'Total Bouts'),
+        ('Fecal_Count',     'Fecal Count'),
+        ('Bottle_Weight',   'Bottle Weight Loss (g)'),
+        ('Total_Weight',    'Total Weight Loss (g)'),
+        ('First5min_Lick%', '% Licks in First 5 min'),
+        ('First5min_Bout%', '% Bouts in First 5 min'),
+        ('Time_to_50pct',   'Time to 50% Licks (min)'),
+    ]
+    available = [(col, lbl) for col, lbl in MEASURES if col in df_long.columns]
+
+    within_col   = 'CA_Percent' if EXPERIMENT_MODE == 'ramp' else 'Week'
+
+    if save_dir is not None:
+        Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+    def _rm_residuals_qq(df: pd.DataFrame, col: str) -> np.ndarray:
+        """Return pooled within-subject residuals for a single measure."""
+        sub = df[['Animal', within_col, col]].dropna().copy()
+        grand = sub[col].mean()
+        sub['_animal_mean'] = sub.groupby('Animal')[col].transform('mean')
+        sub['_cond_mean']   = sub.groupby(within_col)[col].transform('mean')
+        return (sub[col] - sub['_animal_mean'] - sub['_cond_mean'] + grand).values
+
+    for col, lbl in available:
+        residuals = _rm_residuals_qq(df_long, col)
+        n = len(residuals)
+
+        fig, ax = plt.subplots(figsize=(5, 4.5))
+        fig.suptitle(
+            f'Q-Q Plot (residuals) \u2014 {lbl}',
+            fontsize=13, fontweight='bold',
+        )
+        ax.set_xlabel('Theoretical quantiles', fontsize=10)
+        ax.set_ylabel('Model residuals', fontsize=10)
+        ax.set_title(
+            f'Pooled within-subject residuals  (n={n})',
+            fontsize=10,
+        )
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+        if n < 3:
+            ax.text(0.5, 0.5, 'n < 3\ninsufficient data',
+                    ha='center', va='center', transform=ax.transAxes,
+                    fontsize=9, color='gray')
+        else:
+            (osm, osr), (slope, intercept, _r) = stats.probplot(residuals, dist='norm')
+            ax.scatter(osm, osr, s=30, color='steelblue', alpha=0.85, zorder=3)
+            x_line = np.array([osm[0], osm[-1]])
+            ax.plot(x_line, slope * x_line + intercept,
+                    color='crimson', linewidth=1.3, zorder=2)
+
+            # Annotate with Shapiro-Wilk result
+            if n <= 5000:
+                sw_stat, sw_p = stats.shapiro(residuals)
+                sig = '***' if sw_p < 0.001 else '**' if sw_p < 0.01 else '*' if sw_p < 0.05 else 'ns'
+                ax.annotate(
+                    f'SW W={sw_stat:.3f}, p={sw_p:.4f} [{sig}]',
+                    xy=(0.03, 0.96), xycoords='axes fraction',
+                    fontsize=8, va='top',
+                    bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.7),
+                )
+
+        fig.tight_layout()
+
+        if save_dir is not None:
+            safe_name = col.replace('%', 'pct').replace(' ', '_').lower()
+            fname = f'lick_qq_resid_{safe_name}.svg'
+            fig.savefig(Path(save_dir) / fname, format='svg', dpi=200, bbox_inches='tight')
+            print(f'[OK] Q-Q plot saved -> {Path(save_dir) / fname}')
+
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
 
 
 def parse_date_string(date_str: str) -> datetime:
@@ -5547,6 +5696,14 @@ def main():
         normality_path = master_csv.parent / "lick_normality_report.txt"
         normality_report = generate_lick_normality_report(weekly_averages, save_path=normality_path)
         print(normality_report)
+
+        # Optional: Save Q-Q plots for visual normality inspection
+        run_qq = input("\nSave Q-Q plots for lick normality measures as SVG? (y/n): ").strip().lower()
+        if run_qq in ['y', 'yes']:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            qq_dir = master_csv.parent / f"lick_normality_qq_{timestamp}"
+            generate_lick_normality_qq_plots(weekly_averages, save_dir=qq_dir, show=False)
+            print(f"[OK] Q-Q plots saved to: {qq_dir}")
 
     print("\n" + "=" * 80)
     print("COMPREHENSIVE STATISTICAL ANALYSIS COMPLETED")
