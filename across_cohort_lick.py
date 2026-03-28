@@ -2358,131 +2358,102 @@ def generate_fecal_normality_report(
     if 'Fecal_Count' not in combined.columns:
         return '  [WARNING] Fecal_Count column not present in combined data.\n'
 
-    combined = _add_sqrt_transforms(combined)
+    subject_col = next((c for c in ('ID', 'Animal_ID', 'Subject', 'Animal')
+                        if c in combined.columns), None)
 
     lines: List[str] = [
         '=' * 80,
-        'FECAL COUNT — SHAPIRO-WILK NORMALITY TESTS',
-        '(Evaluating whether the Friedman test is appropriate)',
+        'FECAL COUNT — SHAPIRO-WILK NORMALITY (RESIDUALS)',
         '=' * 80,
         f'Generated : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
         '',
-        'Tests are run on both raw Fecal_Count and √(Fecal_Count).',
-        'Shapiro-Wilk is used for n ≤ 5000; D\'Agostino-Pearson for larger samples.',
+        'Normality is tested on MODEL RESIDUALS, not raw data.',
+        '  Within each CA% cohort: residual = y_ij - animal_mean_i - week_mean_j + grand_mean',
+        '  This isolates the pure error term to which the rm-ANOVA normality',
+        '  assumption applies (removes between-subject and week effects).',
+        "Shapiro-Wilk is used for n \u2264 5000; D'Agostino-Pearson for larger samples.",
         'The Friedman test is the non-parametric repeated-measures alternative',
         'to one-way within-subjects ANOVA, appropriate when normality is violated.',
         '',
     ]
 
-    # Track pass/fail counts for the recommendation
-    raw_fails = 0
-    raw_total = 0
-    sqrt_fails = 0
-    sqrt_total = 0
+    fails = 0
+    total = 0
 
-    def _run_pair(subset: pd.Series, label: str) -> None:
-        nonlocal raw_fails, raw_total, sqrt_fails, sqrt_total
-        r_lines, r_passed = _shapiro_row(subset, f'RAW   {label}')
+    def _rm_residuals_fecal(df: pd.DataFrame, subj_col: str) -> pd.Series:
+        """Within-subject residuals: y_ij - animal_mean_i - week_mean_j + grand_mean."""
+        sub = df[[subj_col, 'Week', 'Fecal_Count']].dropna().copy()
+        grand = sub['Fecal_Count'].mean()
+        sub['_animal_mean'] = sub.groupby(subj_col)['Fecal_Count'].transform('mean')
+        sub['_week_mean']   = sub.groupby('Week')['Fecal_Count'].transform('mean')
+        return sub['Fecal_Count'] - sub['_animal_mean'] - sub['_week_mean'] + grand
+
+    def _run_resid(df: pd.DataFrame, label: str) -> None:
+        nonlocal fails, total
+        if subject_col is None or 'Week' not in df.columns:
+            lines.append(f'  {label}: animal ID or Week column missing — skipping.')
+            return
+        resid = _rm_residuals_fecal(df, subject_col)
+        r_lines, passed = _shapiro_row(resid, label)
         lines.extend(r_lines)
-        if subset.dropna().shape[0] >= 3:
-            raw_total  += 1
-            if not r_passed:
-                raw_fails += 1
-
-        sqrt_vals = np.sqrt(subset.clip(lower=0))
-        s_lines, s_passed = _shapiro_row(sqrt_vals, f'SQRT  {label}')
-        lines.extend(s_lines)
-        if sqrt_vals.dropna().shape[0] >= 3:
-            sqrt_total  += 1
-            if not s_passed:
-                sqrt_fails += 1
-
-    # ── Overall ──────────────────────────────────────────────────────────────
-    lines += ['OVERALL', '-' * 40]
-    _run_pair(combined['Fecal_Count'], 'All data combined')
-    lines.append('')
-
-    # ── By Week (most relevant for Friedman decision) ─────────────────────
-    lines += ['BY WEEK  ← key for Friedman decision', '-' * 40]
-    if 'Week' in combined.columns:
-        for wk in sorted(combined['Week'].dropna().unique()):
-            sub = combined[combined['Week'] == wk]['Fecal_Count']
-            _run_pair(sub, f'Week {int(wk) + 1}')
-    else:
-        lines.append('  Week column not available.')
-    lines.append('')
+        if resid.dropna().shape[0] >= 3:
+            total += 1
+            if not passed:
+                fails += 1
 
     # ── By Cohort (CA%) ───────────────────────────────────────────────────
     lines += ['BY COHORT (CA%)', '-' * 40]
     if 'CA%' in combined.columns:
         for ca_val in sorted(combined['CA%'].dropna().unique()):
-            sub = combined[combined['CA%'] == ca_val]['Fecal_Count']
-            _run_pair(sub, f'CA% = {ca_val}')
+            _run_resid(combined[combined['CA%'] == ca_val], f'CA% = {ca_val}')
     else:
         lines.append('  CA% column not available.')
     lines.append('')
 
-    # ── By Sex ────────────────────────────────────────────────────────────
-    lines += ['BY SEX', '-' * 40]
-    if 'Sex' in combined.columns:
+    # ── By Sex within Cohort ──────────────────────────────────────────────
+    lines += ['BY SEX WITHIN COHORT', '-' * 40]
+    if 'CA%' in combined.columns and 'Sex' in combined.columns:
+        for ca_val in sorted(combined['CA%'].dropna().unique()):
+            for sex_val in sorted(combined['Sex'].dropna().unique()):
+                sub_df = combined[(combined['CA%'] == ca_val) & (combined['Sex'] == sex_val)]
+                _run_resid(sub_df, f'CA% = {ca_val}, Sex = {sex_val}')
+    elif 'Sex' in combined.columns:
         for sex_val in sorted(combined['Sex'].dropna().unique()):
-            sub = combined[combined['Sex'] == sex_val]['Fecal_Count']
-            _run_pair(sub, f'Sex = {sex_val}')
+            _run_resid(combined[combined['Sex'] == sex_val], f'Sex = {sex_val}')
     else:
         lines.append('  Sex column not available.')
     lines.append('')
 
-    # ── By Cohort × Week ──────────────────────────────────────────────────
-    lines += ['BY COHORT × WEEK', '-' * 40]
-    if 'CA%' in combined.columns and 'Week' in combined.columns:
-        for ca_val in sorted(combined['CA%'].dropna().unique()):
-            for wk in sorted(combined['Week'].dropna().unique()):
-                sub = combined[
-                    (combined['CA%'] == ca_val) & (combined['Week'] == wk)
-                ]['Fecal_Count']
-                _run_pair(sub, f'CA% = {ca_val}, Week {int(wk) + 1}')
-    else:
-        lines.append('  CA% or Week column not available.')
-    lines.append('')
-
     # ── Recommendation ────────────────────────────────────────────────────
-    raw_pct  = 100 * raw_fails  / raw_total  if raw_total  else 0
-    sqrt_pct = 100 * sqrt_fails / sqrt_total if sqrt_total else 0
+    pct_fail = 100 * fails / total if total else 0
 
     lines += [
         '=' * 80,
         'RECOMMENDATION',
         '=' * 80,
-        f'  Groups tested             : {raw_total}',
-        f'  Raw  Fecal_Count — non-normal : {raw_fails}/{raw_total} ({raw_pct:.0f}%)',
-        f'  Sqrt Fecal_Count — non-normal : {sqrt_fails}/{sqrt_total} ({sqrt_pct:.0f}%)',
+        f'  Groups tested              : {total}',
+        f'  Residuals non-normal       : {fails}/{total} ({pct_fail:.0f}%)',
         '',
     ]
 
-    if raw_pct >= 50 and sqrt_pct >= 50:
+    if pct_fail >= 50:
         lines += [
-            '  CONCLUSION: The majority of groups fail normality even after √-transform.',
-            '  → The Friedman test (non-parametric repeated-measures) is RECOMMENDED',
+            '  CONCLUSION: The majority of groups show non-normal residuals.',
+            '  \u2192 The Friedman test (non-parametric repeated-measures) is RECOMMENDED',
             '    for the Week factor within each cohort/sex stratum.',
-            '  → Consider the Aligned Ranks Transform (ART) ANOVA for a full factorial',
+            '  \u2192 Consider the Aligned Ranks Transform (ART) ANOVA for a full factorial',
             '    non-parametric approach, or use the Friedman test per stratum.',
-        ]
-    elif raw_pct >= 50 and sqrt_pct < 50:
-        lines += [
-            '  CONCLUSION: Raw counts violate normality but √-transform fixes most groups.',
-            '  → Parametric mixed ANOVA on √(Fecal_Count) is DEFENSIBLE.',
-            '  → The Friedman test is still a conservative valid alternative if preferred.',
         ]
     else:
         lines += [
             '  CONCLUSION: Most groups do not significantly depart from normality.',
-            '  → Parametric mixed ANOVA (raw or √-transformed) appears APPROPRIATE.',
-            '  → The Friedman test would be overly conservative here, but remains valid.',
+            '  \u2192 Parametric mixed ANOVA appears APPROPRIATE.',
+            '  \u2192 The Friedman test would be overly conservative here, but remains valid.',
         ]
 
     lines += [
         '',
-        'NOTE: Shapiro-Wilk has low power with very small n — a non-significant result',
+        'NOTE: Shapiro-Wilk has low power with very small n \u2014 a non-significant result',
         '      does not guarantee normality. Visual inspection (Q-Q plots) is also advised.',
         '',
     ]
@@ -2491,6 +2462,162 @@ def generate_fecal_normality_report(
     if save_path is not None:
         Path(save_path).write_text(report, encoding='utf-8')
         print(f'[OK] Fecal normality report saved -> {save_path}')
+    return report
+
+
+def generate_lick_normality_report(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    save_path: Optional[Path] = None,
+) -> str:
+    """Shapiro-Wilk normality and Levene's equal-variance tests on lick measures.
+
+    Excludes Fecal_Count (tested separately in generate_fecal_normality_report).
+    Stratifies Shapiro-Wilk within CA% cohorts. Levene's test compares variance
+    across CA% cohorts.
+
+    Parameters
+    ----------
+    cohort_dfs : dict of label → per-animal weekly DataFrame
+    save_path  : if provided, write the report text to this file
+
+    Returns
+    -------
+    Report as a string
+    """
+    combined = combine_lick_cohorts(cohort_dfs)
+
+    LICK_MEASURES = [
+        ("Total_Licks",         "Total Licks"),
+        ("Total_Bouts",         "Total Bouts"),
+        ("Avg_ILI",             "Avg Inter-Lick Interval (s)"),
+        ("Avg_Bout_Duration",   "Avg Bout Duration (s)"),
+        ("Licks_Per_Bout",      "Licks per Bout"),
+        ("First_5min_Lick_Pct", "% Licks in First 5 min"),
+        ("Time_to_50pct_Licks", "Time to 50% Licks (min)"),
+    ]
+    available = [(col, lbl) for col, lbl in LICK_MEASURES if col in combined.columns]
+
+    if not available:
+        return '  [WARNING] No lick measure columns found in combined data.\n'
+
+    lines: List[str] = [
+        '=' * 80,
+        "LICK MEASURES — SHAPIRO-WILK NORMALITY (RESIDUALS) & MAUCHLY'S SPHERICITY TEST",
+        '=' * 80,
+        f'Generated : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+        '',
+        'Normality is tested on MODEL RESIDUALS, not raw data.',
+        '  Within each CA% cohort: residual = y_ij - animal_mean_i - week_mean_j + grand_mean',
+        '  This isolates the pure error term to which the rm-ANOVA normality',
+        '  assumption applies (removes between-subject and week effects).',
+        "Mauchly's test: tests the sphericity assumption for repeated-measures ANOVA.",
+        '  Run on Week (within-subjects) separately for each CA% cohort.',
+        '  Sphericity violated -> use Greenhouse-Geisser or Huynh-Feldt correction.',
+        "Shapiro-Wilk is used for n \u2264 5000; D'Agostino-Pearson for larger samples.",
+        'Note: Fecal Count is excluded here — see the fecal normality report (option 10).',
+        '',
+    ]
+
+    subject_col = next((c for c in ('ID', 'Animal_ID', 'Subject', 'Animal')
+                        if c in combined.columns), None)
+
+    def _rm_residuals_cohort(df: pd.DataFrame, col: str, subj_col: str) -> pd.Series:
+        """Within-subject residuals for one cohort: y_ij - animal_mean_i - week_mean_j + grand_mean."""
+        sub = df[[subj_col, 'Week', col]].dropna().copy()
+        grand = sub[col].mean()
+        sub['_animal_mean'] = sub.groupby(subj_col)[col].transform('mean')
+        sub['_week_mean']   = sub.groupby('Week')[col].transform('mean')
+        return sub[col] - sub['_animal_mean'] - sub['_week_mean'] + grand
+
+    # Summary rows: (measure_label, grouping, test, result_str)
+    summary_rows: List[Tuple[str, str, str, str]] = []
+
+    for col, lbl in available:
+        lines += ['─' * 80, f'MEASURE: {lbl}', '─' * 80, '']
+
+        # ── Shapiro-Wilk on within-subject residuals (per CA% cohort) ─────
+        lines += ['  SHAPIRO-WILK ON RESIDUALS (within each CA% cohort)', '  ' + '-' * 40]
+
+        if 'CA%' in combined.columns and subject_col is not None:
+            for ca_val in sorted(combined['CA%'].dropna().unique()):
+                cohort_df = combined[combined['CA%'] == ca_val]
+                resid = _rm_residuals_cohort(cohort_df, col, subject_col)
+                r_lines, passed = _shapiro_row(resid, f'CA% = {ca_val}  (residuals)')
+                lines.extend(r_lines)
+                summary_rows.append((lbl, f'CA% = {ca_val}', 'Shapiro-Wilk (residuals)',
+                                      'NORMAL' if passed else 'NON-NORMAL *'))
+        elif subject_col is None:
+            lines.append('  Animal ID column not found — cannot compute residuals; skipping.')
+        else:
+            lines.append('  CA% column not available — skipping.')
+
+        lines.append('')
+
+        # ── Mauchly's test of sphericity (Week, within each CA% cohort) ──
+        lines += ["  MAUCHLY'S TEST OF SPHERICITY (Week — within each CA% cohort)", '  ' + '-' * 40]
+        if not HAS_PINGOUIN:
+            lines.append('  Requires pingouin — install with: pip install pingouin')
+        elif 'Week' not in combined.columns or subject_col is None:
+            lines.append('  Week or animal ID column not available — skipping.')
+        else:
+            ca_levels_m = (sorted(combined['CA%'].dropna().unique())
+                           if 'CA%' in combined.columns else [None])
+            for ca_val in ca_levels_m:
+                if ca_val is not None:
+                    sub_df = combined[combined['CA%'] == ca_val][[subject_col, 'Week', col]].dropna()
+                    cohort_label = f'CA% = {ca_val}'
+                else:
+                    sub_df = combined[[subject_col, 'Week', col]].dropna()
+                    cohort_label = 'All cohorts'
+                n_levels = sub_df['Week'].nunique()
+                n_subj = sub_df[subject_col].nunique()
+                if n_levels < 3:
+                    lines.append(
+                        f'  {cohort_label}: {n_levels} week(s) \u2014 sphericity trivially satisfied (no test needed).')
+                    continue
+                if n_subj < 2:
+                    lines.append(f'  {cohort_label}: requires \u2265 2 subjects \u2014 skipping.')
+                    continue
+                try:
+                    result = pg.sphericity(sub_df, dv=col, within='Week', subject=subject_col)
+                    W, chi2, dof, p = result.W, result.chi2, result.dof, result.pval
+                    sig = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
+                    passed = (p >= 0.05)
+                    conclusion = ('SPHERICITY MET (p \u2265 0.05)' if passed
+                                  else 'SPHERICITY VIOLATED (p < 0.05)')
+                    lines += [
+                        f'  {cohort_label} (n={n_subj} animals, {n_levels} weeks):',
+                        f"    Mauchly's W = {W:.4f},  chi2 = {chi2:.4f},  df = {dof},  p = {p:.4f}  [{sig}]  \u2192  {conclusion}",
+                    ]
+                    summary_rows.append((lbl, f'{cohort_label} (sphericity)', "Mauchly's",
+                                          'MET' if passed else 'VIOLATED *'))
+                except Exception as e:
+                    lines.append(f"  {cohort_label}: Mauchly's test failed: {e}")
+
+        lines.append('')
+
+    # ── Summary table ──────────────────────────────────────────────────────
+    lines += [
+        '=' * 80,
+        'SUMMARY TABLE',
+        '=' * 80,
+        f'  {"Measure":<32} {"Grouping":<25} {"Test":<14} {"Result"}',
+        '  ' + '-' * 80,
+    ]
+    for row in summary_rows:
+        lines.append(f'  {row[0]:<32} {row[1]:<25} {row[2]:<14} {row[3]}')
+
+    lines += [
+        '',
+        'NOTE: Shapiro-Wilk has low power with small n — a non-significant result',
+        '      does not guarantee normality. Visual inspection (Q-Q plots) is advised.',
+        '',
+    ]
+
+    report = '\n'.join(lines)
+    if save_path is not None:
+        Path(save_path).write_text(report, encoding='utf-8')
+        print(f'[OK] Lick normality report saved -> {save_path}')
     return report
 
 
@@ -3755,14 +3882,21 @@ def plot_fecal_qq(
                             fontsize=8, color='gray')
                     continue
 
-                # Compute Q-Q coordinates via scipy.stats.probplot
-                (osm, osr), (slope, intercept, _r) = stats.probplot(sub, dist='norm')
-                ax.scatter(osm, osr, s=20, color='steelblue', alpha=0.8, zorder=3)
+                n_sub = len(sub)
+                (osm, osr), (slope, intercept, _r) = stats.probplot(sub, dist='norm',
+                                                                      fit=True)
 
-                # Reference line fitted to 1st–3rd quartile range
+                # 95% pointwise CI via Beta distribution of order statistics
+                k = np.arange(1, n_sub + 1)
+                p_lo = np.clip(stats.beta.ppf(0.025, k, n_sub - k + 1), 1e-10, 1 - 1e-10)
+                p_hi = np.clip(stats.beta.ppf(0.975, k, n_sub - k + 1), 1e-10, 1 - 1e-10)
+                ci_lo = slope * stats.norm.ppf(p_lo) + intercept
+                ci_hi = slope * stats.norm.ppf(p_hi) + intercept
+                ax.fill_between(osm, ci_lo, ci_hi, alpha=0.15, color='crimson', zorder=1)
                 x_line = np.array([osm[0], osm[-1]])
                 ax.plot(x_line, slope * x_line + intercept,
                         color='crimson', linewidth=1.2, zorder=2)
+                ax.scatter(osm, osr, s=20, color='steelblue', alpha=0.8, zorder=3)
 
                 ax.spines['top'].set_visible(False)
                 ax.spines['right'].set_visible(False)
@@ -4546,9 +4680,10 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print(" 10. Fecal normality      -- Shapiro-Wilk tests on fecal counts (raw & sqrt); Friedman recommendation")
     print(" 11. Statistical registry -- Print/save documentation of every test: variables, library, parameters")
     print(" 12. Run all (1-11)")
+    print(" 13. Lick normality      -- Shapiro-Wilk & Levene's tests on all lick measures (excl. fecal)")
     print()
 
-    user_input = input("Select option (1-12) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-13) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -5048,6 +5183,21 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             print(registry_report)
         except Exception as e:
             print(f"  [WARNING] Registry generation failed: {e}")
+            import traceback; traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 13: Lick normality tests (standalone)
+    # ------------------------------------------------------------------ #
+    if user_input == '13':
+        print("\n" + "=" * 80)
+        print("RUNNING: Lick Measures — Shapiro-Wilk & Levene's normality tests")
+        print("=" * 80)
+        try:
+            norm_rpt_path = Path(f"0v2_lick_normality_{timestamp}.txt")
+            norm_report = generate_lick_normality_report(cohorts, save_path=norm_rpt_path)
+            print(norm_report)
+        except Exception as e:
+            print(f"  [WARNING] Lick normality report failed: {e}")
             import traceback; traceback.print_exc()
 
     print("\n" + "=" * 80)
