@@ -3457,10 +3457,18 @@ def generate_lick_normality_qq_plots(
                     fontsize=9, color='gray')
         else:
             (osm, osr), (slope, intercept, _r) = stats.probplot(residuals, dist='norm')
-            ax.scatter(osm, osr, s=30, color='steelblue', alpha=0.85, zorder=3)
+
+            # 95% pointwise CI via Beta distribution of order statistics
+            k = np.arange(1, n + 1)
+            p_lo = np.clip(stats.beta.ppf(0.025, k, n - k + 1), 1e-10, 1 - 1e-10)
+            p_hi = np.clip(stats.beta.ppf(0.975, k, n - k + 1), 1e-10, 1 - 1e-10)
+            ci_lo = slope * stats.norm.ppf(p_lo) + intercept
+            ci_hi = slope * stats.norm.ppf(p_hi) + intercept
+            ax.fill_between(osm, ci_lo, ci_hi, alpha=0.15, color='crimson', zorder=1)
             x_line = np.array([osm[0], osm[-1]])
             ax.plot(x_line, slope * x_line + intercept,
                     color='crimson', linewidth=1.3, zorder=2)
+            ax.scatter(osm, osr, s=30, color='steelblue', alpha=0.85, zorder=3)
 
             # Annotate with Shapiro-Wilk result
             if n <= 5000:
