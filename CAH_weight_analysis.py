@@ -4802,6 +4802,114 @@ def _omnibus_summary_table(measures: list, all_results: list, effect_labels: lis
 	return "\n".join(lines)
 
 
+def generate_cah_normality_qq_plots(
+	df: pd.DataFrame,
+	measures: list,
+	use_weeks: bool = True,
+	save_dir: Optional[Path] = None,
+	show: bool = False,
+) -> None:
+	"""Generate Q-Q plots of model residuals for each weight measure.
+
+	Produces one SVG figure per measure showing a single Q-Q panel of the
+	pooled within-subject residuals:
+
+	  residual_ij = y_ij - subject_mean_i - week_mean_j + grand_mean
+
+	Week is the within-subjects factor; CA% is between-subjects (each animal
+	has only one CA% level and cannot enter the within-subjects error term).
+
+	Parameters
+	----------
+	df         : cleaned CAH DataFrame (output of clean_cah_dataframe / add_week_column)
+	measures   : list of measure column names (e.g. ["Total Change", "Daily Change"])
+	use_weeks  : if True, use weekly averages (one row per animal × week)
+	save_dir   : directory to save SVG files (created if absent).
+	             If None the figures are only shown (requires show=True).
+	show       : whether to call plt.show() for each figure
+	"""
+	if save_dir is not None:
+		Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+	def _get_weekly_data(measure: str) -> pd.DataFrame:
+		"""Return one row per animal × week (the within-subjects repeated measures)."""
+		dm = df.copy()
+		if use_weeks:
+			dm = average_by_week(dm, measure=measure)
+		return dm
+
+	def _rm_residuals(dm: pd.DataFrame, col: str) -> np.ndarray:
+		"""Within-subjects residuals: y_ij - subject_mean_i - week_mean_j + grand_mean.
+		Week is the within-subjects factor; CA% is between (not used here)."""
+		sub = dm[['ID', 'Week', col]].dropna().copy()
+		grand = sub[col].mean()
+		sub['_subj_mean'] = sub.groupby('ID')[col].transform('mean')
+		sub['_week_mean'] = sub.groupby('Week')[col].transform('mean')
+		return (sub[col] - sub['_subj_mean'] - sub['_week_mean'] + grand).values
+
+	for measure in measures:
+		dm = _get_weekly_data(measure)
+		residuals = _rm_residuals(dm, measure)
+		n = len(residuals)
+
+		fig, ax = plt.subplots(figsize=(5, 4.5))
+		fig.suptitle(
+			f'Q-Q Plot (residuals) \u2014 {measure}',
+			fontsize=13, fontweight='bold',
+		)
+		ax.set_xlabel('Theoretical quantiles', fontsize=10)
+		ax.set_ylabel('Model residuals', fontsize=10)
+		ax.set_title(
+			f'Pooled within-subject residuals  (n={n})',
+			fontsize=10,
+		)
+		ax.spines['top'].set_visible(False)
+		ax.spines['right'].set_visible(False)
+
+		if n < 3:
+			ax.text(0.5, 0.5, 'n < 3\ninsufficient data',
+			        ha='center', va='center', transform=ax.transAxes,
+			        fontsize=9, color='gray')
+		else:
+			(osm, osr), (slope, intercept, _r) = stats.probplot(residuals, dist='norm')
+
+			# 95% pointwise CI via Beta distribution of order statistics
+			k = np.arange(1, n + 1)
+			p_lo = np.clip(stats.beta.ppf(0.025, k, n - k + 1), 1e-10, 1 - 1e-10)
+			p_hi = np.clip(stats.beta.ppf(0.975, k, n - k + 1), 1e-10, 1 - 1e-10)
+			ci_lo = slope * stats.norm.ppf(p_lo) + intercept
+			ci_hi = slope * stats.norm.ppf(p_hi) + intercept
+			ax.fill_between(osm, ci_lo, ci_hi, alpha=0.15, color='crimson', zorder=1)
+			x_line = np.array([osm[0], osm[-1]])
+			ax.plot(x_line, slope * x_line + intercept,
+			        color='crimson', linewidth=1.3, zorder=2)
+			ax.scatter(osm, osr, s=30, color='steelblue', alpha=0.85, zorder=3)
+
+			# Annotate with Shapiro-Wilk result
+			if n <= 5000:
+				sw_stat, sw_p = stats.shapiro(residuals)
+				sig = '***' if sw_p < 0.001 else '**' if sw_p < 0.01 else '*' if sw_p < 0.05 else 'ns'
+				ax.annotate(
+					f'SW W={sw_stat:.3f}, p={sw_p:.4f} [{sig}]',
+					xy=(0.03, 0.96), xycoords='axes fraction',
+					fontsize=8, va='top',
+					bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.7),
+				)
+
+		fig.tight_layout()
+
+		if save_dir is not None:
+			safe_name = measure.replace(' ', '_').lower()
+			fname = f'cah_qq_resid_{safe_name}.svg'
+			fig.savefig(Path(save_dir) / fname, format='svg', dpi=200, bbox_inches='tight')
+			print(f'[OK] Q-Q plot saved -> {Path(save_dir) / fname}')
+
+		if show:
+			plt.show()
+		else:
+			plt.close(fig)
+
+
 def main():
 	"""
 	Main function: Load, clean, and summarize CAH cohort data.
@@ -4872,7 +4980,7 @@ def main():
   [7]  2-Way Mixed ANOVA — CA% × {time} (all animals, sex collapsed){week_only}
   [8]  Slope analysis — rate of weight change between CA% groups
   [9]  Interaction plots for significant effects
-  [N]  Normality tests — Shapiro-Wilk & Levene's (both measures, all groups)
+  [N]  Normality tests — Shapiro-Wilk (residuals), Levene's & Q-Q plots
   [A]  Run ALL analyses (1-8) and save all reports
   [Q]  Quit
 ================================================================================"""
@@ -5305,11 +5413,26 @@ def main():
 			report_n += "CAH COHORT — NORMALITY & VARIANCE HOMOGENEITY TESTS\n"
 			report_n += "=" * W + "\n"
 			report_n += f"Generated  : {ts}\n"
-			report_n += f"Tests      : Shapiro-Wilk (normality per group), Levene (variance homogeneity)\n"
-			report_n += f"Groupings  : Overall, by CA%, by Sex, by Sex × CA%\n"
-			report_n += f"Measures   : {', '.join(measures_to_analyze)}\n\n"
+			report_n += f"Tests      : Shapiro-Wilk on model residuals, Levene (variance homogeneity)\n"
+			report_n += f"Design     : 2-Way Mixed ANOVA — Week (within) × CA% (between)\n"
+			report_n += f"Measures   : {', '.join(measures_to_analyze)}\n"
+			report_n += "\n"
+			report_n += "Normality is tested on MODEL RESIDUALS, not raw data.\n"
+			report_n += "  Residual = y_ij - subject_mean_i - week_mean_j + grand_mean\n"
+			report_n += "  (subject = animal ID, condition = Week)\n"
+			report_n += "  Week is the within-subjects factor; CA% is between-subjects (each\n"
+			report_n += "  animal has only one CA% level, so CA% cannot enter the within-\n"
+			report_n += "  subjects error term). Residuals remove subject and week main effects.\n\n"
 
-			# Grand-average per animal (avoids repeated-measures inflation of n)
+			def _rm_residuals_cah(df_long: pd.DataFrame, col: str) -> pd.Series:
+				"""Within-subjects residuals for Week (within) × CA% (between) mixed ANOVA:
+				y_ij - subject_mean_i - week_mean_j + grand_mean."""
+				sub = df_long[['ID', 'Week', col]].dropna().copy()
+				grand = sub[col].mean()
+				sub['_subj_mean'] = sub.groupby('ID')[col].transform('mean')
+				sub['_week_mean'] = sub.groupby('Week')[col].transform('mean')
+				return sub[col] - sub['_subj_mean'] - sub['_week_mean'] + grand
+
 			summary_rows = []
 
 			for measure in measures_to_analyze:
@@ -5318,40 +5441,32 @@ def main():
 
 				report_n += f"\n{thick}\n  MEASURE: {measure}\n{thick}\n"
 
-				# ── Shapiro-Wilk ──────────────────────────────────────────
-				report_n += "\n  SHAPIRO-WILK TEST (H₀: data are normally distributed)\n"
+				# ── Shapiro-Wilk on model residuals ──────────────────────
+				report_n += "\n  SHAPIRO-WILK ON MODEL RESIDUALS (H\u2080: residuals are normally distributed)\n"
 				report_n += "  " + "-" * 74 + "\n"
 
-				groupings = {
-					"Overall":       avg_dm[measure].dropna(),
-					"CA% = 0":       avg_dm.loc[avg_dm["CA (%)"] == 0,  measure].dropna(),
-					"CA% = 2":       avg_dm.loc[avg_dm["CA (%)"] == 2,  measure].dropna(),
-					"Sex = M":       avg_dm.loc[avg_dm["Sex"] == "M",   measure].dropna(),
-					"Sex = F":       avg_dm.loc[avg_dm["Sex"] == "F",   measure].dropna(),
-					"M × CA% = 0":   avg_dm.loc[(avg_dm["Sex"] == "M") & (avg_dm["CA (%)"] == 0), measure].dropna(),
-					"M × CA% = 2":   avg_dm.loc[(avg_dm["Sex"] == "M") & (avg_dm["CA (%)"] == 2), measure].dropna(),
-					"F × CA% = 0":   avg_dm.loc[(avg_dm["Sex"] == "F") & (avg_dm["CA (%)"] == 0), measure].dropna(),
-					"F × CA% = 2":   avg_dm.loc[(avg_dm["Sex"] == "F") & (avg_dm["CA (%)"] == 2), measure].dropna(),
-				}
-
-				gc = max(len(k) for k in groupings) + 2
-				report_n += f"  {'Group':<{gc}}{'n':<5}{'W':<10}{'p':<12}{'sig':<6}{'Normal?'}\n"
-				report_n += "  " + "-" * 74 + "\n"
-				sw_details = {}
-				for grp_name, vals in groupings.items():
-					n = len(vals)
-					if n < 3:
-						report_n += f"  {grp_name:<{gc}}{n:<5}{'—':<10}{'—':<12}{'—':<6}insufficient n\n"
-						sw_details[grp_name] = (n, np.nan, np.nan)
-						continue
-					W_stat, p_val = stats.shapiro(vals)
+				# Use weekly data (dm): Week is within-subjects, so residuals must be
+				# computed across weeks (one value per animal × week), not avg_dm.
+				residuals = _rm_residuals_cah(dm, measure)
+				n_res = len(residuals.dropna())
+				if n_res < 3:
+					report_n += f"  Pooled residuals: n={n_res} \u2014 too few observations, skipping.\n"
+					sw_details = {}
+				else:
+					if n_res > 5000:
+						W_stat, p_val = stats.normaltest(residuals.dropna())
+						test_name = "D\u2019Agostino-Pearson k\u00b2"
+					else:
+						W_stat, p_val = stats.shapiro(residuals.dropna())
+						test_name = "Shapiro-Wilk W"
 					stars = _sig_stars(p_val)
-					normal = "YES" if p_val > 0.05 else "NO *"
-					report_n += f"  {grp_name:<{gc}}{n:<5}{W_stat:<10.4f}{_fmt_p(p_val):<12}{stars:<6}{normal}\n"
-					sw_details[grp_name] = (n, W_stat, p_val)
+					normal_str = "NORMAL (p \u2265 0.05)" if p_val > 0.05 else "NON-NORMAL (p < 0.05)"
+					report_n += f"  Pooled residuals (n={n_res}):\n"
+					report_n += f"    {test_name} = {W_stat:.4f},  p = {_fmt_p(p_val)}  [{stars}]  \u2192  {normal_str}\n"
+					sw_details = {'Pooled residuals': (n_res, W_stat, p_val)}
 					summary_rows.append({
-						'Measure': measure, 'Group': grp_name, 'Test': 'Shapiro-Wilk',
-						'n': n, 'Statistic': W_stat, 'p': p_val, 'Normal': p_val > 0.05
+						'Measure': measure, 'Group': 'Pooled residuals', 'Test': 'Shapiro-Wilk',
+						'n': n_res, 'Statistic': W_stat, 'p': p_val, 'Normal': p_val > 0.05
 					})
 
 				# ── Levene's test (variance homogeneity) ──────────────────
@@ -5393,7 +5508,8 @@ def main():
 			report_n += "\n" + "=" * W + "\n"
 			report_n += "  SUMMARY TABLE\n"
 			report_n += "=" * W + "\n"
-			report_n += "  Note: Shapiro-Wilk p > 0.05 → normality assumption satisfied.\n"
+			report_n += "  Note: Shapiro-Wilk on residuals p > 0.05 → normality assumption satisfied.\n"
+			report_n += "        Residuals = y_ij - subject_mean - week_mean + grand_mean.\n"
 			report_n += "        Levene's p > 0.05 → homogeneity of variance satisfied.\n"
 			report_n += "        Stars on p-value indicate the assumption is VIOLATED.\n\n"
 
@@ -5411,6 +5527,21 @@ def main():
 
 			report_n += "\n" + "=" * W + "\nEND OF REPORT\n" + "=" * W + "\n"
 			_save_report(report_n, _fname("normality_tests"))
+
+			# ── Q-Q plots of model residuals ──────────────────────────────
+			save_qq  = input("\nSave Q-Q plots as SVG files? (y/n, default=y): ").strip().lower() != 'n'
+			show_qq  = input("Display Q-Q plots interactively? (y/n, default=n): ").strip().lower() == 'y'
+			if save_qq or show_qq:
+				qq_dir = out_dir / f"cah_normality_qq_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+				generate_cah_normality_qq_plots(
+					df=df,
+					measures=measures_to_analyze,
+					use_weeks=use_weeks,
+					save_dir=qq_dir if save_qq else None,
+					show=show_qq,
+				)
+				if save_qq:
+					print(f"Q-Q plots saved to: {qq_dir.resolve()}")
 			continue
 
 		# ── 'A' — clean-up message ────────────────────────────────────────────
