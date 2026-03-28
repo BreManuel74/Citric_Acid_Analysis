@@ -4980,7 +4980,7 @@ def main():
   [7]  2-Way Mixed ANOVA — CA% × {time} (all animals, sex collapsed){week_only}
   [8]  Slope analysis — rate of weight change between CA% groups
   [9]  Interaction plots for significant effects
-  [N]  Normality tests — Shapiro-Wilk (residuals), Levene's & Q-Q plots
+  [N]  Normality tests — Shapiro-Wilk (residuals), Levene's, Mauchly's W & Q-Q plots
   [A]  Run ALL analyses (1-8) and save all reports
   [Q]  Quit
 ================================================================================"""
@@ -5413,7 +5413,7 @@ def main():
 			report_n += "CAH COHORT — NORMALITY & VARIANCE HOMOGENEITY TESTS\n"
 			report_n += "=" * W + "\n"
 			report_n += f"Generated  : {ts}\n"
-			report_n += f"Tests      : Shapiro-Wilk on model residuals, Levene (variance homogeneity)\n"
+			report_n += f"Tests      : Shapiro-Wilk on model residuals, Levene's (between-subjects variance), Mauchly's W (within-subjects sphericity)\n"
 			report_n += f"Design     : 2-Way Mixed ANOVA — Week (within) × CA% (between)\n"
 			report_n += f"Measures   : {', '.join(measures_to_analyze)}\n"
 			report_n += "\n"
@@ -5504,13 +5504,52 @@ def main():
 						'p': lev_p, 'Normal': lev_p > 0.05
 					})
 
+				# ── Mauchly's W test for sphericity ──────────────────────────
+				report_n += "\n  MAUCHLY'S W TEST FOR SPHERICITY (H\u2080: variances of week-difference scores are equal)\n"
+				report_n += "  (Applicable to Week, the within-subjects factor)\n"
+				report_n += "  " + "-" * 74 + "\n"
+
+				n_weeks = int(dm['Week'].nunique())
+				if n_weeks < 3:
+					report_n += f"  Only {n_weeks} week(s) detected — sphericity is trivially met with < 3 levels.\n"
+					report_n += "  Mauchly's W is not applicable (requires \u2265 3 within-subjects levels).\n"
+				elif not HAS_PINGOUIN:
+					report_n += "  pingouin not available — Mauchly's W requires pingouin.\n"
+				else:
+					try:
+						sph = pg.sphericity(
+							data=dm.dropna(subset=['ID', 'Week', measure]),
+							dv=measure,
+							within='Week',
+							subject='ID',
+						)
+						w_sph   = float(sph.W)
+						chi2_sph = float(sph.chi2)
+						dof_sph  = int(sph.dof)
+						p_sph   = float(sph.pval)
+						stars   = _sig_stars(p_sph)
+						spher_ok = "MET (p \u2265 0.05)" if p_sph > 0.05 else "VIOLATED (p < 0.05)"
+						report_n += (f"  W = {w_sph:.4f},  \u03c7\u00b2({dof_sph}) = {chi2_sph:.4f},"
+						             f"  p = {_fmt_p(p_sph)}  [{stars}]  \u2192  {spher_ok}\n")
+						if p_sph <= 0.05:
+							report_n += ("  \u26a0 Sphericity violated: Greenhouse-Geisser correction"
+							             " is automatically applied in Option 7.\n")
+						summary_rows.append({
+							'Measure': measure, 'Group': 'Week (within-subjects)', 'Test': "Mauchly's W",
+							'n': len(dm.dropna(subset=[measure])), 'Statistic': w_sph,
+							'p': p_sph, 'Normal': p_sph > 0.05
+						})
+					except Exception as e:
+						report_n += f"  Could not compute Mauchly's W: {e}\n"
+
 			# ── Summary table ──────────────────────────────────────────────
 			report_n += "\n" + "=" * W + "\n"
 			report_n += "  SUMMARY TABLE\n"
 			report_n += "=" * W + "\n"
 			report_n += "  Note: Shapiro-Wilk on residuals p > 0.05 → normality assumption satisfied.\n"
 			report_n += "        Residuals = y_ij - subject_mean - week_mean + grand_mean.\n"
-			report_n += "        Levene's p > 0.05 → homogeneity of variance satisfied.\n"
+			report_n += "        Levene's p > 0.05 → between-subjects variance homogeneity satisfied.\n"
+			report_n += "        Mauchly's W p > 0.05 → within-subjects sphericity assumption satisfied.\n"
 			report_n += "        Stars on p-value indicate the assumption is VIOLATED.\n\n"
 
 			if summary_rows:
