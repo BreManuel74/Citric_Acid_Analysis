@@ -9624,18 +9624,50 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 except Exception as e:
                     print(f"  [WARNING] Plot {fname} failed: {e}")
 
-            # Cohort x Week interaction line plots (weekly means ± SEM per cohort)
-            print("\n  Generating Cohort x Week interaction plots (by week)...")
+            # Cohort x Week weekly mean plots (+/- SEM) -- same approach as ramp menus
+            print("\n  Generating Cohort x Week weekly mean plots (+/- SEM)...")
             try:
-                w_figs = plot_weight_interaction_effects(
-                    cohorts,
-                    measures=available_measures,
-                    save_dir=plot_dir,
-                    show=False,
-                )
-                figs.update(w_figs)
+                combined_wk = combined[combined['Day'] >= 0].copy()
+                combined_wk = _add_week_column_across_cohorts(combined_wk)
+
+                for measure in available_measures:
+                    fname_wk = "cohort_week_{}_all.svg".format(
+                        measure.lower().replace(' ', '_')
+                    )
+                    try:
+                        fig_wk = plot_weekly_means_by_cohort(
+                            combined_wk,
+                            measure=measure,
+                            cohort_metadata=None,
+                            by_sex=False,
+                            title="{} by Cohort Across Weeks (0% vs 2%)".format(measure),
+                            save_path=plot_dir / fname_wk,
+                            show=False,
+                        )
+                        if fig_wk:
+                            figs[fname_wk] = fig_wk
+                    except Exception as e:
+                        print(f"  [WARNING] Cohort x Week plot (all) for {measure} failed: {e}")
+
+                    fname_wk_sex = "cohort_week_{}_by_sex.svg".format(
+                        measure.lower().replace(' ', '_')
+                    )
+                    try:
+                        fig_wk_sex = plot_weekly_means_by_cohort(
+                            combined_wk,
+                            measure=measure,
+                            cohort_metadata=None,
+                            by_sex=True,
+                            title="{} by Cohort and Sex Across Weeks (0% vs 2%)".format(measure),
+                            save_path=plot_dir / fname_wk_sex,
+                            show=False,
+                        )
+                        if fig_wk_sex:
+                            figs[fname_wk_sex] = fig_wk_sex
+                    except Exception as e:
+                        print(f"  [WARNING] Cohort x Week plot (by sex) for {measure} failed: {e}")
             except Exception as e:
-                print(f"  [WARNING] Weight interaction plots failed: {e}")
+                print(f"  [WARNING] Cohort x Week plots failed: {e}")
 
             print(f"\n[OK] {len(figs)} plots saved -> {plot_dir}")
 
@@ -10019,7 +10051,7 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         fig = plot_weekly_means_by_cohort(
                             combined_wk,
                             measure=measure,
-                            cohort_metadata=cohort_metadata or None,
+                            cohort_metadata=None,
                             by_sex=False,
                             title="{} by Cohort Across Weeks (0% vs Ramp)".format(measure),
                             save_path=plot_dir / fname,
@@ -10038,7 +10070,7 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         fig_sex = plot_weekly_means_by_cohort(
                             combined_wk,
                             measure=measure,
-                            cohort_metadata=cohort_metadata or None,
+                            cohort_metadata=None,
                             by_sex=True,
                             title="{} by Cohort and Sex Across Weeks (0% vs Ramp)".format(measure),
                             save_path=plot_dir / fname_sex,
@@ -10386,7 +10418,7 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         fig = plot_weekly_means_by_cohort(
                             combined_wk,
                             measure=measure,
-                            cohort_metadata=cohort_metadata or None,
+                            cohort_metadata=None,
                             by_sex=False,
                             title="{} by Cohort Across Weeks (2% vs Ramp)".format(measure),
                             save_path=plot_dir / fname,
@@ -10404,7 +10436,7 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         fig_sex = plot_weekly_means_by_cohort(
                             combined_wk,
                             measure=measure,
-                            cohort_metadata=cohort_metadata or None,
+                            cohort_metadata=None,
                             by_sex=True,
                             title="{} by Cohort and Sex Across Weeks (2% vs Ramp)".format(measure),
                             save_path=plot_dir / fname_sex,
@@ -10756,7 +10788,7 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         fig = plot_weekly_means_by_cohort(
                             combined_wk,
                             measure=measure,
-                            cohort_metadata=cohort_metadata or None,
+                            cohort_metadata=None,
                             by_sex=False,
                             title="{} by Cohort Across Weeks (0% vs 2% vs Ramp)".format(measure),
                             save_path=plot_dir / fname,
@@ -10774,7 +10806,7 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         fig_sex = plot_weekly_means_by_cohort(
                             combined_wk,
                             measure=measure,
-                            cohort_metadata=cohort_metadata or None,
+                            cohort_metadata=None,
                             by_sex=True,
                             title="{} by Cohort and Sex Across Weeks (0% vs 2% vs Ramp)".format(measure),
                             save_path=plot_dir / fname_sex,
