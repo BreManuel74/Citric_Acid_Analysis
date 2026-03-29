@@ -5431,6 +5431,232 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("=" * 80)
 
 
+def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
+    """
+    Interactive plot menu for 2% nonramp vs Ramp lick comparison.
+    Plots only — no ANOVAs (ramp CA% varies per week so cohort label is the
+    between-subjects factor, not CA%).
+    Plots are auto-saved with timestamps.
+    """
+    from datetime import datetime
+
+    MEASURES = ["Total_Licks", "Total_Bouts", "Avg_ILI", "Avg_Bout_Duration", "Licks_Per_Bout"]
+    combined_temp = combine_lick_cohorts(cohorts)
+    available_measures = [m for m in MEASURES if m in combined_temp.columns]
+    if not available_measures:
+        available_measures = MEASURES
+
+    print("\n" + "=" * 80)
+    print("2% NONRAMP vs RAMP \u2014 LICK PLOTS MENU")
+    print("=" * 80)
+    print("\nAll plots use Week as the time axis (Week 1 = first measurement week).")
+    print("Plots are automatically saved to the current directory.")
+    print(f"\nAvailable measures : {available_measures}")
+    print()
+    print("  1. Lick plots           -- Mean lick measure by cohort over weeks (collapsed across sex)")
+    print("  2. Sex-split plots      -- Mean lick measure split by cohort \u00d7 sex")
+    print("  3. Frontloading plots   -- % licks in first 5 min & time to 50% licks by cohort")
+    print("  4. Run all (1-3)")
+    print()
+
+    user_input = input("Select option (1-4) or 'n' to skip: ").strip()
+    if user_input.lower() == 'n':
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_all = (user_input == '4')
+
+    # ------------------------------------------------------------------ #
+    # Option 1: Lick plots by cohort (collapsed across sex)
+    # ------------------------------------------------------------------ #
+    if user_input == '1' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Lick measure plots by cohort (collapsed across sex)")
+            print("=" * 80)
+
+            plot_dir = Path(f"2vramp_lick_plots_{timestamp}")
+            plot_dir.mkdir(exist_ok=True)
+
+            for measure in available_measures:
+                try:
+                    fig = plot_lick_measure_by_cohort(
+                        cohorts,
+                        measure=measure,
+                        group_by_sex=False,
+                        save_path=plot_dir / f"lick_{measure.lower()}_by_cohort.svg",
+                        show=False,
+                    )
+                    if fig:
+                        import matplotlib.pyplot as _plt
+                        _plt.close(fig)
+                except Exception as e:
+                    print(f"  [WARNING] Plot for {measure} failed: {e}")
+
+            print(f"\n[OK] Plots saved -> {plot_dir}")
+            show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                import matplotlib.pyplot as _plt
+                _plt.show()
+            else:
+                try:
+                    import matplotlib.pyplot as _plt
+                    _plt.close('all')
+                except Exception:
+                    pass
+
+    # ------------------------------------------------------------------ #
+    # Option 2: Sex-split lick plots
+    # ------------------------------------------------------------------ #
+    if user_input == '2' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Lick measure plots by cohort \u00d7 sex")
+            print("=" * 80)
+
+            plot_dir = Path(f"2vramp_lick_plots_{timestamp}")
+            plot_dir.mkdir(exist_ok=True)
+
+            for measure in available_measures:
+                try:
+                    fig = plot_lick_measure_by_cohort(
+                        cohorts,
+                        measure=measure,
+                        group_by_sex=True,
+                        save_path=plot_dir / f"lick_{measure.lower()}_by_cohort_sex.svg",
+                        show=False,
+                    )
+                    if fig:
+                        import matplotlib.pyplot as _plt
+                        _plt.close(fig)
+                except Exception as e:
+                    print(f"  [WARNING] Sex-split plot for {measure} failed: {e}")
+
+            print(f"\n[OK] Sex-split plots saved -> {plot_dir}")
+            show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                import matplotlib.pyplot as _plt
+                _plt.show()
+            else:
+                try:
+                    import matplotlib.pyplot as _plt
+                    _plt.close('all')
+                except Exception:
+                    pass
+
+    # ------------------------------------------------------------------ #
+    # Option 3: Frontloading line plots (grouped by Cohort label, not CA%)
+    # ------------------------------------------------------------------ #
+    if user_input == '3' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Frontloading line plots -- % licks in first 5 min & time to 50%")
+            print("=" * 80)
+
+            combined_fl = combine_lick_cohorts(cohorts)
+            if 'Week' not in combined_fl.columns:
+                combined_fl = add_week_column(combined_fl)
+
+            fl_plot_dir = Path(f"2vramp_lick_frontloading_plots_{timestamp}")
+            fl_plot_dir.mkdir(exist_ok=True)
+
+            _FL_MEASURES = [
+                ("First_5min_Lick_Pct",  "% Licks in First 5 min",  (0, 100)),
+                ("Time_to_50pct_Licks",  "Time to 50% Licks (min)", (0, None)),
+            ]
+
+            _COHORT_COLORS = [
+                {'line': 'steelblue',  'face': 'lightblue',  'edge': 'steelblue'},
+                {'line': 'darkorange', 'face': 'moccasin',   'edge': 'darkorange'},
+                {'line': 'darkgreen',  'face': 'lightgreen', 'edge': 'darkgreen'},
+                {'line': 'purple',     'face': 'plum',       'edge': 'purple'},
+            ]
+
+            # Group by Cohort label (not CA%, since ramp CA% varies per week)
+            if 'Cohort' in combined_fl.columns:
+                cohort_labels_fl = sorted(combined_fl['Cohort'].dropna().unique())
+            else:
+                cohort_labels_fl = list(cohorts.keys())
+
+            n_fl_plots = 0
+            for col_name, y_label, (y_min, y_max) in _FL_MEASURES:
+                if col_name not in combined_fl.columns:
+                    print(f"  [WARNING] Column '{col_name}' not found -- skipping plot.")
+                    continue
+                try:
+                    fig_fl, ax_fl = plt.subplots(figsize=(9, 6))
+                    weeks_fl = sorted(combined_fl['Week'].dropna().unique())
+
+                    for idx, cohort_lbl in enumerate(cohort_labels_fl):
+                        grp = combined_fl[combined_fl['Cohort'] == cohort_lbl]
+                        wk_stats = (
+                            grp.groupby('Week')[col_name]
+                            .agg(['mean', 'sem', 'count'])
+                            .reset_index()
+                        )
+                        n_per_wk = int(wk_stats['count'].iloc[0]) if len(wk_stats) > 0 else 0
+                        c = _COHORT_COLORS[idx % len(_COHORT_COLORS)]
+                        lbl = f"{cohort_lbl} (n={n_per_wk}/week)"
+                        ax_fl.errorbar(
+                            wk_stats['Week'], wk_stats['mean'],
+                            yerr=wk_stats['sem'],
+                            label=lbl, marker='o', markersize=8,
+                            linewidth=2, capsize=5,
+                            color=c['line'],
+                            markerfacecolor=c['face'],
+                            markeredgecolor=c['edge'],
+                        )
+
+                    ax_fl.set_xlabel('Week', fontsize=12, weight='bold')
+                    ax_fl.set_ylabel(f'{y_label} (mean \u00b1 SEM)', fontsize=12, weight='bold')
+                    ax_fl.set_title(
+                        f'{y_label} Across Weeks by Cohort (mean \u00b1 SEM)',
+                        fontsize=13, weight='bold'
+                    )
+                    ax_fl.set_xticks(weeks_fl)
+                    ax_fl.set_xticklabels([str(int(w) + 1) for w in weeks_fl])
+                    ax_fl.set_ylim(bottom=y_min if y_min is not None else ax_fl.get_ylim()[0])
+                    if y_max is not None:
+                        ax_fl.set_ylim(top=y_max)
+                    ax_fl.legend(loc='best', fontsize=10)
+                    ax_fl.spines['top'].set_visible(False)
+                    ax_fl.spines['right'].set_visible(False)
+                    ax_fl.tick_params(direction='in', which='both', length=5)
+                    fig_fl.tight_layout()
+
+                    svg_path = fl_plot_dir / f"frontloading_{col_name}.svg"
+                    fig_fl.savefig(svg_path, format='svg', dpi=200, bbox_inches='tight')
+                    plt.close(fig_fl)
+                    print(f"[OK] Saved -> {svg_path}")
+                    n_fl_plots += 1
+                except Exception as e:
+                    print(f"  [WARNING] Plot for {col_name} failed: {e}")
+                    import traceback; traceback.print_exc()
+
+            if n_fl_plots:
+                print(f"\n[OK] {n_fl_plots} frontloading plot(s) saved -> {fl_plot_dir}")
+            show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                import matplotlib.pyplot as _plt
+                _plt.show()
+            else:
+                try:
+                    import matplotlib.pyplot as _plt
+                    _plt.close('all')
+                except Exception:
+                    pass
+
+    print("\n" + "=" * 80)
+    print("2% nonramp vs Ramp lick plots complete.")
+    print("=" * 80)
+
+
 def _run_lick_unknown_menu(cohorts: Dict[str, pd.DataFrame], comparison: str) -> None:
     """Placeholder menu for comparison types beyond 0v2 (ramp comparisons)."""
     label_map = {
@@ -5623,6 +5849,8 @@ if __name__ == "__main__":
         _run_lick_0v2_menu(cohorts)
     elif comparison == '0vramp':
         _run_lick_0vramp_menu(cohorts)
+    elif comparison == '2vramp':
+        _run_lick_2vramp_menu(cohorts)
     else:
         _run_lick_unknown_menu(cohorts, comparison)
 
