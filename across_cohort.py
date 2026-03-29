@@ -10549,6 +10549,376 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("=" * 80)
 
 
+def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
+    """
+    Interactive analysis menu for the 3-cohort comparison:
+    0% nonramp vs 2% nonramp vs Ramp.
+    All analyses use Week as the time axis.
+    Ramp Day 0 logic is identical to the 2-cohort ramp menus:
+      - Ramp Day column shifted +1 so Day 0 = first real measurement.
+      - Day 0 included in by-ID and by-cohort plots (raw weight valid).
+      - Day 0 excluded from by-sex, weekly-mean, and slope analyses.
+    """
+    from datetime import datetime
+
+    MEASURES = ["Total Change", "Daily Change"]
+
+    combined_temp = combine_cohorts_for_analysis(cohorts)
+    available_measures = [m for m in MEASURES if m in combined_temp.columns]
+
+    # Identify labels for each cohort
+    ramp_label = next((lbl for lbl in cohorts if 'ramp' in lbl.lower()), None)
+    zero_label = next(
+        (lbl for lbl in cohorts if '0%' in lbl.lower() and 'ramp' not in lbl.lower()),
+        None,
+    )
+    two_label = next(
+        (lbl for lbl in cohorts if '2%' in lbl.lower() and 'ramp' not in lbl.lower()),
+        None,
+    )
+
+    # Detect number of experiment weeks from data
+    try:
+        _tmp = clean_cohort(combined_temp.copy())
+        if 'Day' not in _tmp.columns:
+            _tmp = add_day_column_across_cohorts(_tmp)
+        _tmp = _add_week_column_across_cohorts(_tmp)
+        n_weeks = int(_tmp['Week'].dropna().max()) if 'Week' in _tmp.columns else 5
+    except Exception:
+        n_weeks = 5
+
+    # Build cohort_metadata with CA schedules for x-axis tick annotation.
+    # Ramp: Week 1 = 0%, Week 2 = 1%, Week 3 = 2%, ...
+    ramp_schedule = {w: w - 1 for w in range(1, n_weeks + 1)}
+    zero_schedule = {w: 0     for w in range(1, n_weeks + 1)}
+    two_schedule  = {w: 2     for w in range(1, n_weeks + 1)}
+    cohort_metadata: Dict[str, Dict] = {}
+    if zero_label:
+        cohort_metadata[zero_label] = {"ca_schedule": zero_schedule}
+    if two_label:
+        cohort_metadata[two_label] = {"ca_schedule": two_schedule}
+    if ramp_label:
+        cohort_metadata[ramp_label] = {"ca_schedule": ramp_schedule}
+
+    print("\n" + "=" * 80)
+    print("0% NONRAMP vs 2% NONRAMP vs RAMP \u2014 ANALYSIS MENU")
+    print("=" * 80)
+    print("\nAll analyses use Week as the time axis (Week 1 = first measurement week).")
+    print("Outputs are saved to a timestamped directory.")
+    print(f"\nAvailable measures : {available_measures}")
+    print(f"Cohorts present    : {list(cohorts.keys())}")
+    print(f"Weeks detected     : {n_weeks}")
+    if ramp_label and ramp_schedule:
+        print(f"Ramp CA schedule   : {ramp_schedule}")
+    print()
+    print("  1. Weight plots by ID     -- Total/Daily Change per animal across time")
+    print("  2. Weight plots by Sex    -- Total/Daily Change averaged by sex across time")
+    print("  3. Cohort x Week plots    -- Weekly group means (+/- SEM) per cohort")
+    print("  4. Behavioral plots       -- Nesting, Lethargy, Anxiety prevalence across weeks")
+    print("  5. Cohort-avg plots       -- Total/Daily Change averaged by cohort (CA%-agnostic)")
+    print("  6. Slope analysis         -- Per-animal fitted slopes within cohorts + between-cohort comparison")
+    print("  7. Run all (1-6)")
+    print()
+
+    user_input = input("Select option (1-7) or 'n' to skip: ").strip()
+    if user_input.lower() == 'n':
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_all = (user_input == '7')
+
+    plot_dir = Path(f"all3_plots_{timestamp}")
+
+    # ------------------------------------------------------------------ #
+    # Option 1: Weight plots by ID
+    # ------------------------------------------------------------------ #
+    if user_input == '1' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Weight plots by ID (Total Change and Daily Change)")
+            print("=" * 80)
+
+            combined = combine_cohorts_for_analysis(cohorts)
+            combined = clean_cohort(combined)
+            if 'Day' not in combined.columns:
+                combined = add_day_column_across_cohorts(combined)
+            if ramp_label and 'Cohort' in combined.columns:
+                ramp_mask = combined['Cohort'] == ramp_label
+                combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
+            combined = combined[combined['Day'] >= 0].copy()
+            # Ramp Day 0 included in by-ID plots; raw weight is valid to display.
+
+            plot_dir.mkdir(exist_ok=True)
+            figs = {}
+            for fname, fn in [
+                ("total_change_by_id", plot_total_change_by_id),
+                ("daily_change_by_id", plot_daily_change_by_id),
+            ]:
+                try:
+                    fig = fn(combined, save_path=plot_dir / f"{fname}.svg", show=False)
+                    if fig:
+                        figs[fname] = fig
+                except Exception as e:
+                    print(f"  [WARNING] Plot {fname} failed: {e}")
+
+            print(f"\n[OK] {len(figs)} plot(s) saved -> {plot_dir}")
+            show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                plt.show()
+            else:
+                plt.close('all')
+
+    # ------------------------------------------------------------------ #
+    # Option 2: Weight plots by Sex
+    # ------------------------------------------------------------------ #
+    if user_input == '2' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Weight plots by Sex (Total Change and Daily Change)")
+            print("=" * 80)
+
+            combined = combine_cohorts_for_analysis(cohorts)
+            combined = clean_cohort(combined)
+            if 'Day' not in combined.columns:
+                combined = add_day_column_across_cohorts(combined)
+            if ramp_label and 'Cohort' in combined.columns:
+                ramp_mask = combined['Cohort'] == ramp_label
+                combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
+            combined = combined[combined['Day'] >= 0].copy()
+            # Ramp Day 0 excluded from sex-averaged plots (no valid change baseline).
+            if ramp_label and 'Cohort' in combined.columns:
+                combined = combined[
+                    ~((combined['Cohort'] == ramp_label) & (combined['Day'] == 0))
+                ].copy()
+
+            plot_dir.mkdir(exist_ok=True)
+            figs = {}
+            for fname, fn in [
+                ("total_change_by_sex", plot_total_change_by_sex),
+                ("daily_change_by_sex", plot_daily_change_by_sex),
+            ]:
+                try:
+                    fig = fn(combined, save_path=plot_dir / f"{fname}.svg", show=False)
+                    if fig:
+                        figs[fname] = fig
+                except Exception as e:
+                    print(f"  [WARNING] Plot {fname} failed: {e}")
+
+            print(f"\n[OK] {len(figs)} plot(s) saved -> {plot_dir}")
+            show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                plt.show()
+            else:
+                plt.close('all')
+
+    # ------------------------------------------------------------------ #
+    # Option 3: Cohort x Week interaction plots
+    # ------------------------------------------------------------------ #
+    if user_input == '3' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Cohort x Week weekly mean plots (+/- SEM)")
+            print("=" * 80)
+
+            try:
+                combined_wk = combine_cohorts_for_analysis(cohorts)
+                combined_wk = clean_cohort(combined_wk)
+                if 'Day' not in combined_wk.columns:
+                    combined_wk = add_day_column_across_cohorts(combined_wk)
+                if ramp_label and 'Cohort' in combined_wk.columns:
+                    ramp_mask = combined_wk['Cohort'] == ramp_label
+                    combined_wk.loc[ramp_mask, 'Day'] = combined_wk.loc[ramp_mask, 'Day'] + 1
+                combined_wk = combined_wk[combined_wk['Day'] >= 0].copy()
+                # Ramp Day 0 excluded before week assignment (no valid change value).
+                if ramp_label and 'Cohort' in combined_wk.columns:
+                    combined_wk = combined_wk[
+                        ~((combined_wk['Cohort'] == ramp_label) & (combined_wk['Day'] == 0))
+                    ].copy()
+                combined_wk = _add_week_column_across_cohorts(combined_wk)
+            except Exception as e:
+                print(f"  [ERROR] Could not build cohort-week dataframe: {e}")
+                combined_wk = None
+
+            if combined_wk is not None:
+                plot_dir.mkdir(exist_ok=True)
+                figs = {}
+                for measure in available_measures:
+                    fname = "cohort_week_{}_all.svg".format(
+                        measure.lower().replace(' ', '_')
+                    )
+                    try:
+                        fig = plot_weekly_means_by_cohort(
+                            combined_wk,
+                            measure=measure,
+                            cohort_metadata=cohort_metadata or None,
+                            by_sex=False,
+                            title="{} by Cohort Across Weeks (0% vs 2% vs Ramp)".format(measure),
+                            save_path=plot_dir / fname,
+                            show=False,
+                        )
+                        if fig:
+                            figs[fname] = fig
+                    except Exception as e:
+                        print(f"  [WARNING] Cohort x Week plot (all) for {measure} failed: {e}")
+
+                    fname_sex = "cohort_week_{}_by_sex.svg".format(
+                        measure.lower().replace(' ', '_')
+                    )
+                    try:
+                        fig_sex = plot_weekly_means_by_cohort(
+                            combined_wk,
+                            measure=measure,
+                            cohort_metadata=cohort_metadata or None,
+                            by_sex=True,
+                            title="{} by Cohort and Sex Across Weeks (0% vs 2% vs Ramp)".format(measure),
+                            save_path=plot_dir / fname_sex,
+                            show=False,
+                        )
+                        if fig_sex:
+                            figs[fname_sex] = fig_sex
+                    except Exception as e:
+                        print(f"  [WARNING] Cohort x Week plot (by sex) for {measure} failed: {e}")
+
+                print(f"\n[OK] {len(figs)} Cohort x Week plot(s) saved -> {plot_dir}")
+                show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
+                if show_now == 'y':
+                    plt.show()
+                else:
+                    plt.close('all')
+
+    # ------------------------------------------------------------------ #
+    # Option 4: Behavioral plots
+    # ------------------------------------------------------------------ #
+    if user_input == '4' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Behavioral plots (Nesting, Lethargy, Anxiety by week)")
+            print("=" * 80)
+
+            plot_dir.mkdir(exist_ok=True)
+            try:
+                fig = plot_behavioral_metrics_by_cohort(
+                    cohorts,
+                    title="Behavioral Metrics: 0% vs 2% Nonramp vs Ramp \u2014 Across Weeks",
+                    save_path=plot_dir / "behavioral_metrics_by_cohort.svg",
+                    show=False,
+                )
+                if fig:
+                    print(
+                        f"\n[OK] Behavioral plot saved -> "
+                        f"{plot_dir / 'behavioral_metrics_by_cohort.svg'}"
+                    )
+            except Exception as e:
+                print(f"  [WARNING] Behavioral plot failed: {e}")
+
+            show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                plt.show()
+            else:
+                plt.close('all')
+
+    # ------------------------------------------------------------------ #
+    # Option 5: Cohort-averaged weight plots (CA%-agnostic)
+    # ------------------------------------------------------------------ #
+    if user_input == '5' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Cohort-averaged weight plots (Total Change and Daily Change)")
+            print("=" * 80)
+
+            combined = combine_cohorts_for_analysis(cohorts)
+            combined = clean_cohort(combined)
+            if 'Day' not in combined.columns:
+                combined = add_day_column_across_cohorts(combined)
+            if ramp_label and 'Cohort' in combined.columns:
+                ramp_mask = combined['Cohort'] == ramp_label
+                combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
+            combined = combined[combined['Day'] >= 0].copy()
+            # Ramp Day 0 included in cohort-avg plots (raw weight valid).
+
+            plot_dir.mkdir(exist_ok=True)
+            figs = {}
+            for fname, fn in [
+                ("total_change_by_cohort", plot_total_change_by_cohort),
+                ("daily_change_by_cohort", plot_daily_change_by_cohort),
+            ]:
+                try:
+                    fig = fn(combined, save_path=plot_dir / f"{fname}.svg", show=False)
+                    if fig:
+                        figs[fname] = fig
+                except Exception as e:
+                    print(f"  [WARNING] Plot {fname} failed: {e}")
+
+            print(f"\n[OK] {len(figs)} plot(s) saved -> {plot_dir}")
+            show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                plt.show()
+            else:
+                plt.close('all')
+
+    # ------------------------------------------------------------------ #
+    # Option 6: Slope analysis (per-animal OLS within cohorts + between-cohort)
+    # ------------------------------------------------------------------ #
+    if user_input == '6' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: Slope analysis (per-animal fitted slopes, within- and between-cohort)")
+        print("=" * 80)
+        print("  Fits OLS regression (Total Change ~ Week) per animal using weekly means.")
+        print("  Within each cohort: variability of slopes + Levene's test.")
+        print("  Between cohorts   : pairwise Welch's t-test, Mann-Whitney U, Cohen's d.")
+
+        try:
+            combined_wk = combine_cohorts_for_analysis(cohorts)
+            combined_wk = clean_cohort(combined_wk)
+            if 'Day' not in combined_wk.columns:
+                combined_wk = add_day_column_across_cohorts(combined_wk)
+            if ramp_label and 'Cohort' in combined_wk.columns:
+                ramp_mask = combined_wk['Cohort'] == ramp_label
+                combined_wk.loc[ramp_mask, 'Day'] = combined_wk.loc[ramp_mask, 'Day'] + 1
+            combined_wk = combined_wk[combined_wk['Day'] >= 0].copy()
+            if ramp_label and 'Cohort' in combined_wk.columns:
+                combined_wk = combined_wk[
+                    ~((combined_wk['Cohort'] == ramp_label) & (combined_wk['Day'] == 0))
+                ].copy()
+            combined_wk = _add_week_column_across_cohorts(combined_wk)
+        except Exception as e:
+            print(f"  [ERROR] Could not build cohort-week dataframe: {e}")
+            import traceback; traceback.print_exc()
+            combined_wk = None
+
+        if combined_wk is not None and 'Total Change' in combined_wk.columns:
+            plot_dir.mkdir(exist_ok=True)
+            try:
+                perform_complete_slope_analysis(
+                    cohorts,
+                    measure='Total Change',
+                    time_unit='Week',
+                    save_plot=True,
+                    save_report=True,
+                    output_dir=plot_dir,
+                    combined_df=combined_wk,
+                )
+            except Exception as e:
+                print(f"  [WARNING] Slope analysis failed: {e}")
+                import traceback; traceback.print_exc()
+
+            print(f"\n[OK] Slope analysis outputs saved -> {plot_dir}")
+
+    print("\n" + "=" * 80)
+    print("0% vs 2% vs Ramp analysis complete.")
+    print("=" * 80)
+
+
 def _run_unknown_menu(cohorts: Dict[str, pd.DataFrame], comparison: str) -> None:
     """Placeholder menu for comparison types not yet implemented."""
     label_map = {
@@ -10631,5 +11001,7 @@ if __name__ == "__main__":
         _run_0vramp_menu(cohorts)
     elif comparison == '2vramp':
         _run_2vramp_menu(cohorts)
+    elif comparison == 'all3':
+        _run_all3_menu(cohorts)
     else:
         _run_unknown_menu(cohorts, comparison)
