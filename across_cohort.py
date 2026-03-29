@@ -9902,12 +9902,9 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ramp_mask = combined['Cohort'] == ramp_label
                 combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
             combined = combined[combined['Day'] >= 0].copy()  # remove 0% baseline (Day -1)
-            # Ramp Day 0 is the first measurement — no prior reference, so Daily/Total Change
-            # is meaningless. Exclude it so Week 1 has 6 valid days for the ramp cohort.
-            if ramp_label and 'Cohort' in combined.columns:
-                combined = combined[
-                    ~((combined['Cohort'] == ramp_label) & (combined['Day'] == 0))
-                ].copy()
+            # Ramp Day 0 (first weight measurement) is included in plots — the weight
+            # itself is valid to display. Day 0 is only excluded from analyses (Option 6)
+            # where Daily/Total Change on Day 0 is meaningless (no prior baseline).
 
             plot_dir.mkdir(exist_ok=True)
             figs = {}
@@ -9950,6 +9947,8 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ramp_mask = combined['Cohort'] == ramp_label
                 combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
             combined = combined[combined['Day'] >= 0].copy()  # remove 0% baseline (Day -1)
+            # By-sex plots average across cohort, so ramp Day 0 (no valid change baseline)
+            # is excluded to avoid skewing the sex-stratified means.
             if ramp_label and 'Cohort' in combined.columns:
                 combined = combined[
                     ~((combined['Cohort'] == ramp_label) & (combined['Day'] == 0))
@@ -9997,6 +9996,8 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     ramp_mask = combined_wk['Cohort'] == ramp_label
                     combined_wk.loc[ramp_mask, 'Day'] = combined_wk.loc[ramp_mask, 'Day'] + 1
                 combined_wk = combined_wk[combined_wk['Day'] >= 0].copy()
+                # Weekly plots average within each week bin; ramp Day 0 has no valid
+                # change value so exclude it before week numbers are assigned.
                 if ramp_label and 'Cohort' in combined_wk.columns:
                     combined_wk = combined_wk[
                         ~((combined_wk['Cohort'] == ramp_label) & (combined_wk['Day'] == 0))
@@ -10108,10 +10109,6 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ramp_mask = combined['Cohort'] == ramp_label
                 combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
             combined = combined[combined['Day'] >= 0].copy()
-            if ramp_label and 'Cohort' in combined.columns:
-                combined = combined[
-                    ~((combined['Cohort'] == ramp_label) & (combined['Day'] == 0))
-                ].copy()
 
             plot_dir.mkdir(exist_ok=True)
             figs = {}
