@@ -9902,6 +9902,12 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ramp_mask = combined['Cohort'] == ramp_label
                 combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
             combined = combined[combined['Day'] >= 0].copy()  # remove 0% baseline (Day -1)
+            # Ramp Day 0 is the first measurement — no prior reference, so Daily/Total Change
+            # is meaningless. Exclude it so Week 1 has 6 valid days for the ramp cohort.
+            if ramp_label and 'Cohort' in combined.columns:
+                combined = combined[
+                    ~((combined['Cohort'] == ramp_label) & (combined['Day'] == 0))
+                ].copy()
 
             plot_dir.mkdir(exist_ok=True)
             figs = {}
@@ -9944,6 +9950,10 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ramp_mask = combined['Cohort'] == ramp_label
                 combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
             combined = combined[combined['Day'] >= 0].copy()  # remove 0% baseline (Day -1)
+            if ramp_label and 'Cohort' in combined.columns:
+                combined = combined[
+                    ~((combined['Cohort'] == ramp_label) & (combined['Day'] == 0))
+                ].copy()
 
             plot_dir.mkdir(exist_ok=True)
             figs = {}
@@ -9987,6 +9997,10 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     ramp_mask = combined_wk['Cohort'] == ramp_label
                     combined_wk.loc[ramp_mask, 'Day'] = combined_wk.loc[ramp_mask, 'Day'] + 1
                 combined_wk = combined_wk[combined_wk['Day'] >= 0].copy()
+                if ramp_label and 'Cohort' in combined_wk.columns:
+                    combined_wk = combined_wk[
+                        ~((combined_wk['Cohort'] == ramp_label) & (combined_wk['Day'] == 0))
+                    ].copy()
                 combined_wk = _add_week_column_across_cohorts(combined_wk)
             except Exception as e:
                 print(f"  [ERROR] Could not build cohort-week dataframe: {e}")
@@ -10094,6 +10108,10 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ramp_mask = combined['Cohort'] == ramp_label
                 combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
             combined = combined[combined['Day'] >= 0].copy()
+            if ramp_label and 'Cohort' in combined.columns:
+                combined = combined[
+                    ~((combined['Cohort'] == ramp_label) & (combined['Day'] == 0))
+                ].copy()
 
             plot_dir.mkdir(exist_ok=True)
             figs = {}
@@ -10137,6 +10155,10 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ramp_mask = combined_wk['Cohort'] == ramp_label
                 combined_wk.loc[ramp_mask, 'Day'] = combined_wk.loc[ramp_mask, 'Day'] + 1
             combined_wk = combined_wk[combined_wk['Day'] >= 0].copy()
+            if ramp_label and 'Cohort' in combined_wk.columns:
+                combined_wk = combined_wk[
+                    ~((combined_wk['Cohort'] == ramp_label) & (combined_wk['Day'] == 0))
+                ].copy()
             combined_wk = _add_week_column_across_cohorts(combined_wk)
         except Exception as e:
             print(f"  [ERROR] Could not build cohort-week dataframe: {e}")
