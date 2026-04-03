@@ -3918,16 +3918,19 @@ def plot_fecal_counts_by_week(
     cohort_dfs: Dict[str, pd.DataFrame],
     save_path: Optional[Path] = None,
     show: bool = False,
+    group_by_cohort: bool = False,
 ) -> Optional[plt.Figure]:
-    """Line plot of mean (±SEM) Fecal_Count across weeks, one line per cohort (CA%).
+    """Line plot of mean (±SEM) Fecal_Count across weeks, one line per cohort.
 
     Matches the visual style of plot_lick_measure_by_cohort.
 
     Parameters
     ----------
-    cohort_dfs : dict of label → per-animal weekly DataFrame
-    save_path  : optional SVG save path
-    show       : whether to call plt.show()
+    cohort_dfs      : dict of label → per-animal weekly DataFrame
+    save_path       : optional SVG save path
+    show            : whether to call plt.show()
+    group_by_cohort : if True, group lines by Cohort label (for ramp comparisons
+                      where CA% varies per week); if False (default), group by CA%
     """
     if not HAS_MATPLOTLIB:
         print('[WARNING] matplotlib not available — cannot create fecal count plot.')
@@ -3951,24 +3954,36 @@ def plot_fecal_counts_by_week(
         {'line': 'purple',     'face': 'plum',       'edge': 'purple'},
     ]
 
-    ca_levels = sorted(combined['CA%'].dropna().unique())
-    weeks     = sorted(combined['Week'].dropna().unique())
+    weeks = sorted(combined['Week'].dropna().unique())
+
+    # Determine grouping: by Cohort label (ramp comparisons) or by CA% (0v2)
+    if group_by_cohort and 'Cohort' in combined.columns:
+        group_labels = list(dict.fromkeys(combined['Cohort'].dropna()))
+        group_col = 'Cohort'
+    else:
+        group_labels = sorted(combined['CA%'].dropna().unique())
+        group_col = 'CA%'
 
     fig, ax = plt.subplots(figsize=(9, 6))
 
-    for idx, ca_val in enumerate(ca_levels):
-        grp = combined[combined['CA%'] == ca_val]
+    for idx, grp_val in enumerate(group_labels):
+        grp = combined[combined[group_col] == grp_val]
         wk_stats = (
             grp.groupby('Week')['Fecal_Count']
             .agg(['mean', 'sem', 'count'])
             .reset_index()
         )
         n_per_wk = int(wk_stats['count'].iloc[0]) if len(wk_stats) > 0 else 0
-        c = _FL_COLORS.get(ca_val, _DEFAULT_COLORS[idx % len(_DEFAULT_COLORS)])
+        if group_col == 'CA%':
+            c = _FL_COLORS.get(grp_val, _DEFAULT_COLORS[idx % len(_DEFAULT_COLORS)])
+            label_str = f'{grp_val:.0f}% CA (n={n_per_wk}/week)'
+        else:
+            c = _DEFAULT_COLORS[idx % len(_DEFAULT_COLORS)]
+            label_str = f'{grp_val} (n={n_per_wk}/week)'
         ax.errorbar(
             wk_stats['Week'], wk_stats['mean'],
             yerr=wk_stats['sem'],
-            label=f'{ca_val:.0f}% CA (n={n_per_wk}/week)',
+            label=label_str,
             marker='o', markersize=8, linewidth=2, capsize=5,
             color=c['line'],
             markerfacecolor=c['face'],
@@ -3976,8 +3991,8 @@ def plot_fecal_counts_by_week(
         )
 
     ax.set_xlabel('Week', fontsize=12, weight='bold')
-    ax.set_ylabel('Fecal Count (mean ±SEM)', fontsize=12, weight='bold')
-    ax.set_title('Fecal Count Across Weeks by Cohort (mean ±SEM)',
+    ax.set_ylabel('Fecal Count (mean \u00b1 SEM)', fontsize=12, weight='bold')
+    ax.set_title('Fecal Count Across Weeks by Cohort (mean \u00b1 SEM)',
                  fontsize=13, weight='bold')
     ax.set_xticks(weeks)
     ax.set_xticklabels([str(int(w) + 1) for w in weeks])
@@ -4681,6 +4696,7 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print(" 11. Statistical registry -- Print/save documentation of every test: variables, library, parameters")
     print(" 12. Run all (1-11)")
     print(" 13. Lick normality      -- Shapiro-Wilk & Levene's tests on all lick measures (excl. fecal)")
+    print(" 14. Fecal count plot     -- Mean fecal count across weeks, one line per cohort (mean \u00b1 SEM)")
     print()
 
     user_input = input("Select option (1-13) or 'n' to skip: ").strip()
@@ -5200,6 +5216,41 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             print(f"  [WARNING] Lick normality report failed: {e}")
             import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 14: Fecal count line plot (standalone)
+    # ------------------------------------------------------------------ #
+    if user_input == '14':
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Fecal count line plot by cohort")
+            print("=" * 80)
+            try:
+                fc_plot_path = Path(f"0v2_lick_fecal_counts_{timestamp}.svg")
+                fig_fc = plot_fecal_counts_by_week(
+                    cohorts,
+                    save_path=fc_plot_path,
+                    show=False,
+                    group_by_cohort=False,
+                )
+                if fig_fc:
+                    import matplotlib.pyplot as _plt
+                    _plt.close(fig_fc)
+            except Exception as e:
+                print(f"  [WARNING] Fecal count plot failed: {e}")
+                import traceback; traceback.print_exc()
+            show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                import matplotlib.pyplot as _plt
+                _plt.show()
+            else:
+                try:
+                    import matplotlib.pyplot as _plt
+                    _plt.close('all')
+                except Exception:
+                    pass
+
     print("\n" + "=" * 80)
     print("0% vs 2% lick analysis complete.")
     print("=" * 80)
@@ -5230,15 +5281,16 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  1. Lick plots           -- Mean lick measure by cohort over weeks (collapsed across sex)")
     print("  2. Sex-split plots      -- Mean lick measure split by cohort \u00d7 sex")
     print("  3. Frontloading plots   -- % licks in first 5 min & time to 50% licks by cohort")
-    print("  4. Run all (1-3)")
+    print("  4. Fecal count plot     -- Mean fecal count across weeks, one line per cohort (mean \u00b1 SEM)")
+    print("  5. Run all (1-4)")
     print()
 
-    user_input = input("Select option (1-4) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-5) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '4')
+    run_all = (user_input == '5')
 
     # ------------------------------------------------------------------ #
     # Option 1: Lick plots by cohort (collapsed across sex)
@@ -5426,6 +5478,43 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 except Exception:
                     pass
 
+    # ------------------------------------------------------------------ #
+    # Option 4: Fecal count line plot
+    # ------------------------------------------------------------------ #
+    if user_input == '4' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Fecal count line plot by cohort")
+            print("=" * 80)
+            try:
+                fc_plot_dir = Path(f"0vramp_lick_plots_{timestamp}")
+                fc_plot_dir.mkdir(exist_ok=True)
+                fc_plot_path = fc_plot_dir / "fecal_counts_by_week.svg"
+                fig_fc = plot_fecal_counts_by_week(
+                    cohorts,
+                    save_path=fc_plot_path,
+                    show=False,
+                    group_by_cohort=True,
+                )
+                if fig_fc:
+                    import matplotlib.pyplot as _plt
+                    _plt.close(fig_fc)
+            except Exception as e:
+                print(f"  [WARNING] Fecal count plot failed: {e}")
+                import traceback; traceback.print_exc()
+            show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                import matplotlib.pyplot as _plt
+                _plt.show()
+            else:
+                try:
+                    import matplotlib.pyplot as _plt
+                    _plt.close('all')
+                except Exception:
+                    pass
+
     print("\n" + "=" * 80)
     print("0% nonramp vs Ramp lick plots complete.")
     print("=" * 80)
@@ -5456,15 +5545,16 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  1. Lick plots           -- Mean lick measure by cohort over weeks (collapsed across sex)")
     print("  2. Sex-split plots      -- Mean lick measure split by cohort \u00d7 sex")
     print("  3. Frontloading plots   -- % licks in first 5 min & time to 50% licks by cohort")
-    print("  4. Run all (1-3)")
+    print("  4. Fecal count plot     -- Mean fecal count across weeks, one line per cohort (mean \u00b1 SEM)")
+    print("  5. Run all (1-4)")
     print()
 
-    user_input = input("Select option (1-4) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-5) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '4')
+    run_all = (user_input == '5')
 
     # ------------------------------------------------------------------ #
     # Option 1: Lick plots by cohort (collapsed across sex)
@@ -5652,6 +5742,43 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 except Exception:
                     pass
 
+    # ------------------------------------------------------------------ #
+    # Option 4: Fecal count line plot
+    # ------------------------------------------------------------------ #
+    if user_input == '4' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Fecal count line plot by cohort")
+            print("=" * 80)
+            try:
+                fc_plot_dir = Path(f"2vramp_lick_plots_{timestamp}")
+                fc_plot_dir.mkdir(exist_ok=True)
+                fc_plot_path = fc_plot_dir / "fecal_counts_by_week.svg"
+                fig_fc = plot_fecal_counts_by_week(
+                    cohorts,
+                    save_path=fc_plot_path,
+                    show=False,
+                    group_by_cohort=True,
+                )
+                if fig_fc:
+                    import matplotlib.pyplot as _plt
+                    _plt.close(fig_fc)
+            except Exception as e:
+                print(f"  [WARNING] Fecal count plot failed: {e}")
+                import traceback; traceback.print_exc()
+            show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                import matplotlib.pyplot as _plt
+                _plt.show()
+            else:
+                try:
+                    import matplotlib.pyplot as _plt
+                    _plt.close('all')
+                except Exception:
+                    pass
+
     print("\n" + "=" * 80)
     print("2% nonramp vs Ramp lick plots complete.")
     print("=" * 80)
@@ -5682,15 +5809,16 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  1. Lick plots           -- Mean lick measure by cohort over weeks (collapsed across sex)")
     print("  2. Sex-split plots      -- Mean lick measure split by cohort \u00d7 sex")
     print("  3. Frontloading plots   -- % licks in first 5 min & time to 50% licks by cohort")
-    print("  4. Run all (1-3)")
+    print("  4. Fecal count plot     -- Mean fecal count across weeks, one line per cohort (mean \u00b1 SEM)")
+    print("  5. Run all (1-4)")
     print()
 
-    user_input = input("Select option (1-4) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-5) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '4')
+    run_all = (user_input == '5')
 
     # ------------------------------------------------------------------ #
     # Option 1: Lick plots by cohort (collapsed across sex)
@@ -5878,6 +6006,43 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 except Exception:
                     pass
 
+    # ------------------------------------------------------------------ #
+    # Option 4: Fecal count line plot
+    # ------------------------------------------------------------------ #
+    if user_input == '4' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Fecal count line plot by cohort")
+            print("=" * 80)
+            try:
+                fc_plot_dir = Path(f"all3_lick_plots_{timestamp}")
+                fc_plot_dir.mkdir(exist_ok=True)
+                fc_plot_path = fc_plot_dir / "fecal_counts_by_week.svg"
+                fig_fc = plot_fecal_counts_by_week(
+                    cohorts,
+                    save_path=fc_plot_path,
+                    show=False,
+                    group_by_cohort=True,
+                )
+                if fig_fc:
+                    import matplotlib.pyplot as _plt
+                    _plt.close(fig_fc)
+            except Exception as e:
+                print(f"  [WARNING] Fecal count plot failed: {e}")
+                import traceback; traceback.print_exc()
+            show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                import matplotlib.pyplot as _plt
+                _plt.show()
+            else:
+                try:
+                    import matplotlib.pyplot as _plt
+                    _plt.close('all')
+                except Exception:
+                    pass
+
     print("\n" + "=" * 80)
     print("0% vs 2% vs Ramp lick plots complete.")
     print("=" * 80)
@@ -5927,6 +6092,19 @@ def _run_lick_unknown_menu(cohorts: Dict[str, pd.DataFrame], comparison: str) ->
                     _plt.close(fig)
             except Exception as e:
                 print(f"  [WARNING] Plot for {measure} failed: {e}")
+        # Fecal count line plot
+        try:
+            fig_fc = plot_fecal_counts_by_week(
+                cohorts,
+                save_path=plot_dir / "fecal_counts_by_week.svg",
+                show=False,
+                group_by_cohort=True,
+            )
+            if fig_fc:
+                import matplotlib.pyplot as _plt
+                _plt.close(fig_fc)
+        except Exception as e:
+            print(f"  [WARNING] Fecal count plot failed: {e}")
         print(f"[OK] Plots saved -> {plot_dir}")
     print()
 
