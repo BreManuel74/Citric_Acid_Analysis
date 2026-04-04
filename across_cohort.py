@@ -3387,12 +3387,15 @@ def plot_behavioral_metrics_by_cohort(
         all_weeks_set.update(weeks)
 
         pcts_by_col: Dict[str, List[float]] = {}
+        sems_by_col: Dict[str, List[float]] = {}
         for col, aberrant_val, _ in BEHAVIORS:
             pcts = []
+            sems = []
             for w in weeks:
                 grp = cdf[cdf['_Week'] == w]
                 if col not in grp.columns or len(grp) == 0:
                     pcts.append(float('nan'))
+                    sems.append(float('nan'))
                     continue
                 # Per-animal proportion, then mean across animals
                 animal_pcts = []
@@ -3400,10 +3403,17 @@ def plot_behavioral_metrics_by_cohort(
                     valid = _to_bool(animal_data[col]).dropna()
                     if len(valid) > 0:
                         animal_pcts.append(100.0 * (valid == aberrant_val).sum() / len(valid))
-                pcts.append(float(np.mean(animal_pcts)) if animal_pcts else float('nan'))
+                if animal_pcts:
+                    arr = np.array(animal_pcts)
+                    pcts.append(float(np.mean(arr)))
+                    sems.append(float(np.std(arr, ddof=1) / np.sqrt(len(arr))) if len(arr) > 1 else 0.0)
+                else:
+                    pcts.append(float('nan'))
+                    sems.append(float('nan'))
             pcts_by_col[col] = pcts
+            sems_by_col[col] = sems
 
-        cohort_data[label] = {'weeks': weeks, 'pcts': pcts_by_col}
+        cohort_data[label] = {'weeks': weeks, 'pcts': pcts_by_col, 'sems': sems_by_col}
 
     all_weeks_sorted = sorted(all_weeks_set)
     x_pos = {w: i for i, w in enumerate(all_weeks_sorted)}
@@ -3418,6 +3428,7 @@ def plot_behavioral_metrics_by_cohort(
             color = _COLORS[i % len(_COLORS)]
             xs = [x_pos[w] for w in data['weeks']]
             ys = data['pcts'][col]
+            sems = data['sems'][col]
             ax.plot(
                 xs, ys,
                 color=color, linewidth=2.2,
@@ -3425,6 +3436,14 @@ def plot_behavioral_metrics_by_cohort(
                 markerfacecolor='white',
                 markeredgecolor=color, markeredgewidth=2,
                 label=label,
+            )
+            ax.errorbar(
+                xs, ys,
+                yerr=sems,
+                fmt='none',
+                color=color,
+                capsize=4, capthick=1.2, linewidth=1.2,
+                alpha=0.7,
             )
         ax.set_xticks(range(len(all_weeks_sorted)))
         ax.set_xticklabels(x_labels, fontsize=10)
@@ -10278,15 +10297,17 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  4. Behavioral plots       -- Nesting, Lethargy, Anxiety prevalence across weeks")
     print("  5. Cohort-avg plots       -- Total/Daily Change averaged by cohort (CA%-agnostic)")
     print("  6. Slope analysis         -- Per-animal fitted slopes within cohorts + between-cohort comparison")
-    print("  7. Run all (1-6)")
+    print("  7. Week 3 weight bar      -- Bar plot of average Total Change at Week 3 per cohort (mean \u00b1 SEM + individual points)")
+    print("  8. Week 3 behavioral bars -- Bar plots of % observations for No Nest / Anxious / Lethargy at Week 3")
+    print("  9. Run all (1-8)")
     print()
 
-    user_input = input("Select option (1-7) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '7')
+    run_all = (user_input == '9')
 
     plot_dir = Path(f"2vramp_plots_{timestamp}")
 
@@ -10575,6 +10596,244 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 import traceback; traceback.print_exc()
 
             print(f"\n[OK] Slope analysis outputs saved -> {plot_dir}")
+
+    # ------------------------------------------------------------------ #
+    # Option 7: Week 3 Total Change bar plot with individual points + SEM
+    # ------------------------------------------------------------------ #
+    if user_input == '7' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Week 3 Total Change bar plot (mean \u00b1 SEM + individual points)")
+            print("=" * 80)
+            try:
+                import numpy as _np
+
+                combined_wk3 = combine_cohorts_for_analysis(cohorts)
+                combined_wk3 = clean_cohort(combined_wk3)
+                if 'Day' not in combined_wk3.columns:
+                    combined_wk3 = add_day_column_across_cohorts(combined_wk3)
+                if ramp_label and 'Cohort' in combined_wk3.columns:
+                    ramp_mask = combined_wk3['Cohort'] == ramp_label
+                    combined_wk3.loc[ramp_mask, 'Day'] = combined_wk3.loc[ramp_mask, 'Day'] + 1
+                combined_wk3 = combined_wk3[combined_wk3['Day'] >= 0].copy()
+                if ramp_label and 'Cohort' in combined_wk3.columns:
+                    combined_wk3 = combined_wk3[
+                        ~((combined_wk3['Cohort'] == ramp_label) & (combined_wk3['Day'] == 0))
+                    ].copy()
+                combined_wk3 = _add_week_column_across_cohorts(combined_wk3)
+
+                WEEK3 = 3  # 1-indexed
+                week3_df = combined_wk3[combined_wk3['Week'] == WEEK3]
+
+                if 'Total Change' not in week3_df.columns:
+                    print("  [WARNING] 'Total Change' column not found -- skipping.")
+                elif week3_df.empty:
+                    print("  [WARNING] No data found for Week 3 -- skipping.")
+                else:
+                    cohort_labels_w3 = sorted(week3_df['Cohort'].dropna().unique()) if 'Cohort' in week3_df.columns else list(cohorts.keys())
+
+                    _BAR_COLORS = [
+                        {'face': 'steelblue',    'edge': 'navy'},
+                        {'face': 'darkorange',   'edge': 'saddlebrown'},
+                        {'face': 'seagreen',     'edge': 'darkgreen'},
+                        {'face': 'mediumpurple', 'edge': 'indigo'},
+                    ]
+
+                    # Compute per-animal weekly means first, then take group average
+                    animal_means = (
+                        week3_df.groupby(['ID', 'Cohort'])['Total Change'].mean().reset_index()
+                        if 'Cohort' in week3_df.columns
+                        else week3_df.groupby('ID')['Total Change'].mean().reset_index()
+                    )
+
+                    fig_w3, ax_w3 = plt.subplots(figsize=(6, 6))
+                    x_positions = _np.arange(len(cohort_labels_w3))
+                    bar_width = 0.5
+                    rng_w3 = _np.random.default_rng(42)
+
+                    for i, cohort_lbl in enumerate(cohort_labels_w3):
+                        if 'Cohort' in animal_means.columns:
+                            grp = animal_means[animal_means['Cohort'] == cohort_lbl]
+                        else:
+                            grp = animal_means
+                        vals = grp['Total Change'].dropna().values
+
+                        mean_val = _np.mean(vals) if len(vals) > 0 else 0.0
+                        sem_val  = (_np.std(vals, ddof=1) / _np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+                        c = _BAR_COLORS[i % len(_BAR_COLORS)]
+
+                        ax_w3.bar(
+                            x_positions[i], mean_val,
+                            width=bar_width,
+                            color=c['face'], edgecolor=c['edge'], linewidth=1.2,
+                            zorder=2, label=cohort_lbl,
+                        )
+                        ax_w3.errorbar(
+                            x_positions[i], mean_val,
+                            yerr=sem_val,
+                            fmt='none', color='black',
+                            capsize=6, capthick=1.5, linewidth=1.5,
+                            zorder=3,
+                        )
+                        jitter = rng_w3.uniform(-0.12, 0.12, size=len(vals))
+                        ax_w3.scatter(
+                            x_positions[i] + jitter, vals,
+                            color='black', s=30, alpha=0.7,
+                            zorder=4, linewidths=0,
+                        )
+
+                    ax_w3.axhline(0, color='black', linewidth=0.8, linestyle='--', zorder=1)
+                    ax_w3.set_xticks(x_positions)
+                    ax_w3.set_xticklabels(cohort_labels_w3, fontsize=11)
+                    ax_w3.set_ylabel('Total Weight Change (g) (mean \u00b1 SEM)', fontsize=12, weight='bold')
+                    ax_w3.set_title('Total Weight Change at Week 3 by Cohort', fontsize=13, weight='bold')
+                    ax_w3.spines['top'].set_visible(False)
+                    ax_w3.spines['right'].set_visible(False)
+                    ax_w3.tick_params(direction='in', which='both', length=5)
+                    fig_w3.tight_layout()
+
+                    plot_dir.mkdir(exist_ok=True)
+                    save_path_w3 = plot_dir / "total_change_week3_bar.svg"
+                    fig_w3.savefig(save_path_w3, format='svg', dpi=200, bbox_inches='tight')
+                    plt.close(fig_w3)
+                    print(f"[OK] Saved -> {save_path_w3}")
+
+            except Exception as e:
+                print(f"  [WARNING] Week 3 weight bar plot failed: {e}")
+                import traceback; traceback.print_exc()
+
+            show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                plt.show()
+            else:
+                plt.close('all')
+
+    # ------------------------------------------------------------------ #
+    # Option 8: Week 3 behavioral bar plots (No Nest / Anxious / Lethargy)
+    # ------------------------------------------------------------------ #
+    if user_input == '8' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Week 3 behavioral bar plots (% observations per cohort)")
+            print("=" * 80)
+            try:
+                import numpy as _np
+
+                BEHAVIORS_BAR = [
+                    ('Nest Made?',         False, 'No Nest'),
+                    ('Anxious Behaviors?', True,  'Anxious'),
+                    ('Lethargy?',          True,  'Lethargy'),
+                ]
+
+                def _to_bool_bar(series):
+                    _T = {'yes', 'true', '1'}
+                    _F = {'no', 'false', '0'}
+                    def _cv(v):
+                        if isinstance(v, bool): return v
+                        if isinstance(v, str):
+                            ls = v.strip().lower()
+                            if ls in _T: return True
+                            if ls in _F: return False
+                        return None
+                    return series.map(_cv)
+
+                WEEK3_B = 3  # 1-indexed
+                _BAR_COLORS_B = [
+                    {'face': 'steelblue',    'edge': 'navy'},
+                    {'face': 'darkorange',   'edge': 'saddlebrown'},
+                    {'face': 'seagreen',     'edge': 'darkgreen'},
+                    {'face': 'mediumpurple', 'edge': 'indigo'},
+                ]
+
+                # Build per-cohort per-animal % for each behavioral metric at Week 3
+                cohort_labels_b = list(cohorts.keys())
+                # animal_pcts[col][cohort_label] = list of per-animal %
+                animal_pcts_all = {col: {lbl: [] for lbl in cohort_labels_b} for col, _, _ in BEHAVIORS_BAR}
+
+                for lbl, df in cohorts.items():
+                    cdf = clean_cohort(df.copy())
+                    if 'Date' in cdf.columns:
+                        cdf['Date'] = pd.to_datetime(cdf['Date'], errors='coerce')
+                    cdf = cdf.sort_values(['ID', 'Date']).reset_index(drop=True)
+                    first_dates = cdf.groupby('ID')['Date'].transform('min')
+                    cdf['_Day'] = (cdf['Date'] - first_dates).dt.days - 1
+                    cdf = cdf[cdf['_Day'] >= 0].copy()
+                    cdf['_Week'] = (cdf['_Day'] // 7) + 1
+                    week3_cdf = cdf[cdf['_Week'] == WEEK3_B]
+
+                    for col, aberrant_val, _ in BEHAVIORS_BAR:
+                        if col not in week3_cdf.columns:
+                            continue
+                        for _, animal_data in week3_cdf.groupby('ID'):
+                            valid = _to_bool_bar(animal_data[col]).dropna()
+                            if len(valid) > 0:
+                                animal_pcts_all[col][lbl].append(
+                                    100.0 * (valid == aberrant_val).sum() / len(valid)
+                                )
+
+                fig_b, axes_b = plt.subplots(1, 3, figsize=(12, 5), sharey=False)
+                fig_b.suptitle('Behavioral Metrics at Week 3 by Cohort', fontsize=14, weight='bold', y=1.01)
+
+                rng_b = _np.random.default_rng(42)
+                x_positions_b = _np.arange(len(cohort_labels_b))
+                bar_width_b = 0.5
+
+                for ax_b, (col, _, panel_title) in zip(axes_b, BEHAVIORS_BAR):
+                    for i, lbl in enumerate(cohort_labels_b):
+                        vals = _np.array(animal_pcts_all[col][lbl], dtype=float)
+                        mean_val = _np.mean(vals) if len(vals) > 0 else 0.0
+                        sem_val  = (_np.std(vals, ddof=1) / _np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+                        c = _BAR_COLORS_B[i % len(_BAR_COLORS_B)]
+
+                        ax_b.bar(
+                            x_positions_b[i], mean_val,
+                            width=bar_width_b,
+                            color=c['face'], edgecolor=c['edge'], linewidth=1.2,
+                            zorder=2,
+                        )
+                        ax_b.errorbar(
+                            x_positions_b[i], mean_val,
+                            yerr=sem_val,
+                            fmt='none', color='black',
+                            capsize=6, capthick=1.5, linewidth=1.5,
+                            zorder=3,
+                        )
+                        jitter = rng_b.uniform(-0.12, 0.12, size=len(vals))
+                        ax_b.scatter(
+                            x_positions_b[i] + jitter, vals,
+                            color='black', s=30, alpha=0.7,
+                            zorder=4, linewidths=0,
+                        )
+
+                    ax_b.set_xticks(x_positions_b)
+                    ax_b.set_xticklabels(cohort_labels_b, fontsize=10, rotation=15, ha='right')
+                    ax_b.set_ylim(0, 110)
+                    ax_b.set_ylabel('% of Observations (mean \u00b1 SEM)', fontsize=11, weight='bold')
+                    ax_b.set_title(panel_title, fontsize=12, weight='bold')
+                    ax_b.spines['top'].set_visible(False)
+                    ax_b.spines['right'].set_visible(False)
+                    ax_b.tick_params(direction='in', which='both', length=5)
+
+                fig_b.tight_layout()
+                plot_dir.mkdir(exist_ok=True)
+                save_path_b = plot_dir / "behavioral_week3_bar.svg"
+                fig_b.savefig(save_path_b, format='svg', dpi=200, bbox_inches='tight')
+                plt.close(fig_b)
+                print(f"[OK] Saved -> {save_path_b}")
+
+            except Exception as e:
+                print(f"  [WARNING] Week 3 behavioral bar plot failed: {e}")
+                import traceback; traceback.print_exc()
+
+            show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                plt.show()
+            else:
+                plt.close('all')
 
     print("\n" + "=" * 80)
     print("2% vs Ramp analysis complete.")

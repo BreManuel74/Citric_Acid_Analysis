@@ -5650,15 +5650,16 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  3. Frontloading plots   -- % licks in first 5 min & time to 50% licks by cohort")
     print("  4. Fecal count plot     -- Mean fecal count across weeks, one line per cohort (mean \u00b1 SEM)")
     print("  5. Week 4 fecal bar     -- Bar plot of average fecal count at Week 4 per cohort (mean \u00b1 SEM + individual points)")
-    print("  6. Run all (1-5)")
+    print("  6. Week 3 lick bar      -- Bar plot of average Total Licks at Week 3 per cohort (mean \u00b1 SEM + individual points)")
+    print("  7. Run all (1-6)")
     print()
 
-    user_input = input("Select option (1-6) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-7) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '6')
+    run_all = (user_input == '7')
 
     # ------------------------------------------------------------------ #
     # Option 1: Lick plots by cohort (collapsed across sex)
@@ -5970,6 +5971,106 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 print(f"[OK] Saved -> {fec4_save}")
             except Exception as e:
                 print(f"  [WARNING] Week 4 fecal bar plot failed: {e}")
+                import traceback; traceback.print_exc()
+
+            show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                import matplotlib.pyplot as _plt
+                _plt.show()
+            else:
+                try:
+                    import matplotlib.pyplot as _plt
+                    _plt.close('all')
+                except Exception:
+                    pass
+
+    # ------------------------------------------------------------------ #
+    # Option 6: Week 3 Total Licks bar plot with individual points + SEM
+    # ------------------------------------------------------------------ #
+    if user_input == '6' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Week 3 Total Licks bar plot (mean \u00b1 SEM + individual points)")
+            print("=" * 80)
+            try:
+                import matplotlib.pyplot as _plt
+                import numpy as _np
+
+                combined_lk3 = combine_lick_cohorts(cohorts)
+                if 'Week' not in combined_lk3.columns:
+                    combined_lk3 = add_week_column(combined_lk3)
+
+                WEEK3_IDX = 2  # Week 3 display = internal index 2 (0-based)
+                if 'Cohort' in combined_lk3.columns:
+                    cohort_labels_lk3 = sorted(combined_lk3['Cohort'].dropna().unique())
+                else:
+                    cohort_labels_lk3 = list(cohorts.keys())
+
+                _BAR_COLORS = [
+                    {'face': 'steelblue',    'edge': 'navy'},
+                    {'face': 'darkorange',   'edge': 'saddlebrown'},
+                    {'face': 'seagreen',     'edge': 'darkgreen'},
+                    {'face': 'mediumpurple', 'edge': 'indigo'},
+                ]
+
+                fig_lk3, ax_lk3 = _plt.subplots(figsize=(6, 6))
+                x_positions = _np.arange(len(cohort_labels_lk3))
+                bar_width = 0.5
+                rng_lk3 = _np.random.default_rng(42)
+
+                week3_df = combined_lk3[combined_lk3['Week'] == WEEK3_IDX]
+
+                for i, cohort_lbl in enumerate(cohort_labels_lk3):
+                    if 'Cohort' in week3_df.columns:
+                        grp = week3_df[week3_df['Cohort'] == cohort_lbl]
+                    else:
+                        grp = week3_df
+                    vals = grp['Total_Licks'].dropna().values
+
+                    mean_val = _np.mean(vals) if len(vals) > 0 else 0.0
+                    sem_val  = (_np.std(vals, ddof=1) / _np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+                    c = _BAR_COLORS[i % len(_BAR_COLORS)]
+
+                    ax_lk3.bar(
+                        x_positions[i], mean_val,
+                        width=bar_width,
+                        color=c['face'], edgecolor=c['edge'], linewidth=1.2,
+                        zorder=2, label=cohort_lbl,
+                    )
+                    ax_lk3.errorbar(
+                        x_positions[i], mean_val,
+                        yerr=sem_val,
+                        fmt='none', color='black',
+                        capsize=6, capthick=1.5, linewidth=1.5,
+                        zorder=3,
+                    )
+                    jitter = rng_lk3.uniform(-0.12, 0.12, size=len(vals))
+                    ax_lk3.scatter(
+                        x_positions[i] + jitter, vals,
+                        color='black', s=30, alpha=0.7,
+                        zorder=4, linewidths=0,
+                    )
+
+                ax_lk3.set_xticks(x_positions)
+                ax_lk3.set_xticklabels(cohort_labels_lk3, fontsize=11)
+                ax_lk3.set_ylabel('Total Licks (mean \u00b1 SEM)', fontsize=12, weight='bold')
+                ax_lk3.set_title('Total Licks at Week 3 by Cohort', fontsize=13, weight='bold')
+                ax_lk3.set_ylim(bottom=0)
+                ax_lk3.spines['top'].set_visible(False)
+                ax_lk3.spines['right'].set_visible(False)
+                ax_lk3.tick_params(direction='in', which='both', length=5)
+                fig_lk3.tight_layout()
+
+                lk3_plot_dir = Path(f"2vramp_lick_plots_{timestamp}")
+                lk3_plot_dir.mkdir(exist_ok=True)
+                lk3_save = lk3_plot_dir / "total_licks_week3_bar.svg"
+                fig_lk3.savefig(lk3_save, format='svg', dpi=200, bbox_inches='tight')
+                _plt.close(fig_lk3)
+                print(f"[OK] Saved -> {lk3_save}")
+            except Exception as e:
+                print(f"  [WARNING] Week 3 lick bar plot failed: {e}")
                 import traceback; traceback.print_exc()
 
             show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
