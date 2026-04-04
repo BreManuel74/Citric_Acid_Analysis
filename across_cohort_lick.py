@@ -305,7 +305,7 @@ def detect_events_above_threshold(df: pd.DataFrame, sensor_cols: List[str], thre
     return result
 
 
-def compute_lick_bouts(events_df: pd.DataFrame, sensor_cols: List[str], ili_cutoff: float = 0.3) -> dict:
+def compute_lick_bouts(events_df: pd.DataFrame, sensor_cols: List[str], ili_cutoff: float = 0.5) -> dict:
     """Compute lick bouts for each sensor."""
     bout_results = {}
     
@@ -399,7 +399,7 @@ def calculate_time_to_50_percent_licks(events_df: pd.DataFrame, sensor_col: str)
 def process_capacitive_file(
     capacitive_file: Path,
     fixed_threshold: float = 0.01,
-    ili_cutoff: float = 0.3,
+    ili_cutoff: float = 0.5,
     verbose: bool = False
 ) -> Dict:
     """Process a single capacitive sensor file and extract lick metrics.
@@ -496,7 +496,7 @@ def process_cohort_capacitive_files(
     ca_percent: float,
     cohort_label: str,
     fixed_threshold: float = 0.01,
-    ili_cutoff: float = 0.3,
+    ili_cutoff: float = 0.5,
     encoding: Optional[str] = None
 ) -> pd.DataFrame:
     """Process capacitive sensor files for a single cohort with EXACT per-animal logic from lick_nonramp.py.
@@ -766,7 +766,7 @@ def load_lick_cohorts(cohort_specs: Dict[str, Dict], encoding: Optional[str] = N
         capacitive_files = specs.get('capacitive_logs', [])
         ca_percent = specs.get('ca_percent')
         fixed_threshold = specs.get('fixed_threshold', 0.01)
-        ili_cutoff = specs.get('ili_cutoff', 0.3)
+        ili_cutoff = specs.get('ili_cutoff', 0.5)
         
         print(f"\nLoading cohort: {label}")
         
@@ -5282,15 +5282,16 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  2. Sex-split plots      -- Mean lick measure split by cohort \u00d7 sex")
     print("  3. Frontloading plots   -- % licks in first 5 min & time to 50% licks by cohort")
     print("  4. Fecal count plot     -- Mean fecal count across weeks, one line per cohort (mean \u00b1 SEM)")
-    print("  5. Run all (1-4)")
+    print("  5. Week 4 fecal bar     -- Bar plot of average fecal count at Week 4 per cohort (mean \u00b1 SEM + individual points)")
+    print("  6. Run all (1-5)")
     print()
 
-    user_input = input("Select option (1-5) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-6) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '5')
+    run_all = (user_input == '6')
 
     # ------------------------------------------------------------------ #
     # Option 1: Lick plots by cohort (collapsed across sex)
@@ -5515,6 +5516,108 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 except Exception:
                     pass
 
+    # ------------------------------------------------------------------ #
+    # Option 5: Week 4 fecal count bar plot with individual points + SEM
+    # ------------------------------------------------------------------ #
+    if user_input == '5' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Week 4 fecal count bar plot (mean \u00b1 SEM + individual points)")
+            print("=" * 80)
+            try:
+                import matplotlib.pyplot as _plt
+                import numpy as _np
+
+                combined_fec = combine_lick_cohorts(cohorts)
+                if 'Week' not in combined_fec.columns:
+                    combined_fec = add_week_column(combined_fec)
+
+                # Week 4 display = internal Week index 3
+                WEEK4_IDX = 3
+                if 'Cohort' in combined_fec.columns:
+                    cohort_labels_fec = sorted(combined_fec['Cohort'].dropna().unique())
+                else:
+                    cohort_labels_fec = list(cohorts.keys())
+
+                _BAR_COLORS = [
+                    {'face': 'steelblue',  'edge': 'navy'},
+                    {'face': 'darkorange', 'edge': 'saddlebrown'},
+                    {'face': 'seagreen',   'edge': 'darkgreen'},
+                    {'face': 'mediumpurple', 'edge': 'indigo'},
+                ]
+
+                fig_fec4, ax_fec4 = _plt.subplots(figsize=(6, 6))
+                x_positions = _np.arange(len(cohort_labels_fec))
+                bar_width = 0.5
+                rng_fec = _np.random.default_rng(42)
+
+                week4_df = combined_fec[combined_fec['Week'] == WEEK4_IDX]
+
+                for i, cohort_lbl in enumerate(cohort_labels_fec):
+                    if 'Cohort' in week4_df.columns:
+                        grp = week4_df[week4_df['Cohort'] == cohort_lbl]
+                    else:
+                        grp = week4_df
+                    vals = grp['Fecal_Count'].dropna().values
+
+                    mean_val = _np.mean(vals) if len(vals) > 0 else 0.0
+                    sem_val  = (_np.std(vals, ddof=1) / _np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+                    c = _BAR_COLORS[i % len(_BAR_COLORS)]
+
+                    ax_fec4.bar(
+                        x_positions[i], mean_val,
+                        width=bar_width,
+                        color=c['face'], edgecolor=c['edge'], linewidth=1.2,
+                        zorder=2, label=cohort_lbl,
+                    )
+                    ax_fec4.errorbar(
+                        x_positions[i], mean_val,
+                        yerr=sem_val,
+                        fmt='none', color='black',
+                        capsize=6, capthick=1.5, linewidth=1.5,
+                        zorder=3,
+                    )
+                    # Individual points with horizontal jitter
+                    jitter = rng_fec.uniform(-0.12, 0.12, size=len(vals))
+                    ax_fec4.scatter(
+                        x_positions[i] + jitter, vals,
+                        color='black', s=30, alpha=0.7,
+                        zorder=4, linewidths=0,
+                    )
+
+                ax_fec4.set_xticks(x_positions)
+                ax_fec4.set_xticklabels(cohort_labels_fec, fontsize=11)
+                ax_fec4.set_ylabel('Fecal Count (mean \u00b1 SEM)', fontsize=12, weight='bold')
+                ax_fec4.set_title('Fecal Count at Week 4 by Cohort', fontsize=13, weight='bold')
+                ax_fec4.set_ylim(bottom=0)
+                ax_fec4.spines['top'].set_visible(False)
+                ax_fec4.spines['right'].set_visible(False)
+                ax_fec4.tick_params(direction='in', which='both', length=5)
+                fig_fec4.tight_layout()
+
+                fec4_plot_dir = Path(f"0vramp_lick_plots_{timestamp}")
+                fec4_plot_dir.mkdir(exist_ok=True)
+                fec4_save = fec4_plot_dir / "fecal_count_week4_bar.svg"
+                fig_fec4.savefig(fec4_save, format='svg', dpi=200, bbox_inches='tight')
+                _plt.close(fig_fec4)
+                print(f"[OK] Saved -> {fec4_save}")
+            except Exception as e:
+                print(f"  [WARNING] Week 4 fecal bar plot failed: {e}")
+                import traceback; traceback.print_exc()
+
+            show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                import matplotlib.pyplot as _plt
+                _plt.show()
+            else:
+                try:
+                    import matplotlib.pyplot as _plt
+                    _plt.close('all')
+                except Exception:
+                    pass
+
     print("\n" + "=" * 80)
     print("0% nonramp vs Ramp lick plots complete.")
     print("=" * 80)
@@ -5546,15 +5649,16 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  2. Sex-split plots      -- Mean lick measure split by cohort \u00d7 sex")
     print("  3. Frontloading plots   -- % licks in first 5 min & time to 50% licks by cohort")
     print("  4. Fecal count plot     -- Mean fecal count across weeks, one line per cohort (mean \u00b1 SEM)")
-    print("  5. Run all (1-4)")
+    print("  5. Week 4 fecal bar     -- Bar plot of average fecal count at Week 4 per cohort (mean \u00b1 SEM + individual points)")
+    print("  6. Run all (1-5)")
     print()
 
-    user_input = input("Select option (1-5) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-6) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '5')
+    run_all = (user_input == '6')
 
     # ------------------------------------------------------------------ #
     # Option 1: Lick plots by cohort (collapsed across sex)
@@ -5779,6 +5883,106 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 except Exception:
                     pass
 
+    # ------------------------------------------------------------------ #
+    # Option 5: Week 4 fecal count bar plot with individual points + SEM
+    # ------------------------------------------------------------------ #
+    if user_input == '5' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Week 4 fecal count bar plot (mean \u00b1 SEM + individual points)")
+            print("=" * 80)
+            try:
+                import matplotlib.pyplot as _plt
+                import numpy as _np
+
+                combined_fec = combine_lick_cohorts(cohorts)
+                if 'Week' not in combined_fec.columns:
+                    combined_fec = add_week_column(combined_fec)
+
+                WEEK4_IDX = 3
+                if 'Cohort' in combined_fec.columns:
+                    cohort_labels_fec = sorted(combined_fec['Cohort'].dropna().unique())
+                else:
+                    cohort_labels_fec = list(cohorts.keys())
+
+                _BAR_COLORS = [
+                    {'face': 'steelblue',    'edge': 'navy'},
+                    {'face': 'darkorange',   'edge': 'saddlebrown'},
+                    {'face': 'seagreen',     'edge': 'darkgreen'},
+                    {'face': 'mediumpurple', 'edge': 'indigo'},
+                ]
+
+                fig_fec4, ax_fec4 = _plt.subplots(figsize=(6, 6))
+                x_positions = _np.arange(len(cohort_labels_fec))
+                bar_width = 0.5
+                rng_fec = _np.random.default_rng(42)
+
+                week4_df = combined_fec[combined_fec['Week'] == WEEK4_IDX]
+
+                for i, cohort_lbl in enumerate(cohort_labels_fec):
+                    if 'Cohort' in week4_df.columns:
+                        grp = week4_df[week4_df['Cohort'] == cohort_lbl]
+                    else:
+                        grp = week4_df
+                    vals = grp['Fecal_Count'].dropna().values
+
+                    mean_val = _np.mean(vals) if len(vals) > 0 else 0.0
+                    sem_val  = (_np.std(vals, ddof=1) / _np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+                    c = _BAR_COLORS[i % len(_BAR_COLORS)]
+
+                    ax_fec4.bar(
+                        x_positions[i], mean_val,
+                        width=bar_width,
+                        color=c['face'], edgecolor=c['edge'], linewidth=1.2,
+                        zorder=2, label=cohort_lbl,
+                    )
+                    ax_fec4.errorbar(
+                        x_positions[i], mean_val,
+                        yerr=sem_val,
+                        fmt='none', color='black',
+                        capsize=6, capthick=1.5, linewidth=1.5,
+                        zorder=3,
+                    )
+                    jitter = rng_fec.uniform(-0.12, 0.12, size=len(vals))
+                    ax_fec4.scatter(
+                        x_positions[i] + jitter, vals,
+                        color='black', s=30, alpha=0.7,
+                        zorder=4, linewidths=0,
+                    )
+
+                ax_fec4.set_xticks(x_positions)
+                ax_fec4.set_xticklabels(cohort_labels_fec, fontsize=11)
+                ax_fec4.set_ylabel('Fecal Count (mean \u00b1 SEM)', fontsize=12, weight='bold')
+                ax_fec4.set_title('Fecal Count at Week 4 by Cohort', fontsize=13, weight='bold')
+                ax_fec4.set_ylim(bottom=0)
+                ax_fec4.spines['top'].set_visible(False)
+                ax_fec4.spines['right'].set_visible(False)
+                ax_fec4.tick_params(direction='in', which='both', length=5)
+                fig_fec4.tight_layout()
+
+                fec4_plot_dir = Path(f"2vramp_lick_plots_{timestamp}")
+                fec4_plot_dir.mkdir(exist_ok=True)
+                fec4_save = fec4_plot_dir / "fecal_count_week4_bar.svg"
+                fig_fec4.savefig(fec4_save, format='svg', dpi=200, bbox_inches='tight')
+                _plt.close(fig_fec4)
+                print(f"[OK] Saved -> {fec4_save}")
+            except Exception as e:
+                print(f"  [WARNING] Week 4 fecal bar plot failed: {e}")
+                import traceback; traceback.print_exc()
+
+            show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                import matplotlib.pyplot as _plt
+                _plt.show()
+            else:
+                try:
+                    import matplotlib.pyplot as _plt
+                    _plt.close('all')
+                except Exception:
+                    pass
+
     print("\n" + "=" * 80)
     print("2% nonramp vs Ramp lick plots complete.")
     print("=" * 80)
@@ -5810,15 +6014,16 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  2. Sex-split plots      -- Mean lick measure split by cohort \u00d7 sex")
     print("  3. Frontloading plots   -- % licks in first 5 min & time to 50% licks by cohort")
     print("  4. Fecal count plot     -- Mean fecal count across weeks, one line per cohort (mean \u00b1 SEM)")
-    print("  5. Run all (1-4)")
+    print("  5. Week 4 fecal bar     -- Bar plot of average fecal count at Week 4 per cohort (mean \u00b1 SEM + individual points)")
+    print("  6. Run all (1-5)")
     print()
 
-    user_input = input("Select option (1-5) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-6) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '5')
+    run_all = (user_input == '6')
 
     # ------------------------------------------------------------------ #
     # Option 1: Lick plots by cohort (collapsed across sex)
@@ -6032,6 +6237,106 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             except Exception as e:
                 print(f"  [WARNING] Fecal count plot failed: {e}")
                 import traceback; traceback.print_exc()
+            show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                import matplotlib.pyplot as _plt
+                _plt.show()
+            else:
+                try:
+                    import matplotlib.pyplot as _plt
+                    _plt.close('all')
+                except Exception:
+                    pass
+
+    # ------------------------------------------------------------------ #
+    # Option 5: Week 4 fecal count bar plot with individual points + SEM
+    # ------------------------------------------------------------------ #
+    if user_input == '5' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Week 4 fecal count bar plot (mean \u00b1 SEM + individual points)")
+            print("=" * 80)
+            try:
+                import matplotlib.pyplot as _plt
+                import numpy as _np
+
+                combined_fec = combine_lick_cohorts(cohorts)
+                if 'Week' not in combined_fec.columns:
+                    combined_fec = add_week_column(combined_fec)
+
+                WEEK4_IDX = 3
+                if 'Cohort' in combined_fec.columns:
+                    cohort_labels_fec = sorted(combined_fec['Cohort'].dropna().unique())
+                else:
+                    cohort_labels_fec = list(cohorts.keys())
+
+                _BAR_COLORS = [
+                    {'face': 'steelblue',    'edge': 'navy'},
+                    {'face': 'darkorange',   'edge': 'saddlebrown'},
+                    {'face': 'seagreen',     'edge': 'darkgreen'},
+                    {'face': 'mediumpurple', 'edge': 'indigo'},
+                ]
+
+                fig_fec4, ax_fec4 = _plt.subplots(figsize=(7, 6))
+                x_positions = _np.arange(len(cohort_labels_fec))
+                bar_width = 0.5
+                rng_fec = _np.random.default_rng(42)
+
+                week4_df = combined_fec[combined_fec['Week'] == WEEK4_IDX]
+
+                for i, cohort_lbl in enumerate(cohort_labels_fec):
+                    if 'Cohort' in week4_df.columns:
+                        grp = week4_df[week4_df['Cohort'] == cohort_lbl]
+                    else:
+                        grp = week4_df
+                    vals = grp['Fecal_Count'].dropna().values
+
+                    mean_val = _np.mean(vals) if len(vals) > 0 else 0.0
+                    sem_val  = (_np.std(vals, ddof=1) / _np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+                    c = _BAR_COLORS[i % len(_BAR_COLORS)]
+
+                    ax_fec4.bar(
+                        x_positions[i], mean_val,
+                        width=bar_width,
+                        color=c['face'], edgecolor=c['edge'], linewidth=1.2,
+                        zorder=2, label=cohort_lbl,
+                    )
+                    ax_fec4.errorbar(
+                        x_positions[i], mean_val,
+                        yerr=sem_val,
+                        fmt='none', color='black',
+                        capsize=6, capthick=1.5, linewidth=1.5,
+                        zorder=3,
+                    )
+                    jitter = rng_fec.uniform(-0.12, 0.12, size=len(vals))
+                    ax_fec4.scatter(
+                        x_positions[i] + jitter, vals,
+                        color='black', s=30, alpha=0.7,
+                        zorder=4, linewidths=0,
+                    )
+
+                ax_fec4.set_xticks(x_positions)
+                ax_fec4.set_xticklabels(cohort_labels_fec, fontsize=11)
+                ax_fec4.set_ylabel('Fecal Count (mean \u00b1 SEM)', fontsize=12, weight='bold')
+                ax_fec4.set_title('Fecal Count at Week 4 by Cohort', fontsize=13, weight='bold')
+                ax_fec4.set_ylim(bottom=0)
+                ax_fec4.spines['top'].set_visible(False)
+                ax_fec4.spines['right'].set_visible(False)
+                ax_fec4.tick_params(direction='in', which='both', length=5)
+                fig_fec4.tight_layout()
+
+                fec4_plot_dir = Path(f"all3_lick_plots_{timestamp}")
+                fec4_plot_dir.mkdir(exist_ok=True)
+                fec4_save = fec4_plot_dir / "fecal_count_week4_bar.svg"
+                fig_fec4.savefig(fec4_save, format='svg', dpi=200, bbox_inches='tight')
+                _plt.close(fig_fec4)
+                print(f"[OK] Saved -> {fec4_save}")
+            except Exception as e:
+                print(f"  [WARNING] Week 4 fecal bar plot failed: {e}")
+                import traceback; traceback.print_exc()
+
             show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
             if show_now == 'y':
                 import matplotlib.pyplot as _plt
