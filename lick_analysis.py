@@ -367,7 +367,7 @@ def calculate_time_to_50_percent_licks(events_df: pd.DataFrame, sensor_col: str)
     return time_at_50_percent_min
 
 
-def compute_lick_bouts(events_df: pd.DataFrame, sensor_cols: List[str], ili_cutoff: float = 0.3) -> dict:
+def compute_lick_bouts(events_df: pd.DataFrame, sensor_cols: List[str], ili_cutoff: float = 0.5) -> dict:
     """Compute lick bouts for each sensor."""
     bout_results = {}
     
@@ -5140,7 +5140,7 @@ def process_single_week(
     capacitive_file: Path,
     master_df: pd.DataFrame,
     fixed_threshold: float = 0.01,
-    ili_cutoff: float = 0.3
+    ili_cutoff: float = 0.5
 ) -> Dict:
     """Process a single week's data and return summary statistics."""
     print(f"\n{'='*60}")
@@ -5304,6 +5304,8 @@ def process_single_week(
         
         # Weights and fecal counts
         bottle_wt = sensor_to_weight.get(sensor, 0)
+        # Apply evaporation/instrument loss correction: subtract 0.11, floor at 0
+        bottle_wt = max(0.0, bottle_wt - 0.11)
         total_wt = sensor_to_weight_loss.get(sensor, 0)
         fecal = sensor_to_fecal.get(sensor, 0)
         
