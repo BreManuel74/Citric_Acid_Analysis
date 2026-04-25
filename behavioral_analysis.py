@@ -46,7 +46,7 @@ plt.rcParams["svg.fonttype"] = "none"
 # ═══════════════════════════════════════════════════════════════════════════════
 #  EXPERIMENT MODE — change this single value to switch between designs
 # ═══════════════════════════════════════════════════════════════════════════════
-EXPERIMENT_MODE = 'ramp'   # 'ramp' or 'nonramp'
+EXPERIMENT_MODE = 'nonramp'   # 'ramp' or 'nonramp'
 
 _MODE_LABELS = {
     'ramp': {
@@ -446,8 +446,15 @@ def build_ca_percent_series_by_day(df: pd.DataFrame) -> pd.Series:
 	if "Day" not in cdf.columns:
 		raise ValueError("Failed to compute 'Day' column for CA% series")
 
-	# Keep rows with Day and CA
+	# Keep rows with Day and CA, AND at least one actual measurement value.
+	# Rows that have only CA (%) filled but no weight/behavioral data are template
+	# rows for unreached concentration levels and must be excluded.
 	tmp = cdf.dropna(subset=["Day", "CA (%)"]).copy()
+	_measure_cols = [c for c in ["Daily Change", "Total Change", "Weight",
+	                              "Nest Made?", "Lethargy?", "Anxious Behaviors?", "CA Spot Digging?"]
+	                 if c in tmp.columns]
+	if _measure_cols:
+		tmp = tmp[tmp[_measure_cols].notna().any(axis=1)]
 	if tmp.empty:
 		return pd.Series(dtype=float)
 
@@ -1740,8 +1747,15 @@ def plot_pie_charts_by_ca_percent(
 	if "CA (%)" not in cdf.columns:
 		raise ValueError("'CA (%)' column not found in DataFrame")
 	
-	# Get unique CA% levels, sorted
-	ca_levels = sorted(cdf["CA (%)"].dropna().unique())
+	# Get unique CA% levels that have at least one actual behavioral observation.
+	# Exclude template rows where CA (%) is filled but no measurements were recorded.
+	_behav_check = [c for c in ['Nest Made?', 'Lethargy?', 'Anxious Behaviors?', 'CA Spot Digging?']
+	                if c in cdf.columns]
+	if _behav_check:
+		_has_behav = cdf[_behav_check].notna().any(axis=1)
+		ca_levels = sorted(cdf.loc[_has_behav, "CA (%)"].dropna().unique())
+	else:
+		ca_levels = sorted(cdf["CA (%)"].dropna().unique())
 	
 	# Define behavioral columns
 	behavioral_cols = [
@@ -2022,7 +2036,15 @@ def plot_aberrant_behaviors_lines(
 	if within_col not in cdf.columns:
 		raise ValueError(f"Column '{within_col}' not found in DataFrame")
 
-	groups = sorted(cdf[within_col].dropna().unique())
+	# Only include within-factor levels where at least one behavioral measurement exists.
+	# Empty template rows (CA%/Week filled but no observations recorded) are excluded.
+	_behav_check = [c for c in ['Nest Made?', 'Lethargy?', 'Anxious Behaviors?', 'CA Spot Digging?']
+	                if c in cdf.columns]
+	if _behav_check:
+		_has_behav = cdf[_behav_check].notna().any(axis=1)
+		groups = sorted(cdf.loc[_has_behav, within_col].dropna().unique())
+	else:
+		groups = sorted(cdf[within_col].dropna().unique())
 	x_labels_display = [_group_label(g) for g in groups]
 	x = np.arange(len(groups))
 
@@ -2120,7 +2142,14 @@ def plot_aberrant_behaviors_load_bar(
 	if within_col not in cdf.columns:
 		raise ValueError(f"Column '{within_col}' not found in DataFrame")
 
-	groups = sorted(cdf[within_col].dropna().unique())
+	# Only include within-factor levels where at least one behavioral measurement exists.
+	_behav_check = [c for c in ['Nest Made?', 'Lethargy?', 'Anxious Behaviors?', 'CA Spot Digging?']
+	                if c in cdf.columns]
+	if _behav_check:
+		_has_behav = cdf[_behav_check].notna().any(axis=1)
+		groups = sorted(cdf.loc[_has_behav, within_col].dropna().unique())
+	else:
+		groups = sorted(cdf[within_col].dropna().unique())
 	x_labels_display = [_group_label(g) for g in groups]
 
 	# Count aberrant behaviors per row

@@ -32,6 +32,19 @@ except ImportError:
 	print("Warning: statsmodels not installed. Tukey HSD post-hoc tests will not be available.")
 	print("Install with: pip install statsmodels")
 
+# Configure matplotlib for publication-quality plots
+plt.rcParams["font.family"] = "sans-serif"
+plt.rcParams["font.sans-serif"] = ["Arial"]
+plt.rcParams["svg.fonttype"] = "none"
+plt.rcParams.update({
+	"font.size": 11,
+	"axes.titlesize": 13,
+	"axes.labelsize": 12,
+	"xtick.labelsize": 10,
+	"ytick.labelsize": 10,
+	"legend.fontsize": 10,
+	"figure.titlesize": 14,
+    })
 
 # ==============================================================================
 # PLOTTING HELPER FUNCTIONS (adapted from ramp_analysis.py)
@@ -3069,9 +3082,12 @@ def plot_total_change_by_id(
 		fig.tight_layout()
 
 	if save_path is not None:
+		save_path = Path(save_path)
 		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
-
-	if save_svg:
+		svg_path = save_path.with_suffix(".svg")
+		fig.savefig(str(svg_path), format="svg", bbox_inches="tight")
+		print(f"  [OK] Saved SVG: {svg_path}")
+	elif save_svg:
 		base = svg_filename or (title or "total_change_by_id")
 		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
 		if not safe.lower().endswith(".svg"):
@@ -3170,9 +3186,12 @@ def plot_daily_change_by_id(
 		fig.tight_layout()
 
 	if save_path is not None:
+		save_path = Path(save_path)
 		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
-
-	if save_svg:
+		svg_path = save_path.with_suffix(".svg")
+		fig.savefig(str(svg_path), format="svg", bbox_inches="tight")
+		print(f"  [OK] Saved SVG: {svg_path}")
+	elif save_svg:
 		base = svg_filename or (title or "daily_change_by_id")
 		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
 		if not safe.lower().endswith(".svg"):
@@ -3270,9 +3289,12 @@ def plot_total_change_by_sex(
 	fig.tight_layout()
 	
 	if save_path is not None:
+		save_path = Path(save_path)
 		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
-	
-	if save_svg:
+		svg_path = save_path.with_suffix(".svg")
+		fig.savefig(str(svg_path), format="svg", bbox_inches="tight")
+		print(f"  [OK] Saved SVG: {svg_path}")
+	elif save_svg:
 		base = svg_filename or (title or "total_change_by_sex")
 		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
 		if not safe.lower().endswith(".svg"):
@@ -3369,9 +3391,12 @@ def plot_daily_change_by_sex(
 	fig.tight_layout()
 	
 	if save_path is not None:
+		save_path = Path(save_path)
 		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
-	
-	if save_svg:
+		svg_path = save_path.with_suffix(".svg")
+		fig.savefig(str(svg_path), format="svg", bbox_inches="tight")
+		print(f"  [OK] Saved SVG: {svg_path}")
+	elif save_svg:
 		base = svg_filename or (title or "daily_change_by_sex")
 		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
 		if not safe.lower().endswith(".svg"):
@@ -3480,9 +3505,12 @@ def plot_total_change_by_ca(
 	fig.tight_layout()
 	
 	if save_path is not None:
+		save_path = Path(save_path)
 		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
-	
-	if save_svg:
+		svg_path = save_path.with_suffix(".svg")
+		fig.savefig(str(svg_path), format="svg", bbox_inches="tight")
+		print(f"  [OK] Saved SVG: {svg_path}")
+	elif save_svg:
 		base = svg_filename or (title or "total_change_by_ca")
 		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
 		if not safe.lower().endswith(".svg"):
@@ -3591,9 +3619,12 @@ def plot_daily_change_by_ca(
 	fig.tight_layout()
 	
 	if save_path is not None:
+		save_path = Path(save_path)
 		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
-	
-	if save_svg:
+		svg_path = save_path.with_suffix(".svg")
+		fig.savefig(str(svg_path), format="svg", bbox_inches="tight")
+		print(f"  [OK] Saved SVG: {svg_path}")
+	elif save_svg:
 		base = svg_filename or (title or "daily_change_by_ca")
 		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
 		if not safe.lower().endswith(".svg"):
@@ -4022,8 +4053,12 @@ def plot_slopes_comparison_cah(
 	plt.tight_layout()
 	
 	if save_path is not None:
-		fig.savefig(save_path, dpi=300, bbox_inches='tight')
+		save_path = Path(save_path)
+		fig.savefig(str(save_path), dpi=300, bbox_inches='tight')
 		print(f"\n[OK] Plot saved to: {save_path}")
+		svg_path = save_path.with_suffix(".svg")
+		fig.savefig(str(svg_path), format='svg', bbox_inches='tight')
+		print(f"  [OK] Saved SVG: {svg_path}")
 	
 	if show:
 		plt.show()
@@ -4263,7 +4298,7 @@ def perform_complete_slope_analysis_cah(
 	
 	# Create visualization
 	if save_plot:
-		plot_path = output_dir / f"CAH_slope_analysis_{measure.replace(' ', '_')}_{timestamp}.svg"
+		plot_path = output_dir / f"CAH_slope_analysis_{measure.replace(' ', '_')}_{timestamp}.png"
 		plot_slopes_comparison_cah(
 			slopes_df,
 			measure=measure,
@@ -4980,6 +5015,7 @@ def main():
   [7]  2-Way Mixed ANOVA — CA% × {time} (all animals, sex collapsed){week_only}
   [8]  Slope analysis — rate of weight change between CA% groups
   [9]  Interaction plots for significant effects
+  [P]  Daily & Total Change plots (by ID / by Sex / by CA%)
   [N]  Normality tests — Shapiro-Wilk (residuals), Levene's, Mauchly's W & Q-Q plots
   [A]  Run ALL analyses (1-8) and save all reports
   [Q]  Quit
@@ -5404,6 +5440,67 @@ def main():
 				print(f"Plots saved to: {out_dir.resolve()}")
 			continue
 
+		# ── Option P: Daily & Total Change plots ─────────────────────────────
+		if choice == 'P':
+			save_plots = input("Save plots to files? (y/n, default=y): ").strip().lower() != 'n'
+			show_plots = input("Display plots interactively? (y/n, default=n): ").strip().lower() == 'y'
+			PLOT_MENU = """
+  Select plots to generate:
+    [1]  Total Change by ID        [2]  Daily Change by ID
+    [3]  Total Change by Sex       [4]  Daily Change by Sex
+    [5]  Total Change by CA%       [6]  Daily Change by CA%
+    [A]  All of the above
+"""
+			print(PLOT_MENU)
+			pc = input("Enter choice (1-6, A): ").strip().upper()
+			run_all_plots = pc == 'A'
+
+			def _plot_save(fig: plt.Figure, stem: str, show: bool = show_plots) -> None:
+				"""Save figure as PNG and SVG, then close if not showing."""
+				if save_plots:
+					png_path = out_dir / f"{stem}.png"
+					fig.savefig(str(png_path), dpi=200, bbox_inches='tight')
+					print(f"  [OK] Saved PNG: {png_path}")
+					svg_path = out_dir / f"{stem}.svg"
+					fig.savefig(str(svg_path), format='svg', bbox_inches='tight')
+					print(f"  [OK] Saved SVG: {svg_path}")
+				if not show:
+					plt.close(fig)
+
+			if pc in ('1', 'A'):
+				fig = plot_total_change_by_id(df, show=show_plots,
+				                              title="Total Weight Change by Day per Animal")
+				_plot_save(fig, "CAH_total_change_by_id")
+
+			if pc in ('2', 'A'):
+				fig = plot_daily_change_by_id(df, show=show_plots,
+				                              title="Daily Weight Change by Day per Animal")
+				_plot_save(fig, "CAH_daily_change_by_id")
+
+			if pc in ('3', 'A'):
+				fig = plot_total_change_by_sex(df, show=show_plots,
+				                               title="Total Weight Change by Day — by Sex")
+				_plot_save(fig, "CAH_total_change_by_sex")
+
+			if pc in ('4', 'A'):
+				fig = plot_daily_change_by_sex(df, show=show_plots,
+				                               title="Daily Weight Change by Day — by Sex")
+				_plot_save(fig, "CAH_daily_change_by_sex")
+
+			if pc in ('5', 'A'):
+				fig = plot_total_change_by_ca(df, show=show_plots,
+				                              title="Total Weight Change by Day — by CA%")
+				_plot_save(fig, "CAH_total_change_by_ca")
+
+			if pc in ('6', 'A'):
+				fig = plot_daily_change_by_ca(df, show=show_plots,
+				                              title="Daily Weight Change by Day — by CA%")
+				_plot_save(fig, "CAH_daily_change_by_ca")
+
+			if pc not in ('1','2','3','4','5','6','A'):
+				print(f"  [!] Unknown plot choice '{pc}'.")
+			continue
+
 		# ── Option N: Normality tests ─────────────────────────────────────────
 		if choice == 'N':
 			ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -5591,7 +5688,7 @@ def main():
 			print("="*80)
 			continue
 
-		if choice not in ('1','2','3','4','5','6','7','8','9','N','A','Q'):
+		if choice not in ('1','2','3','4','5','6','7','8','9','N','P','A','Q'):
 			print(f"  [!] Unknown option '{choice}'. Enter a number 1-9, N, A, or Q.")
 
 	return df

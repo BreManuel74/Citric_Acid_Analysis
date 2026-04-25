@@ -3944,14 +3944,14 @@ def plot_fecal_counts_by_week(
         combined = add_week_column(combined)
 
     _FL_COLORS = {
-        0.0: {'line': 'steelblue',  'face': 'lightblue',  'edge': 'steelblue'},
-        2.0: {'line': 'darkorange', 'face': 'moccasin',   'edge': 'darkorange'},
+        0.0: {'line': '#1f77b4',  'face': 'lightblue',  'edge': '#1f77b4'},
+        2.0: {'line': '#ff7f0e', 'face': 'moccasin',   'edge': '#ff7f0e'},
     }
     _DEFAULT_COLORS = [
-        {'line': 'steelblue',  'face': 'lightblue',  'edge': 'steelblue'},
-        {'line': 'darkorange', 'face': 'moccasin',   'edge': 'darkorange'},
-        {'line': 'darkgreen',  'face': 'lightgreen', 'edge': 'darkgreen'},
-        {'line': 'purple',     'face': 'plum',       'edge': 'purple'},
+        {'line': '#1f77b4',  'face': 'lightblue',  'edge': '#1f77b4'},
+        {'line': '#ff7f0e', 'face': 'moccasin',   'edge': '#ff7f0e'},
+        {'line': '#2ca02c',  'face': 'lightgreen', 'edge': '#2ca02c'},
+        {'line': '#9467bd',     'face': 'plum',       'edge': '#9467bd'},
     ]
 
     weeks = sorted(combined['Week'].dropna().unique())
@@ -3996,6 +3996,8 @@ def plot_fecal_counts_by_week(
                  fontsize=13, weight='bold')
     ax.set_xticks(weeks)
     ax.set_xticklabels([str(int(w) + 1) for w in weeks])
+    if weeks:
+        ax.set_xlim([weeks[0] - 0.1, weeks[-1] + 0.1])
     ax.set_ylim(bottom=0)
     ax.legend(loc='best', fontsize=10)
     ax.spines['top'].set_visible(False)
@@ -4051,10 +4053,10 @@ def plot_lick_measure_by_cohort(
     
     # Color scheme for cohorts (matching lick_nonramp.py style)
     colors = [
-        {'line': 'steelblue', 'marker': 'lightblue', 'edge': 'steelblue'},
-        {'line': 'darkgreen', 'marker': 'lightgreen', 'edge': 'darkgreen'},
-        {'line': 'darkorange', 'marker': 'orange', 'edge': 'darkorange'},
-        {'line': 'purple', 'marker': 'plum', 'edge': 'purple'}
+        {'line': '#1f77b4', 'marker': 'lightblue', 'edge': '#1f77b4'},
+        {'line': '#ff7f0e', 'marker': 'moccasin', 'edge': '#ff7f0e'},
+        {'line': '#2ca02c', 'marker': 'lightgreen', 'edge': '#2ca02c'},
+        {'line': '#9467bd', 'marker': 'plum', 'edge': '#9467bd'}
     ]
     
     fig, ax = plt.subplots(figsize=(12, 8))
@@ -4140,6 +4142,7 @@ def plot_lick_measure_by_cohort(
         all_weeks = sorted(combined_df['Week'].unique())
         ax.set_xticks(all_weeks)
         ax.set_xticklabels([f"{int(w)+1}" for w in all_weeks])
+        ax.set_xlim([all_weeks[0] - 0.1, all_weeks[-1] + 0.1])
     
     ax.set_ylim(bottom=0)
     ax.legend(loc='best', fontsize=10)
@@ -4216,6 +4219,8 @@ def plot_omnibus_interaction(
     ax.set_ylabel(f'{measure_label} (mean \u00b1 SEM)', fontsize=12, weight='bold')
     ax.set_xticks(weeks)
     ax.set_xticklabels([str(int(w) + 1) for w in weeks])
+    if weeks:
+        ax.set_xlim([weeks[0] - 0.1, weeks[-1] + 0.1])
     ax.set_ylim(bottom=0)
     ax.legend(title=factor_label, loc='best', fontsize=10)
     ax.spines['top'].set_visible(False)
@@ -6232,10 +6237,10 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             ]
 
             _COHORT_COLORS = [
-                {'line': 'steelblue',  'face': 'lightblue',  'edge': 'steelblue'},
-                {'line': 'darkorange', 'face': 'moccasin',   'edge': 'darkorange'},
-                {'line': 'darkgreen',  'face': 'lightgreen', 'edge': 'darkgreen'},
-                {'line': 'purple',     'face': 'plum',       'edge': 'purple'},
+                {'line': '#1f77b4',  'face': 'lightblue',  'edge': '#1f77b4'},
+                {'line': '#f7941d', 'face': 'moccasin',   'edge': '#f7941d'},
+                {'line': '#2ca02c',  'face': 'lightgreen', 'edge': '#2ca02c'},
+                {'line': '#9467bd',     'face': 'plum',       'edge': '#9467bd'},
             ]
 
             # Group by Cohort label (not CA%, since ramp CA% varies per week)
