@@ -16,6 +16,7 @@ from matplotlib.patches import Patch
 import matplotlib.transforms as mtransforms
 from scipy import stats
 from scipy.stats import f_oneway
+from datetime import datetime
 
 # Try to import pingouin for mixed ANOVA (repeated measures)
 try:
@@ -2230,291 +2231,1137 @@ def plot_aberrant_behaviors_load_bar(
 
 # ---- Statistical Analysis Functions -----------------------------------------------------------
 
+def check_ols_assumptions_total_change(
+	df: pd.DataFrame,
+	*,
+	save_dir: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	save_report: bool = False,
+) -> dict:
+	"""
+	Assess whether Total Change meets OLS assumptions for one-factor RM ANOVA.
+
+	Model: TotalChange ~ C(within_factor) + C(ID)
+	  - C(within_factor) accounts for systematic level-to-level variation.
+	  - C(ID) partials out between-subject differences (repeated measures).
+	  - Residuals should be IID: mean ≈ 0, normally distributed, constant variance,
+	    and uncorrelated (Durbin-Watson ≈ 2).
+
+	Returns a dict with keys:
+	  'residual_mean', 'normality', 'homoscedasticity', 'variance_ratio',
+	  'independence', 'outliers', 'influential', 'figure',
+	  'n', 'n_subjects', 'within_levels'
+	"""
+	if not HAS_STATSMODELS:
+		print("check_ols_assumptions_total_change: statsmodels not available; skipping.")
+		return {'error': 'statsmodels not available'}
+
+	import statsmodels.formula.api as smf
+	from statsmodels.stats.stattools import durbin_watson
+	from statsmodels.graphics.tsaplots import plot_acf
+
+	wc = _MLB['within_col']
+	fl = _MLB['factor_label']
+
+	print("\n" + "="*80)
+	print("OLS ASSUMPTION DIAGNOSTICS FOR TOTAL CHANGE")
+	print(f"Model: TotalChange ~ C({fl}) + C(ID)")
+	print("="*80)
+
+	# ── Data preparation ─────────────────────────────────────────────────────
+	cdf = clean_master_dataframe(df)
+	cdf = _add_day_number_column(cdf)
+	if EXPERIMENT_MODE == 'nonramp':
+		cdf = _add_week_column(cdf)
+	cdf = cdf[cdf['Day'] >= 0]
+
+	if 'Total Change' not in cdf.columns:
+		print("ERROR: 'Total Change' column not found.")
+		return {'error': "Column 'Total Change' not found"}
+
+	agg = (
+		cdf[['ID', wc, 'Total Change']]
+		.dropna()
+		.groupby(['ID', wc], as_index=False)['Total Change']
+		.mean()
+	)
+	agg = agg.rename(columns={wc: 'Within', 'Total Change': 'Value'})
+	agg['Within'] = agg['Within'].astype(str)
+	agg['ID'] = agg['ID'].astype(str)
+
+	n = len(agg)
+	n_subjects = agg['ID'].nunique()
+	within_levels = sorted(agg['Within'].unique())
+
+	print(f"\nData: {n} observations, {n_subjects} subjects, {len(within_levels)} {fl} levels: {within_levels}")
+
+	if n < 10:
+		print("WARNING: Very small sample — OLS diagnostics may be unreliable.")
+
+	# ── OLS fit ──────────────────────────────────────────────────────────────
+	try:
+		model = smf.ols('Value ~ C(Within) + C(ID)', data=agg).fit()
+	except Exception as e:
+		print(f"ERROR fitting OLS model: {e}")
+		return {'error': str(e)}
+
+	residuals = model.resid.values
+	fitted = model.fittedvalues.values
+	resid_mean = float(np.mean(residuals))
+
+	print(f"\nResidual mean: {resid_mean:.6f}  (should be ≈ 0)")
+
+	# ── Normality ─────────────────────────────────────────────────────────────
+	normality = {}
+	if len(residuals) >= 3:
+		sw_stat, sw_p = stats.shapiro(residuals)
+		normality = {
+			'test': "Shapiro-Wilk",
+			'statistic': float(sw_stat),
+			'p': float(sw_p),
+			'passed': bool(sw_p >= 0.05),
+		}
+		print(f"\nNormality (Shapiro-Wilk): W = {sw_stat:.4f}, p = {sw_p:.4f} "
+		      f"({'PASSED ✓' if sw_p >= 0.05 else 'FAILED ✗ — residuals may not be normal'})")
+	else:
+		normality = {'test': 'Shapiro-Wilk', 'error': 'Too few observations'}
+		print("\nNormality: too few observations for Shapiro-Wilk")
+
+	# ── Homoscedasticity ──────────────────────────────────────────────────────
+	homoscedasticity = {}
+	level_groups = [residuals[agg['Within'].values == lvl] for lvl in within_levels if (agg['Within'].values == lvl).any()]
+	level_groups = [g for g in level_groups if len(g) >= 2]
+	if len(level_groups) >= 2:
+		lev_stat, lev_p = stats.levene(*level_groups, center='median')
+		homoscedasticity = {
+			'test': "Levene (median)",
+			'statistic': float(lev_stat),
+			'p': float(lev_p),
+			'passed': bool(lev_p >= 0.05),
+		}
+		print(f"\nHomoscedasticity (Levene's test): W = {lev_stat:.4f}, p = {lev_p:.4f} "
+		      f"({'PASSED ✓' if lev_p >= 0.05 else 'FAILED ✗ — variance may not be constant'})")
+	else:
+		homoscedasticity = {'test': 'Levene', 'error': 'Need ≥2 groups with ≥2 obs each'}
+		print("\nHomoscedasticity: insufficient groups for Levene's test")
+
+	# ── Variance ratio check ──────────────────────────────────────────────────
+	# Rule of thumb: max/min group residual variance > 4 indicates heteroscedasticity
+	# severe enough that RM ANOVA results may be unreliable.
+	# NOTE: computed on OLS residuals (same as Levene), NOT raw values, so that
+	# structural near-zero variance at baseline levels (e.g., CA%=0 where all
+	# subjects start at the same value) does not spuriously inflate the ratio.
+	variance_ratio_info = {}
+	level_variances = {
+		lvl: float(np.var(residuals[agg['Within'].values == lvl], ddof=1))
+		for lvl in within_levels
+		if (agg['Within'].values == lvl).sum() >= 2
+	}
+	if len(level_variances) >= 2:
+		_vars = list(level_variances.values())
+		_max_var = max(_vars)
+		_min_var = min(_vars)
+		_max_lvl = max(level_variances, key=level_variances.get)
+		_min_lvl = min(level_variances, key=level_variances.get)
+		var_ratio = _max_var / _min_var if _min_var > 0 else float('inf')
+		var_ratio_failed = var_ratio > 4.0
+		variance_ratio_info = {
+			'ratio': float(var_ratio),
+			'max_var': float(_max_var),
+			'max_level': _max_lvl,
+			'min_var': float(_min_var),
+			'min_level': _min_lvl,
+			'level_variances': {k: float(v) for k, v in level_variances.items()},
+			'passed': not var_ratio_failed,
+		}
+		print(f"\nVariance Ratio (max/min residual variance per level): {var_ratio:.3f} "
+		      f"({'PASSED ✓' if not var_ratio_failed else 'FAILED ✗ — ratio > 4, RM ANOVA may be inappropriate'})")
+		print(f"  Per-level residual variances:")
+		for lvl in within_levels:
+			if lvl in level_variances:
+				print(f"    {fl}={lvl}: residual var = {level_variances[lvl]:.4f}")
+		if var_ratio_failed:
+			print(f"  WARNING: Largest variance ({fl}={_max_lvl}, var={_max_var:.4f}) is "
+			      f"{var_ratio:.1f}× the smallest ({fl}={_min_lvl}, var={_min_var:.4f}).")
+			print(f"  Consider a variance-stabilizing transformation (e.g., log, sqrt) before running RM ANOVA.")
+	else:
+		variance_ratio_info = {'error': 'Insufficient groups for variance ratio'}
+		print("\nVariance ratio: insufficient groups")
+
+	# ── Outlier detection ─────────────────────────────────────────────────────
+	# Compute OLSInfluence once; reused for studentized residuals and Cook's D.
+	_influence_ok = False
+	stud_resid = np.full(n, np.nan)
+	cooks_d = np.zeros(n)
+	try:
+		_infl = model.get_influence()
+		stud_resid = _infl.resid_studentized_external
+		cooks_d, _ = _infl.cooks_distance
+		_influence_ok = True
+	except Exception as _ie:
+		print(f"\nNote: Influence statistics unavailable ({_ie}); outlier/Cook's D checks skipped.")
+
+	# 1. IQR fence (1.5 × IQR on raw OLS residuals)
+	_q1, _q3 = np.percentile(residuals, [25, 75])
+	_iqr = _q3 - _q1
+	_iqr_lo, _iqr_hi = _q1 - 1.5 * _iqr, _q3 + 1.5 * _iqr
+	_iqr_mask = (residuals < _iqr_lo) | (residuals > _iqr_hi)
+	_iqr_idx  = np.where(_iqr_mask)[0]
+
+	# 2. Externally studentized residuals (jackknife) |t*| > 3
+	_stud_mask = np.abs(stud_resid) > 3.0 if _influence_ok else np.zeros(n, dtype=bool)
+	_stud_idx  = np.where(_stud_mask)[0]
+
+	outlier_info = {
+		'iqr': {
+			'lower_bound':      float(_iqr_lo),
+			'upper_bound':      float(_iqr_hi),
+			'n_outliers':       int(_iqr_mask.sum()),
+			'outlier_indices':  _iqr_idx.tolist(),
+			'outlier_subjects': [str(agg['ID'].iloc[i]) for i in _iqr_idx],
+			'outlier_levels':   [str(agg['Within'].iloc[i]) for i in _iqr_idx],
+			'outlier_residuals':[float(residuals[i]) for i in _iqr_idx],
+		},
+		'studentized': {
+			'threshold':        3.0,
+			'available':        _influence_ok,
+			'n_outliers':       int(_stud_mask.sum()),
+			'outlier_indices':  _stud_idx.tolist(),
+			'outlier_subjects': [str(agg['ID'].iloc[i]) for i in _stud_idx],
+			'outlier_levels':   [str(agg['Within'].iloc[i]) for i in _stud_idx],
+			'outlier_values':   [float(stud_resid[i]) for i in _stud_idx],
+			'max_abs':          float(np.nanmax(np.abs(stud_resid))) if _influence_ok else float('nan'),
+		},
+	}
+
+	print(f"\nOutlier Detection:")
+	print(f"  IQR method (1.5\u00d7IQR fence):  [{_iqr_lo:.3f}, {_iqr_hi:.3f}]")
+	if _iqr_mask.sum() == 0:
+		print(f"    No IQR outliers detected \u2713")
+	else:
+		print(f"    {_iqr_mask.sum()} outlier(s) detected \u2717")
+		for i in _iqr_idx:
+			print(f"      Obs {i}: ID={agg['ID'].iloc[i]}, {fl}={agg['Within'].iloc[i]}, "
+			      f"residual = {residuals[i]:.3f}")
+	if _influence_ok:
+		print(f"  Studentized residuals (|t*|>3): max |t*| = {outlier_info['studentized']['max_abs']:.3f}")
+		if _stud_mask.sum() == 0:
+			print(f"    No studentized outliers detected \u2713")
+		else:
+			print(f"    {_stud_mask.sum()} outlier(s) detected \u2717")
+			for i in _stud_idx:
+				print(f"      Obs {i}: ID={agg['ID'].iloc[i]}, {fl}={agg['Within'].iloc[i]}, "
+				      f"t* = {stud_resid[i]:.3f}")
+
+	# ── Influential observations (Cook's distance) ────────────────────────────
+	_cooks_thresh = 4.0 / n   # common rule of thumb
+	_inf_mask = cooks_d > _cooks_thresh if _influence_ok else np.zeros(n, dtype=bool)
+	_inf_idx  = np.where(_inf_mask)[0]
+
+	influential_info = {
+		'test':             "Cook's Distance",
+		'available':        _influence_ok,
+		'threshold':        float(_cooks_thresh),
+		'n_influential':    int(_inf_mask.sum()),
+		'max_cooks_d':      float(np.max(cooks_d)) if _influence_ok else float('nan'),
+		'influential_indices':  _inf_idx.tolist(),
+		'influential_subjects': [str(agg['ID'].iloc[i]) for i in _inf_idx],
+		'influential_levels':   [str(agg['Within'].iloc[i]) for i in _inf_idx],
+		'cooks_d_values':       [float(cooks_d[i]) for i in _inf_idx],
+		'passed':           bool(_inf_mask.sum() == 0),
+	}
+
+	if _influence_ok:
+		print(f"\nInfluential Observations (Cook's D, threshold = 4/n = {_cooks_thresh:.4f}):")
+		print(f"  Max Cook's D = {np.max(cooks_d):.4f}")
+		if _inf_mask.sum() == 0:
+			print(f"  No influential observations detected \u2713")
+		else:
+			print(f"  {_inf_mask.sum()} influential observation(s) detected \u2717")
+			for i in _inf_idx:
+				print(f"    Obs {i}: ID={agg['ID'].iloc[i]}, {fl}={agg['Within'].iloc[i]}, "
+				      f"Cook's D = {cooks_d[i]:.4f}")
+
+	# ── Independence (Durbin-Watson, per-subject) ────────────────────────────
+	# Independence: check that OLS residuals from different subjects are uncorrelated.
+	# In a model with C(ID), between-subject variance is partialled out; what must
+	# hold is that the residuals from one mouse are not systematically correlated
+	# with those from another (no shared latent trend across animals).
+	def _cross_subj_independence(agg_df, resid_arr):
+		"""Build per-subject time-ordered residuals and compute cross-subject correlations."""
+		_sr = {}
+		for _subj in agg_df['ID'].unique():
+			_mask = agg_df['ID'].values == _subj
+			_idx = np.where(_mask)[0]
+			try:
+				_order = np.argsort(agg_df['Within'].iloc[_idx].astype(float).values)
+			except (ValueError, TypeError):
+				_order = np.argsort(agg_df['Within'].iloc[_idx].values)
+			_sr[str(_subj)] = resid_arr[_idx[_order]]
+		_subj_ids = list(_sr.keys())
+		_n_subj = len(_subj_ids)
+		_subj_lens = [len(v) for v in _sr.values()]
+		_balanced = len(set(_subj_lens)) == 1 and _subj_lens[0] >= 3
+		_cross_corr_mean = float('nan')
+		_cross_corr_max = float('nan')
+		_corr_matrix = None
+		if _balanced and _n_subj >= 2:
+			_mat = np.stack([_sr[s] for s in _subj_ids], axis=0)
+			_corr_matrix = np.corrcoef(_mat)
+			_off_diag = [abs(_corr_matrix[i, j])
+			             for i in range(_n_subj) for j in range(i + 1, _n_subj)]
+			_cross_corr_mean = float(np.mean(_off_diag)) if _off_diag else float('nan')
+			_cross_corr_max = float(np.max(_off_diag)) if _off_diag else float('nan')
+		return _sr, _cross_corr_mean, _cross_corr_max, _corr_matrix, _subj_ids, _balanced
+
+	subj_resid, _cross_corr, _cross_corr_max, _corr_mat, _subj_ids_list, _balanced = \
+		_cross_subj_independence(agg, residuals)
+	_indep_pass = bool(_cross_corr < 0.3) if not np.isnan(_cross_corr) else True
+	independence = {
+		'test': 'Cross-subject residual correlation',
+		'mean_abs_cross_corr': _cross_corr,
+		'max_abs_cross_corr': _cross_corr_max,
+		'correlation_matrix': _corr_mat,
+		'subject_ids': _subj_ids_list,
+		'per_subject_residuals': subj_resid,
+		'balanced': _balanced,
+		'note': ('Mean absolute cross-subject residual correlation. '
+		         'Near 0 = subjects are independent. '
+		         'Threshold 0.3 used as soft indicator; n subjects limits power.'),
+		'passed': _indep_pass,
+	}
+	print(f"\nIndependence (cross-subject residual correlation):")
+	if _balanced and not np.isnan(_cross_corr):
+		print(f"  Mean |r| across subject pairs = {_cross_corr:.4f}  (max = {_cross_corr_max:.4f})")
+		print(f"  {'PASSED \u2713' if _indep_pass else 'CONCERN \u2717 \u2014 residuals may be correlated across subjects'} "
+		      f"(threshold: mean |r| < 0.3)")
+		print(f"  (n={len(_subj_ids_list)} subjects \u2014 treat as indicative only)")
+	else:
+		print(f"  Unbalanced design or fewer than 2 subjects \u2014 cross-subject correlation not computed.")
+
+	# ── Mean within-subject residual ─────────────────────────────────────────
+	if subj_resid:
+		_resid_means = np.array([np.mean(v) for v in subj_resid.values()])
+		mean_subj_resid = float(np.mean(_resid_means))
+		print(f"\nMean within-subject residual (should be \u2248 0 if ID partialled out): {mean_subj_resid:.6f}")
+		independence['mean_subject_residual'] = mean_subj_resid
+
+	# ── Sensitivity analysis: refit without studentized residual outliers ────
+	sensitivity_info: dict = {'available': False,
+	                          'reason': 'No studentized residual outliers (|t*| > 3)'}
+	if len(_stud_idx) > 0:
+		from statsmodels.stats.anova import anova_lm as _anova_lm
+		agg_sens = agg.drop(index=_stud_idx.tolist()).reset_index(drop=True)
+		n_sens = len(agg_sens)
+		print(f"\n{'─'*60}")
+		print(f"SENSITIVITY ANALYSIS: Refit excluding {len(_stud_idx)} studentized outlier(s) (|t*| > 3)")
+		print(f"  Full model: n={n}  |  Reduced model: n={n_sens}")
+		print(f"  Removed observations:")
+		for _ii in _stud_idx:
+			print(f"    Obs {_ii}: ID={agg['ID'].iloc[_ii]}, {fl}={agg['Within'].iloc[_ii]}, "
+			      f"t*={stud_resid[_ii]:.3f}, residual={residuals[_ii]:.3f}")
+		try:
+			model_sens = smf.ols('Value ~ C(Within) + C(ID)', data=agg_sens).fit()
+			resid_sens  = model_sens.resid.values
+			fitted_sens = model_sens.fittedvalues.values
+
+			# Re-check assumptions on reduced model
+			sw_s_stat, sw_s_p = (stats.shapiro(resid_sens)
+			                     if len(resid_sens) >= 3 else (float('nan'), float('nan')))
+			_wl_sens = sorted(agg_sens['Within'].unique())
+			_lg_sens = [resid_sens[agg_sens['Within'].values == _lv]
+			            for _lv in _wl_sens
+			            if (agg_sens['Within'].values == _lv).sum() >= 2]
+			lev_s_stat, lev_s_p = (stats.levene(*_lg_sens, center='median')
+			                       if len(_lg_sens) >= 2 else (float('nan'), float('nan')))
+			_subj_resid_s, _cross_corr_s, _cross_corr_max_s, _corr_mat_s, _subj_ids_s, _balanced_s = \
+				_cross_subj_independence(agg_sens, resid_sens)
+			_indep_pass_s = bool(_cross_corr_s < 0.3) if not np.isnan(_cross_corr_s) else True
+
+			# ── Re-check all assumptions on reduced model ──────────────────
+			_resid_mean_s = float(np.mean(resid_sens))
+
+			# Variance ratio
+			_lvars_s = {
+				lv: float(np.var(resid_sens[agg_sens['Within'].values == lv], ddof=1))
+				for lv in _wl_sens
+				if (agg_sens['Within'].values == lv).sum() >= 2
+			}
+			if len(_lvars_s) >= 2:
+				_vr_s = (max(_lvars_s.values()) / min(_lvars_s.values())
+				         if min(_lvars_s.values()) > 0 else float('inf'))
+				_vr_s_pass = bool(_vr_s <= 4.0)
+			else:
+				_vr_s, _vr_s_pass = float('nan'), True
+
+			# IQR outliers
+			_q1_s, _q3_s = float(np.percentile(resid_sens, 25)), float(np.percentile(resid_sens, 75))
+			_iqr_s_val = _q3_s - _q1_s
+			_n_iqr_s = int(
+				((resid_sens < _q1_s - 1.5 * _iqr_s_val) |
+				 (resid_sens > _q3_s + 1.5 * _iqr_s_val)).sum()
+			)
+
+			# Studentized residuals + Cook's D
+			_n_stud_s = 0;    _max_stud_s  = float('nan')
+			_n_cooks_s = 0;   _max_cooks_s = float('nan')
+			_cooks_thresh_s = 4.0 / n_sens if n_sens > 0 else float('nan')
+			try:
+				_infl_s      = model_sens.get_influence()
+				_stud_s_vals = _infl_s.resid_studentized_external
+				_cooks_s_vals, _ = _infl_s.cooks_distance
+				_n_stud_s    = int((np.abs(_stud_s_vals) > 3.0).sum())
+				_max_stud_s  = float(np.nanmax(np.abs(_stud_s_vals)))
+				_n_cooks_s   = int((_cooks_s_vals > _cooks_thresh_s).sum())
+				_max_cooks_s = float(np.max(_cooks_s_vals))
+			except Exception:
+				pass
+
+			# Fit metrics
+			r2_full   = float(model.rsquared)
+			r2_sens   = float(model_sens.rsquared)
+			rmse_full = float(np.sqrt(np.mean(residuals**2)))
+			rmse_sens = float(np.sqrt(np.mean(resid_sens**2)))
+
+			# Within-factor F from Type-I ANOVA table
+			f_within_full = float('nan')
+			f_within_sens = float('nan')
+			try:
+				_at_full = _anova_lm(model,      typ=1)
+				_at_sens = _anova_lm(model_sens, typ=1)
+				if 'C(Within)' in _at_full.index:
+					f_within_full = float(_at_full.loc['C(Within)', 'F'])
+				if 'C(Within)' in _at_sens.index:
+					f_within_sens = float(_at_sens.loc['C(Within)', 'F'])
+			except Exception:
+				pass
+
+			_sw_p_full  = normality.get('p', float('nan'))
+			_lev_p_full = homoscedasticity.get('p', float('nan'))
+
+			print(f"\n  {'Metric':<26} {'Full model':>12}  {'Reduced model':>14}  {'\u0394':>10}")
+			print(f"  {'─'*66}")
+			print(f"  {'n':<26} {n:>12d}  {n_sens:>14d}  {n_sens - n:>+10d}")
+			print(f"  {'R\u00b2':<26} {r2_full:>12.4f}  {r2_sens:>14.4f}  {r2_sens - r2_full:>+10.4f}")
+			print(f"  {'Residual RMSE':<26} {rmse_full:>12.4f}  {rmse_sens:>14.4f}  {rmse_sens - rmse_full:>+10.4f}")
+			if not np.isnan(f_within_full):
+				print(f"  {f'F ({fl})':<26} {f_within_full:>12.3f}  {f_within_sens:>14.3f}  {f_within_sens - f_within_full:>+10.3f}")
+			print(f"  {'SW normality p':<26} {_sw_p_full:>12.4f}  {sw_s_p:>14.4f}  {sw_s_p - _sw_p_full:>+10.4f}")
+			print(f"  {'Levene p':<26} {_lev_p_full:>12.4f}  {lev_s_p:>14.4f}  {lev_s_p - _lev_p_full:>+10.4f}")
+			if not (np.isnan(_cross_corr) or np.isnan(_cross_corr_s)):
+				print(f"  {'Cross-subj mean |r|':<26} {_cross_corr:>12.4f}  {_cross_corr_s:>14.4f}  {_cross_corr_s - _cross_corr:>+10.4f}")
+			_delta_r2 = r2_sens - r2_full
+			if abs(_delta_r2) > 0.05:
+				print(f"\n  WARNING: R\u00b2 changed by {_delta_r2:+.4f} — influential points substantially affect model fit.")
+				print(f"  Consider reporting both models or excluding flagged observations.")
+			else:
+				print(f"\n  Model is robust to removal of influential observations (\u0394R\u00b2 = {_delta_r2:+.4f}).")
+
+			sensitivity_info = {
+				'available':         True,
+				'removal_method':    'studentized_residuals',
+				'n_removed':         len(_stud_idx),
+				'removed_indices':   _stud_idx.tolist(),
+				'removed_subjects':  [str(agg['ID'].iloc[_ii]) for _ii in _stud_idx],
+				'removed_levels':    [str(agg['Within'].iloc[_ii]) for _ii in _stud_idx],
+				'n_full':            n,
+				'n_reduced':         n_sens,
+				'r2_full':           r2_full,
+				'r2_reduced':        r2_sens,
+				'delta_r2':          float(_delta_r2),
+				'rmse_full':         rmse_full,
+				'rmse_reduced':      rmse_sens,
+				'delta_rmse':        float(rmse_sens - rmse_full),
+				'f_within_full':     f_within_full,
+				'f_within_reduced':  f_within_sens,
+				'sw_p_full':         float(_sw_p_full),
+				'sw_p_reduced':      float(sw_s_p),
+				'levene_p_full':     float(_lev_p_full),
+				'levene_p_reduced':  float(lev_s_p),
+				'cross_corr_full':        _cross_corr,
+				'cross_corr_reduced':     _cross_corr_s,
+				'cross_corr_max_full':    _cross_corr_max,
+				'cross_corr_max_reduced': _cross_corr_max_s,
+				'per_subj_resid_reduced': _subj_resid_s,
+				'resid_mean_reduced':   _resid_mean_s,
+				'vr_reduced':           _vr_s,
+				'vr_pass_reduced':      _vr_s_pass,
+				'sw_pass_reduced':      bool(sw_s_p > 0.05),
+				'lev_pass_reduced':     bool(lev_s_p > 0.05),
+				'indep_pass_reduced':   _indep_pass_s,
+				'n_iqr_reduced':        _n_iqr_s,
+				'n_stud_reduced':       _n_stud_s,
+				'max_stud_reduced':     _max_stud_s,
+				'n_cooks_reduced':      _n_cooks_s,
+				'max_cooks_reduced':    _max_cooks_s,
+				'cooks_thresh_reduced': _cooks_thresh_s,
+				'model_reduced':     model_sens,
+				'residuals_reduced': resid_sens,
+				'fitted_reduced':    fitted_sens,
+				'agg_reduced':       agg_sens,
+			}
+		except Exception as _se:
+			print(f"  Sensitivity refit failed: {_se}")
+			sensitivity_info = {'available': False, 'reason': str(_se)}
+	else:
+		sensitivity_info = {'available': False,
+		                    'reason': 'No studentized residual outliers (|t*| > 3) — full model is final'}
+		print(f"\nSensitivity analysis: no studentized outliers (|t*| > 3) — full model is the final model.")
+
+	# ── Diagnostic Plots ─────────────────────────────────────────────────────
+	# Helper: build one 3×3 diagnostic figure from any model's data.
+	def _make_diag_fig(
+		fig_title,
+		n_obs, n_subj,
+		resid_arr, fitted_arr,
+		sw_p_val, lev_p_val, indep_info,
+		wlevels, agg_df,
+		stud_arr, cooks_arr,
+		iqr_mask_arr, iqr_lo_val, iqr_hi_val,
+		stud_mask_arr, inf_mask_arr,
+		cooks_thresh_val, infl_ok,
+	):
+		_fig, _axes = plt.subplots(3, 3, figsize=(18, 12))
+		_fig.suptitle(fig_title, fontsize=12, fontweight='bold')
+
+		# 1. Residuals vs Fitted
+		_ax = _axes[0, 0]
+		_ax.scatter(fitted_arr, resid_arr, alpha=0.6, edgecolors='k', linewidths=0.5)
+		_ax.axhline(0, color='red', linestyle='--', linewidth=1.5)
+		_ax.set_xlabel("Fitted Values")
+		_ax.set_ylabel("Residuals")
+		_ax.set_title("Residuals vs Fitted\n(should scatter around 0 uniformly)")
+
+		# 2. Q-Q plot
+		_ax = _axes[0, 1]
+		(osm, osr), (slope, intercept, _) = stats.probplot(resid_arr, dist="norm")
+		_ax.scatter(osm, osr, alpha=0.6, edgecolors='k', linewidths=0.5)
+		_xlim = np.array([min(osm), max(osm)])
+		_ax.plot(_xlim, slope * _xlim + intercept, color='red', linestyle='--', linewidth=1.5)
+		_ax.set_xlabel("Theoretical Quantiles")
+		_ax.set_ylabel("Sample Quantiles")
+		_ax.set_title(f"Normal Q-Q Plot\nShapiro-Wilk p = {sw_p_val:.4f}")
+
+		# 3. Scale-Location (√|residuals| vs fitted)
+		_ax = _axes[0, 2]
+		_ax.scatter(fitted_arr, np.sqrt(np.abs(resid_arr)), alpha=0.6, edgecolors='k', linewidths=0.5)
+		_ax.set_xlabel("Fitted Values")
+		_ax.set_ylabel("\u221a|Residuals|")
+		_ax.set_title(f"Scale-Location\nLevene p = {lev_p_val:.4f}")
+
+		# 4. IQR Outlier Detection
+		_ax = _axes[1, 0]
+		_iqr_cols = ['red' if m else 'steelblue' for m in iqr_mask_arr]
+		_iqr_flagged = np.where(iqr_mask_arr)[0]
+		_ax.scatter(range(n_obs), resid_arr, c=_iqr_cols, alpha=0.7,
+		            edgecolors='k', linewidths=0.4, zorder=3)
+		_ax.axhline(iqr_hi_val, color='orange', linestyle='--', linewidth=1.5,
+		            label=f'Upper fence ({iqr_hi_val:.2f})')
+		_ax.axhline(iqr_lo_val, color='orange', linestyle='--', linewidth=1.5,
+		            label=f'Lower fence ({iqr_lo_val:.2f})')
+		_ax.axhline(0, color='black', linestyle='-', linewidth=0.8)
+		for _i in _iqr_flagged:
+			_ax.annotate(f"{agg_df['ID'].iloc[_i]}\n{fl}={agg_df['Within'].iloc[_i]}",
+			             xy=(_i, resid_arr[_i]), xytext=(4, 4),
+			             textcoords='offset points', fontsize=7, color='red')
+		_ax.set_xlabel("Observation Index")
+		_ax.set_ylabel("Residuals")
+		_ax.set_title(f"IQR Outlier Detection (1.5\u00d7IQR fence)\n"
+		              f"{iqr_mask_arr.sum()} outlier(s) \u2014 red=flagged, blue=normal")
+		_ax.legend(fontsize=7)
+
+		# 5. Residuals by level
+		_ax = _axes[1, 1]
+		_lvl_data = [resid_arr[agg_df['Within'].values == _lv] for _lv in wlevels]
+		_ax.boxplot(_lvl_data, tick_labels=[str(_l) for _l in wlevels], patch_artist=True)
+		_ax.axhline(0, color='red', linestyle='--', linewidth=1.5)
+		_ax.set_xlabel(fl)
+		_ax.set_ylabel("Residuals")
+		_ax.set_title("Residuals by Level\n(boxes should be centered near 0 with similar spread)")
+
+		# 6. Residual Histogram
+		_ax = _axes[1, 2]
+		_ax.hist(resid_arr, bins=max(8, int(np.sqrt(n_obs))), edgecolor='black', alpha=0.7)
+		_mu, _std = float(np.mean(resid_arr)), float(np.std(resid_arr))
+		_xn = np.linspace(_mu - 3.5*_std, _mu + 3.5*_std, 200)
+		_ax.plot(_xn, stats.norm.pdf(_xn, _mu, _std) * n_obs * (_xn[1] - _xn[0]),
+		         color='red', linestyle='--', linewidth=1.5, label='Normal fit')
+		_ax.set_xlabel("Residuals")
+		_ax.set_ylabel("Count")
+		_ax.set_title(f"Residual Histogram\nmean = {_mu:.3f}")
+		_ax.legend(fontsize=8)
+
+		# 7. Per-subject residuals (cross-subject independence)
+		_ax = _axes[2, 0]
+		_cr = indep_info.get('mean_abs_cross_corr', float('nan'))
+		_ps = indep_info.get('per_subject_residuals', {})
+		_prop_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+		for _ci, (_sid, _sv) in enumerate(_ps.items()):
+			_col = _prop_cycle[_ci % len(_prop_cycle)]
+			_ax.plot(range(len(_sv)), _sv, 'o-', alpha=0.7,
+			         markersize=4, color=_col, label=str(_sid))
+		_ax.axhline(0, color='red', linestyle='--', linewidth=1.5)
+		_ax.set_xlabel(f"Time point ({fl} order within subject)")
+		_ax.set_ylabel("Residuals")
+		_cr_str = f"mean |r| = {_cr:.4f}" if not np.isnan(_cr) else "unbalanced"
+		_ax.set_title(f"Residuals per Subject\n({_cr_str}; parallel lines \u2192 concern)")
+		_ax.legend(fontsize=7, ncol=max(1, len(_ps) // 4))
+
+		# 8. Cook's Distance
+		_ax = _axes[2, 1]
+		if infl_ok:
+			_stems = _ax.stem(range(n_obs), cooks_arr, markerfmt='o', linefmt='grey', basefmt=' ')
+			plt.setp(_stems.markerline, markersize=4)
+			_ax.axhline(cooks_thresh_val, color='red', linestyle='--', linewidth=1.5,
+			            label=f"Threshold 4/n={cooks_thresh_val:.3f}")
+			for _i in np.where(inf_mask_arr)[0]:
+				_ax.annotate(f"{agg_df['ID'].iloc[_i]}\n{fl}={agg_df['Within'].iloc[_i]}",
+				             xy=(_i, cooks_arr[_i]), xytext=(4, 4),
+				             textcoords='offset points', fontsize=7, color='red')
+			_ax.set_title(f"Cook's Distance\n({inf_mask_arr.sum()} influential, "
+			              f"threshold={cooks_thresh_val:.3f})")
+			_ax.legend(fontsize=8)
+		else:
+			_ax.text(0.5, 0.5, "Unavailable", ha='center', va='center',
+			         transform=_ax.transAxes)
+			_ax.set_title("Cook's Distance")
+		_ax.set_xlabel("Observation Index")
+		_ax.set_ylabel("Cook's D")
+
+		# 9. Externally Studentized Residuals
+		_ax = _axes[2, 2]
+		if infl_ok:
+			_stud_flag = np.where(stud_mask_arr)[0]
+			_ax.scatter(range(n_obs), stud_arr, alpha=0.6, edgecolors='k', linewidths=0.5)
+			_ax.axhline(0, color='black', linestyle='-', linewidth=0.8)
+			_ax.axhline( 3, color='red', linestyle='--', linewidth=1.5, label='|t*| = 3')
+			_ax.axhline(-3, color='red', linestyle='--', linewidth=1.5)
+			for _i in _stud_flag:
+				_ax.annotate(f"{agg_df['ID'].iloc[_i]}",
+				             xy=(_i, stud_arr[_i]), xytext=(4, 4),
+				             textcoords='offset points', fontsize=7, color='red')
+			_ax.set_title(f"Studentized Residuals\n({stud_mask_arr.sum()} outliers, |t*| > 3)")
+			_ax.legend(fontsize=8)
+		else:
+			_ax.text(0.5, 0.5, "Unavailable", ha='center', va='center',
+			         transform=_ax.transAxes)
+			_ax.set_title("Studentized Residuals")
+		_ax.set_xlabel("Observation Index")
+		_ax.set_ylabel("Studentized Residual (t*)")
+
+		try:
+			plt.tight_layout()
+		except Exception:
+			pass
+		return _fig
+
+	# ── Full model figure ─────────────────────────────────────────────────────
+	_full_title = (f"OLS Residual Diagnostics \u2014 Total Change (Full Model)\n"
+	               f"Model: Value ~ C({fl}) + C(ID)   [n={n}, subjects={n_subjects}]")
+	fig = _make_diag_fig(
+		fig_title=_full_title,
+		n_obs=n, n_subj=n_subjects,
+		resid_arr=residuals, fitted_arr=fitted,
+		sw_p_val=normality.get('p', float('nan')),
+		lev_p_val=homoscedasticity.get('p', float('nan')),
+		indep_info=independence,
+		wlevels=within_levels, agg_df=agg,
+		stud_arr=stud_resid, cooks_arr=cooks_d,
+		iqr_mask_arr=_iqr_mask, iqr_lo_val=_iqr_lo, iqr_hi_val=_iqr_hi,
+		stud_mask_arr=_stud_mask, inf_mask_arr=_inf_mask,
+		cooks_thresh_val=_cooks_thresh, infl_ok=_influence_ok,
+	)
+
+	# ── Reduced model figure (sensitivity) ───────────────────────────────────
+	fig_reduced = None
+	if sensitivity_info.get('available'):
+		_si = sensitivity_info
+		_red_model    = _si['model_reduced']
+		_red_resid    = _si['residuals_reduced']
+		_red_fitted   = _si['fitted_reduced']
+		_red_agg      = _si['agg_reduced']
+		_red_n        = _si['n_reduced']
+		_red_n_subj   = _red_agg['ID'].nunique()
+		_red_wlevels  = sorted(_red_agg['Within'].unique())
+
+		# IQR for reduced model
+		_q1r, _q3r = np.percentile(_red_resid, [25, 75])
+		_iqr_r = _q3r - _q1r
+		_iqr_lo_r, _iqr_hi_r = _q1r - 1.5 * _iqr_r, _q3r + 1.5 * _iqr_r
+		_iqr_mask_r = (_red_resid < _iqr_lo_r) | (_red_resid > _iqr_hi_r)
+
+		# Studentized / Cook's D for reduced model (already computed in sensitivity block)
+		_stud_r_arr   = np.full(_red_n, np.nan)
+		_cooks_r_arr  = np.zeros(_red_n)
+		_infl_ok_r    = False
+		try:
+			_infl_r = _red_model.get_influence()
+			_stud_r_arr  = _infl_r.resid_studentized_external
+			_cooks_r_arr, _ = _infl_r.cooks_distance
+			_infl_ok_r = True
+		except Exception:
+			pass
+		_stud_mask_r = np.abs(_stud_r_arr) > 3.0 if _infl_ok_r else np.zeros(_red_n, dtype=bool)
+		_cooks_thresh_r = 4.0 / _red_n if _red_n > 0 else float('nan')
+		_inf_mask_r = _cooks_r_arr > _cooks_thresh_r if _infl_ok_r else np.zeros(_red_n, dtype=bool)
+
+		_red_title = (
+			f"OLS Residual Diagnostics \u2014 Total Change (Reduced Model)\n"
+			f"Model: Value ~ C({fl}) + C(ID)   "
+			f"[n={_red_n}, subjects={_red_n_subj}, "
+			f"{_si['n_removed']} studentized outlier(s) removed]"
+		)
+		fig_reduced = _make_diag_fig(
+			fig_title=_red_title,
+			n_obs=_red_n, n_subj=_red_n_subj,
+			resid_arr=_red_resid, fitted_arr=_red_fitted,
+			sw_p_val=_si['sw_p_reduced'],
+			lev_p_val=_si['levene_p_reduced'],
+			indep_info={
+				'mean_abs_cross_corr': _si.get('cross_corr_reduced', float('nan')),
+				'per_subject_residuals': _si.get('per_subj_resid_reduced', {}),
+			},
+			wlevels=_red_wlevels, agg_df=_red_agg,
+			stud_arr=_stud_r_arr, cooks_arr=_cooks_r_arr,
+			iqr_mask_arr=_iqr_mask_r, iqr_lo_val=_iqr_lo_r, iqr_hi_val=_iqr_hi_r,
+			stud_mask_arr=_stud_mask_r, inf_mask_arr=_inf_mask_r,
+			cooks_thresh_val=_cooks_thresh_r, infl_ok=_infl_ok_r,
+		)
+
+	_fig_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+	_fig_pairs = [(fig, 'full'), (fig_reduced, 'reduced')]
+
+	if save_dir is not None:
+		save_dir = Path(save_dir)
+		save_dir.mkdir(parents=True, exist_ok=True)
+		for _save_fig, _suffix in _fig_pairs:
+			if _save_fig is None:
+				continue
+			_png = save_dir / f"ols_assumptions_total_change_{_suffix}_{_fig_ts}.png"
+			_save_fig.savefig(_png, dpi=150, bbox_inches='tight')
+			print(f"\nSaved OLS diagnostics ({_suffix} model) to: {_png}")
+			if save_svg:
+				_svg = save_dir / f"ols_assumptions_total_change_{_suffix}_{_fig_ts}.svg"
+				_save_fig.savefig(_svg, format='svg', bbox_inches='tight')
+	elif save_report:
+		# Auto-save figures alongside the text report when no explicit save_dir given
+		for _save_fig, _suffix in _fig_pairs:
+			if _save_fig is None:
+				continue
+			_png = Path.cwd() / f"ols_assumptions_total_change_{_suffix}_{_fig_ts}.png"
+			try:
+				_save_fig.savefig(_png, dpi=150, bbox_inches='tight')
+				print(f"\nSaved OLS diagnostics ({_suffix} model) to: {_png}")
+			except Exception as _fe:
+				print(f"\nWarning: could not save OLS figure ({_suffix}): {_fe}")
+
+	if show:
+		plt.show()
+
+	# ── Summary ───────────────────────────────────────────────────────────────
+	print("\n" + "-"*50)
+	print("ASSUMPTION CHECK SUMMARY:")
+	print(f"  Residual mean ≈ 0:  {resid_mean:.6f}")
+	print(f"  Normality:          {'PASSED' if normality.get('passed') else 'FAILED'} (SW p={normality.get('p', float('nan')):.4f})")
+	print(f"  Homoscedasticity:   {'PASSED' if homoscedasticity.get('passed') else 'FAILED/N/A'} (Levene p={homoscedasticity.get('p', float('nan')):.4f})")
+	_vr = variance_ratio_info.get('ratio', float('nan'))
+	_vr_pass = variance_ratio_info.get('passed', True)
+	print(f"  Variance ratio:     {'PASSED' if _vr_pass else 'FAILED'} (max/min residual var = {_vr:.3f}{'  ← > 4: RM ANOVA may be inappropriate' if not _vr_pass else ''})")
+	_cr_display = (f"mean |r| = {_cross_corr:.4f}" if not np.isnan(_cross_corr)
+	               else "unbalanced \u2014 not computed")
+	print(f"  Independence:       {'PASSED' if independence.get('passed') else 'CONCERN'} ({_cr_display})")
+	print(f"  Outliers (IQR):     {outlier_info['iqr']['n_outliers']} flagged "
+	      f"{'\u2713' if outlier_info['iqr']['n_outliers'] == 0 else '\u2717'}")
+	if outlier_info['studentized']['available']:
+		print(f"  Outliers (|t*|>3):  {outlier_info['studentized']['n_outliers']} flagged "
+		      f"{'\u2713' if outlier_info['studentized']['n_outliers'] == 0 else '\u2717'} "
+		      f"(max |t*|={outlier_info['studentized']['max_abs']:.3f})")
+	if influential_info['available']:
+		print(f"  Cook's D (>4/n):    {influential_info['n_influential']} influential "
+		      f"{'\u2713' if influential_info['passed'] else '\u2717'} "
+		      f"(max D={influential_info['max_cooks_d']:.4f})")
+	all_pass = (normality.get('passed', False) and homoscedasticity.get('passed', False)
+	            and independence.get('passed', False) and _vr_pass)
+	if all_pass:
+		print(f"\nOverall: All OLS assumptions met — RM ANOVA is appropriate.")
+	elif not _vr_pass:
+		print(f"\nOverall: Variance ratio > 4 — RM ANOVA results should be interpreted with caution.")
+		print(f"  Consider a transformation (log, sqrt) or a non-parametric alternative (Friedman test).")
+	else:
+		print(f"\nOverall: One or more assumptions FAILED — interpret RM ANOVA results cautiously.")
+	print("="*80)
+
+	# ── OLS Assumption Text Report ────────────────────────────────────────────
+	if save_report:
+		def _fmt_sum(label, n_obs, resid_mean_val, sw_p, sw_pass, lev_p, lev_pass,
+		             vr, vr_pass, cross_corr, cross_corr_pass, n_iqr, n_stud, max_stud,
+		             n_cooks_d, max_cooks_d, cooks_thresh, r2, rmse):
+			L = ["-"*50, f"ASSUMPTION SUMMARY \u2014 {label}", f"  n observations: {n_obs}",
+			     f"  R\u00b2: {r2:.4f}  |  RMSE: {rmse:.4f}",
+			     f"  Residual mean \u2248 0:  {resid_mean_val:.6f}",
+			     f"  Normality:          {'PASSED' if sw_pass else 'FAILED'} (SW p={sw_p:.4f})",
+			     f"  Homoscedasticity:   {'PASSED' if lev_pass else 'FAILED/N/A'} (Levene p={lev_p:.4f})"]
+			_vr_str = f"{vr:.3f}" if not np.isnan(vr) else "N/A"
+			L.append(f"  Variance ratio:     {'PASSED' if vr_pass else 'FAILED'} "
+			         f"(max/min = {_vr_str}{'  \u2190 > 4: RM ANOVA may be inappropriate' if not vr_pass else ''})")
+			_cc_str = f"{cross_corr:.4f}" if not np.isnan(cross_corr) else "N/A (unbalanced)"
+			L.append(f"  Independence:       {'PASSED' if cross_corr_pass else 'CONCERN'} (mean |r| = {_cc_str})")
+			L.append(f"  Outliers (IQR):     {n_iqr} flagged {'\u2713' if n_iqr == 0 else '\u2717'}")
+			_ms = f"{max_stud:.3f}" if not np.isnan(max_stud) else "N/A"
+			L.append(f"  Outliers (|t*|>3):  {n_stud} flagged {'\u2713' if n_stud == 0 else '\u2717'} (max |t*|={_ms})")
+			_mc = f"{max_cooks_d:.4f}" if not np.isnan(max_cooks_d) else "N/A"
+			_ct = f"{cooks_thresh:.4f}" if not np.isnan(cooks_thresh) else "4/n"
+			L.append(f"  Cook's D (>{_ct}):  {n_cooks_d} influential "
+			         f"{'\u2713' if n_cooks_d == 0 else '\u2717'} (max D={_mc})")
+			_all = sw_pass and lev_pass and cross_corr_pass and vr_pass
+			if _all:
+				L.append("Overall: All OLS assumptions met \u2014 RM ANOVA is appropriate.")
+			elif not vr_pass:
+				L.append("Overall: Variance ratio > 4 \u2014 RM ANOVA results should be interpreted with caution.")
+				L.append("  Consider a transformation (log, sqrt) or a non-parametric alternative (Friedman test).")
+			else:
+				L.append("Overall: One or more assumptions FAILED \u2014 interpret RM ANOVA results cautiously.")
+			return "\n".join(L)
+
+		_r2_full   = float(model.rsquared)
+		_rmse_full = float(np.sqrt(np.mean(residuals**2)))
+		_full_sum  = _fmt_sum(
+			label="FULL MODEL",
+			n_obs=n,
+			resid_mean_val=resid_mean,
+			sw_p=normality.get('p', float('nan')),
+			sw_pass=normality.get('passed', False),
+			lev_p=homoscedasticity.get('p', float('nan')),
+			lev_pass=homoscedasticity.get('passed', False),
+			vr=variance_ratio_info.get('ratio', float('nan')),
+			vr_pass=variance_ratio_info.get('passed', True),
+			cross_corr=_cross_corr,
+			cross_corr_pass=independence.get('passed', False),
+			n_iqr=outlier_info['iqr']['n_outliers'],
+			n_stud=outlier_info['studentized'].get('n_outliers', 0),
+			max_stud=outlier_info['studentized'].get('max_abs', float('nan')),
+			n_cooks_d=influential_info.get('n_influential', 0),
+			max_cooks_d=influential_info.get('max_cooks_d', float('nan')),
+			cooks_thresh=influential_info.get('threshold', 4.0 / n if n > 0 else float('nan')),
+			r2=_r2_full,
+			rmse=_rmse_full,
+		)
+
+		_rpt = [
+			"=" * 80,
+			"OLS ASSUMPTION CHECK REPORT",
+			"=" * 80,
+			f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+			f"Mode: {EXPERIMENT_MODE}  |  Within-subjects factor: {fl}",
+			f"Model: Value ~ C({fl}) + C(ID)   [n={n}, subjects={n_subjects}]",
+			f"Within levels: {within_levels}",
+			"=" * 80,
+			"",
+			_full_sum,
+		]
+
+		_si = sensitivity_info
+		if _si.get('available'):
+			_red_sum = _fmt_sum(
+				label=f"REDUCED MODEL (n={_si['n_reduced']}, {_si['n_removed']} studentized outlier(s) removed)",
+				n_obs=_si['n_reduced'],
+				resid_mean_val=_si.get('resid_mean_reduced', float('nan')),
+				sw_p=_si['sw_p_reduced'],
+				sw_pass=_si.get('sw_pass_reduced', _si['sw_p_reduced'] > 0.05),
+				lev_p=_si['levene_p_reduced'],
+				lev_pass=_si.get('lev_pass_reduced', _si['levene_p_reduced'] > 0.05),
+				vr=_si.get('vr_reduced', float('nan')),
+				vr_pass=_si.get('vr_pass_reduced', True),
+				cross_corr=_si.get('cross_corr_reduced', float('nan')),
+				cross_corr_pass=_si.get('indep_pass_reduced', False),
+				n_iqr=_si.get('n_iqr_reduced', 0),
+				n_stud=_si.get('n_stud_reduced', 0),
+				max_stud=_si.get('max_stud_reduced', float('nan')),
+				n_cooks_d=_si.get('n_cooks_reduced', 0),
+				max_cooks_d=_si.get('max_cooks_reduced', float('nan')),
+				cooks_thresh=_si.get('cooks_thresh_reduced', 4.0 / _si['n_reduced'] if _si['n_reduced'] > 0 else float('nan')),
+				r2=_si['r2_reduced'],
+				rmse=_si['rmse_reduced'],
+			)
+			_rpt.extend([
+				"",
+				"=" * 80,
+				"SENSITIVITY ANALYSIS \u2014 REDUCED MODEL",
+				f"Removed {_si['n_removed']} studentized outlier(s) (|t*| > 3)",
+				f"Removed subjects: {', '.join(_si['removed_subjects'])}",
+				f"Removed {fl} levels: {', '.join(_si['removed_levels'])}",
+				"=" * 80,
+				"",
+				_red_sum,
+				"",
+				"\u2500" * 60,
+				"COMPARISON TABLE (Full vs Reduced)",
+				f"  {'Metric':<26} {'Full model':>12}  {'Reduced model':>14}  {chr(916):>10}",
+				"  " + "\u2500" * 66,
+				f"  {'n':<26} {n:>12d}  {_si['n_reduced']:>14d}  {_si['n_reduced']-n:>+10d}",
+				f"  {'R\u00b2':<26} {_si['r2_full']:>12.4f}  {_si['r2_reduced']:>14.4f}  {_si['delta_r2']:>+10.4f}",
+				f"  {'RMSE':<26} {_si['rmse_full']:>12.4f}  {_si['rmse_reduced']:>14.4f}  {_si['delta_rmse']:>+10.4f}",
+				f"  {'SW normality p':<26} {_si['sw_p_full']:>12.4f}  {_si['sw_p_reduced']:>14.4f}  {_si['sw_p_reduced']-_si['sw_p_full']:>+10.4f}",
+				f"  {'Levene p':<26} {_si['levene_p_full']:>12.4f}  {_si['levene_p_reduced']:>14.4f}  {_si['levene_p_reduced']-_si['levene_p_full']:>+10.4f}",
+				(f"  {'Cross-subj mean |r|':<26} {_si['cross_corr_full']:>12.4f}  {_si['cross_corr_reduced']:>14.4f}  {_si['cross_corr_reduced']-_si['cross_corr_full']:>+10.4f}"
+				 if not (np.isnan(_si.get('cross_corr_full', float('nan'))) or np.isnan(_si.get('cross_corr_reduced', float('nan'))))
+				 else f"  {'Cross-subj mean |r|':<26} {'N/A':>12}  {'N/A':>14}  {'N/A':>10}"),
+			])
+			if not np.isnan(_si.get('f_within_full', float('nan'))):
+				_rpt.append(
+					f"  {f'F ({fl})':<26} {_si['f_within_full']:>12.3f}"
+					f"  {_si['f_within_reduced']:>14.3f}  {_si['f_within_reduced']-_si['f_within_full']:>+10.3f}"
+				)
+			_dr2 = _si['delta_r2']
+			if abs(_dr2) > 0.05:
+				_rpt.append(f"\nWARNING: R\u00b2 changed by {_dr2:+.4f} \u2014 outliers substantially affect model fit.")
+			else:
+				_rpt.append(f"\nModel is robust to removal of outliers (\u0394R\u00b2 = {_dr2:+.4f}).")
+		else:
+			_rpt.extend(["", f"SENSITIVITY ANALYSIS: {_si.get('reason', 'not run')}"])
+
+		_rpt.extend(["", "=" * 80, "END OF REPORT", "=" * 80, ""])
+		_rpt_text = "\n".join(_rpt)
+		_rpt_ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+		_rpt_path = Path.cwd() / f"ols_assumption_report_{_rpt_ts}.txt"
+		try:
+			_rpt_path.write_text(_rpt_text, encoding='utf-8')
+			print(f"\nOLS assumption report saved to: {_rpt_path}")
+		except Exception as _re:
+			print(f"\nWarning: could not save OLS report: {_re}")
+
+	return {
+		'n': n,
+		'n_subjects': n_subjects,
+		'within_levels': within_levels,
+		'residual_mean': resid_mean,
+		'normality': normality,
+		'homoscedasticity': homoscedasticity,
+		'variance_ratio': variance_ratio_info,
+		'independence': independence,
+		'cross_corr': _cross_corr,
+		'outliers': outlier_info,
+		'influential': influential_info,
+		'sensitivity_analysis': sensitivity_info,
+		'figure': fig,
+		'figure_reduced': fig_reduced,
+	}
+
+
 def perform_two_way_anova_weight(df: pd.DataFrame) -> dict:
 	"""
-	Perform MIXED ANOVA (repeated measures) examining effects of Sex and the
+	Perform one-factor repeated measures ANOVA examining the effect of the
 	within-subjects factor (Week or CA%) on weight measures.
+	Sex is NOT treated as a factor.
 	"""
-	wc = _MLB['within_col']       # column name: 'CA (%)' or 'Week'
-	fl = _MLB['factor_label']     # print label: 'CA%' or 'Week'
+	wc = _MLB['within_col']        # column name: 'CA (%)' or 'Week'
+	fl = _MLB['factor_label']      # print label: 'CA%' or 'Week'
 	wk = _MLB['result_within_key'] # dict key: 'ca_percent' or 'week'
 
 	print("\n" + "="*80)
-	print(f"MIXED ANOVA: {_MLB['anova_heading']}")
+	print(f"ONE-FACTOR REPEATED MEASURES ANOVA: {fl} EFFECT ON WEIGHT")
 	print("="*80)
-	
+	print(f"Design: One-way repeated measures ANOVA")
+	print(f"  Within-subjects factor: {fl} (same animals at each level)")
+	print(f"  Subject identifier: ID")
+	print(f"  Note: Sex is not included as a factor in this analysis.")
+
 	if not HAS_PINGOUIN:
-		print("\nERROR: pingouin library is required for mixed ANOVA.")
+		print("\nERROR: pingouin library is required for repeated measures ANOVA.")
 		print("Please install it with: pip install pingouin")
-		print("\nFalling back to standard two-way ANOVA (does NOT account for repeated measures)")
+		print("\nFalling back to standard one-way ANOVA (does NOT account for repeated measures)")
 		return _perform_standard_anova_fallback(df)
-	
+
 	# Clean and prepare data
 	cdf = clean_master_dataframe(df)
 	cdf = _add_day_number_column(cdf)
 	if EXPERIMENT_MODE == 'nonramp':
 		cdf = _add_week_column(cdf)
-	
+
 	# Filter to exclude Day < 0 (baseline measurements)
 	cdf = cdf[cdf["Day"] >= 0]
-	
-	# Keep only rows with complete data
-	required_cols = ["ID", "Sex", wc, "Daily Change", "Total Change"]
+
+	# Keep only rows with complete data (no sex column required)
+	required_cols = ["ID", wc, "Daily Change", "Total Change"]
 	cdf = cdf.dropna(subset=required_cols)
-	
+
 	# Convert within-factor to integer for cleaner grouping
 	cdf[wc] = cdf[wc].astype(int)
-	
+
 	print(f"\nData summary after filtering:")
 	print(f"  Total observations: {len(cdf)}")
 	print(f"  Unique animals (subjects): {len(cdf['ID'].unique())}")
-	print(f"  Sexes: {sorted(cdf['Sex'].unique())}")
 	print(f"  {_MLB['within_levels_print']}: {sorted(cdf[wc].unique())}")
-	print(f"\nDesign: Mixed (Repeated Measures) ANOVA")
-	print(f"  Between-subjects factor: Sex")
-	print(f"  {_MLB['anova_factor_desc']}")
-	print(f"  Subject identifier: ID")
-	
+
 	results = {}
-	
+
 	# Analyze each weight measure
 	measures = {
 		'Daily Change': 'Daily Change',
 		'Total Change': 'Total Change'
 	}
-	
+
 	for measure_name, column in measures.items():
 		print(f"\n{'='*60}")
-		print(f"Mixed ANOVA for: {measure_name}")
+		print(f"One-way RM ANOVA for: {measure_name}")
 		print(f"{'='*60}")
-		
-		# Create a complete dataframe for this measure with subject ID
-		measure_df = cdf[["ID", "Sex", wc, column]].copy()
+
+		measure_df = cdf[["ID", wc, column]].copy()
 		measure_df = measure_df.rename(columns={column: "Value"})
-		
-		# Convert within-factor to integer for pingouin
 		measure_df[wc] = measure_df[wc].astype(int)
-		
-		# Group summary statistics
-		print(f"\nGroup sizes:")
-		group_counts = measure_df.groupby(["Sex", wc]).size().reset_index(name="n")
-		for _, row in group_counts.iterrows():
-			print(f"  Sex={row['Sex']}, {_MLB['within_print_eq']}={row[wc]}: n={row['n']}")
-		
-		# Descriptive statistics
-		print(f"\nDescriptive statistics:")
-		
-		# Enhanced descriptive statistics
-		def compute_desc_stats(group):
+
+		# Descriptive statistics per within-factor level
+		print(f"\nDescriptive statistics by {fl}:")
+		def _desc(group):
 			n = len(group)
 			mean = group.mean()
 			std = group.std(ddof=1)
 			sem = std / np.sqrt(n) if n > 0 else np.nan
-			ci_lower = mean - 1.96 * sem
-			ci_upper = mean + 1.96 * sem
 			return pd.Series({
-				'mean': mean,
-				'median': group.median(),
-				'std': std,
-				'sem': sem,
-				'ci_lower': ci_lower,
-				'ci_upper': ci_upper,
-				'q25': group.quantile(0.25),
-				'q75': group.quantile(0.75),
-				'min': group.min(),
-				'max': group.max(),
-				'count': n
+				'mean': mean, 'median': group.median(), 'std': std, 'sem': sem,
+				'ci_lower': mean - 1.96 * sem, 'ci_upper': mean + 1.96 * sem,
+				'q25': group.quantile(0.25), 'q75': group.quantile(0.75),
+				'min': group.min(), 'max': group.max(), 'count': n
 			})
-		
-		# Collect statistics for each group
-		stats_data = []
-		for (sex, wval), group_data in measure_df.groupby(["Sex", wc])["Value"]:
-			stats = compute_desc_stats(group_data)
-			stats['Sex'] = sex
-			stats[wc] = wval
-			stats_data.append(stats)
-		group_stats = pd.DataFrame(stats_data)
-		
-		for _, row in group_stats.iterrows():
-			print(f"  Sex={row['Sex']}, {_MLB['within_print_eq']}={row[wc]}: "
-				  f"M={row['mean']:.3f}, Mdn={row['median']:.3f}, SD={row['std']:.3f}, "
-				  f"SEM={row['sem']:.3f}, n={row['count']:.0f}")
-		
-		# Check for subjects with data in all within-factor levels
+
+		level_stats_data = []
+		for wval, grp in measure_df.groupby(wc)["Value"]:
+			s = _desc(grp)
+			s[wc] = wval
+			level_stats_data.append(s)
+		level_stats = pd.DataFrame(level_stats_data)
+
+		for _, row in level_stats.iterrows():
+			print(f"  {_MLB['within_print_eq']}={int(row[wc])}: "
+			      f"M={row['mean']:.3f}, Mdn={row['median']:.3f}, SD={row['std']:.3f}, "
+			      f"SEM={row['sem']:.3f}, n={int(row['count'])}")
+
+		# Identify complete subjects
 		subjects_per_level = measure_df.groupby('ID')[wc].nunique()
 		total_levels = measure_df[wc].nunique()
 		complete_subjects = subjects_per_level[subjects_per_level == total_levels].index.tolist()
 		incomplete_subjects = subjects_per_level[subjects_per_level < total_levels].index.tolist()
-		
+
 		if incomplete_subjects:
-			print(f"\nWarning: {len(incomplete_subjects)} subjects missing data in some {fl} levels:")
+			print(f"\nWarning: {len(incomplete_subjects)} subjects missing data in some {fl} levels.")
 			for subj in incomplete_subjects:
 				present = sorted(measure_df[measure_df['ID'] == subj][wc].unique())
 				print(f"  {subj}: present in {fl} {present}")
-			print(f"Complete subjects (all {fl} levels): {len(complete_subjects)}")
-			print(f"Note: Filtering to only subjects with complete data across all {fl} levels...")
-			
-			# Filter to only complete subjects (required for proper repeated measures ANOVA)
+			print(f"Filtering to {len(complete_subjects)} complete subjects for RM ANOVA...")
 			measure_df = measure_df[measure_df['ID'].isin(complete_subjects)].copy()
 			print(f"After filtering: {len(measure_df['ID'].unique())} subjects, {len(measure_df)} total observations")
-		
+
 		try:
-			print(f"\nRunning mixed ANOVA...")
-			aov = pg.mixed_anova(
-				data=measure_df,
+			print(f"\nRunning one-way repeated measures ANOVA (pingouin rm_anova)...")
+			# Per-subject mean per level (average across days within a level)
+			agg_df = measure_df.groupby(['ID', wc], as_index=False)['Value'].mean()
+			aov = pg.rm_anova(
+				data=agg_df,
 				dv='Value',
 				within=wc,
-				between='Sex',
 				subject='ID',
-				correction='auto'
+				correction='auto',
+				detailed=True,
 			)
-			
-			print(f"\nMixed ANOVA Results:")
+
+			print(f"\nRM ANOVA Results:")
 			print(aov.to_string())
-			print(f"\nAvailable columns in ANOVA table: {list(aov.columns)}")
-			
-			# Extract results for each effect
-			sex_row = aov[aov['Source'] == 'Sex'].iloc[0]
+
 			within_row = aov[aov['Source'] == wc].iloc[0]
-			interaction_mask = (aov['Source'] == 'Interaction') | (aov['Source'] == f'Sex * {wc}')
-			interaction_row = aov[interaction_mask].iloc[0]
-			
-			sphericity_note = ""
-			if 'np2' in aov.columns:
-				eta2_sex = sex_row.get('np2', np.nan)
-				eta2_within = within_row.get('np2', np.nan)
-				eta2_interaction = interaction_row.get('np2', np.nan)
+
+			# Resolve column name differences across pingouin versions
+			# Older versions: 'ddof1'/'ddof2'; newer versions: 'DF' (with Error row for ddof2)
+			if 'ddof1' in within_row.index:
+				df_effect_val = float(within_row['ddof1'])
+				df_error_val  = float(within_row['ddof2'])
 			else:
-				eta2_sex = np.nan
-				eta2_within = np.nan
-				eta2_interaction = np.nan
-			
+				df_effect_val = float(within_row['DF'])
+				_err_rows = aov[aov['Source'] == 'Error']
+				df_error_val = float(_err_rows.iloc[0]['DF']) if not _err_rows.empty else np.nan
+
+			# Resolve p-value column name ('p-unc' vs 'p_unc' across versions)
+			p_unc_col = 'p-unc' if 'p-unc' in within_row.index else 'p_unc'
+			p_unc_val  = float(within_row[p_unc_col])
+
+			eta2_within = within_row.get('np2', within_row.get('eta-sq', np.nan))
+			if pd.isna(eta2_within):
+				eta2_within = 0.0
+
 			print(f"\nFormatted Results:")
-			print(f"  Sex (between-subjects): F({sex_row['DF1']:.0f},{sex_row['DF2']:.0f}) = {sex_row['F']:.3f}, p = {sex_row['p-unc']:.4f} {'***' if sex_row['p-unc'] < 0.001 else '**' if sex_row['p-unc'] < 0.01 else '*' if sex_row['p-unc'] < 0.05 else 'ns'}")
-			print(f"  {fl} (within-subjects): F({within_row['DF1']:.0f},{within_row['DF2']:.0f}) = {within_row['F']:.3f}, p = {within_row['p-unc']:.4f} {'***' if within_row['p-unc'] < 0.001 else '**' if within_row['p-unc'] < 0.01 else '*' if within_row['p-unc'] < 0.05 else 'ns'}")
-			print(f"  {_MLB['interaction_label']}: F({interaction_row['DF1']:.0f},{interaction_row['DF2']:.0f}) = {interaction_row['F']:.3f}, p = {interaction_row['p-unc']:.4f} {'***' if interaction_row['p-unc'] < 0.001 else '**' if interaction_row['p-unc'] < 0.01 else '*' if interaction_row['p-unc'] < 0.05 else 'ns'}")
-			
+			print(f"  {fl} (within-subjects): F({df_effect_val:.0f},{df_error_val:.0f}) = "
+			      f"{within_row['F']:.3f}, p = {p_unc_val:.4f} "
+			      f"{'***' if p_unc_val < 0.001 else '**' if p_unc_val < 0.01 else '*' if p_unc_val < 0.05 else 'ns'}")
+
 			# Sphericity
-			sphericity_note = ""
-			within_sphericity_info = {}
-			interaction_sphericity_info = {}
-			
-			print(f"\n  Sphericity Tests (Mauchly's):")
-			
-			w_col = 'W-spher' if 'W-spher' in within_row else 'W-sph'
-			p_col = 'p-spher' if 'p-spher' in within_row else 'p-sph'
-			
-			if w_col in within_row and not pd.isna(within_row[w_col]):
-				w_sph = within_row[w_col]
-				p_sph = within_row.get(p_col, np.nan)
-				eps_w = within_row.get('eps', np.nan)
-				p_gg = within_row.get('p-GG-corr', np.nan)
-				
-				within_sphericity_info = {
-					'W': w_sph,
-					'p': p_sph,
-					'epsilon': eps_w,
+			sphericity_info = {}
+			print(f"\n  Sphericity Test (Mauchly's):")
+			w_col = next((c for c in ['W-spher', 'W_spher', 'W-sph'] if c in within_row.index), None)
+			p_col = next((c for c in ['p-spher', 'p_spher', 'p-sph'] if c in within_row.index), None)
+			if w_col and not pd.isna(within_row[w_col]):
+				w_sph = float(within_row[w_col])
+				p_sph = float(within_row[p_col]) if p_col else np.nan
+				eps_w = float(within_row['eps']) if 'eps' in within_row.index else np.nan
+				# GG-corrected p: try multiple column names across pingouin versions
+				p_gg_col = next((c for c in ['p-GG-corr', 'p_GG_corr', 'pGGcorr'] if c in within_row.index), None)
+				p_gg = float(within_row[p_gg_col]) if p_gg_col else np.nan
+				sphericity_info = {
+					'W': w_sph, 'p': p_sph, 'epsilon': eps_w,
 					'p_GG_corrected': p_gg,
-					'violated': p_sph < 0.05 if not pd.isna(p_sph) else False
+					'violated': p_sph < 0.05 if not pd.isna(p_sph) else False,
 				}
-				
-				print(f"    {fl} effect: W = {w_sph:.4f}, p = {p_sph:.4f}")
+				print(f"    W = {w_sph:.4f}, p = {p_sph:.4f}")
 				if not pd.isna(eps_w):
 					print(f"    Greenhouse-Geisser ε = {eps_w:.4f}")
-				if p_sph < 0.05:
-					print(f"    WARNING: Sphericity assumption VIOLATED (p < .05)")
-					print(f"    Using Greenhouse-Geisser corrected p = {p_gg:.4f}")
-					sphericity_note = " (GG-corrected due to sphericity violation)"
+				if not pd.isna(p_sph) and p_sph < 0.05:
+					print(f"    WARNING: Sphericity violated (p < .05) — using GG-corrected p = {p_gg:.4f}")
 				else:
 					print(f"    Sphericity assumption met (p >= .05)")
 			else:
-				print(f"    {fl} effect: No sphericity test (only 2 levels or not applicable)")
-			
-			w_col_int = 'W-spher' if 'W-spher' in interaction_row else 'W-sph'
-			p_col_int = 'p-spher' if 'p-spher' in interaction_row else 'p-sph'
-			
-			if w_col_int in interaction_row and not pd.isna(interaction_row[w_col_int]):
-				w_sph_int = interaction_row[w_col_int]
-				p_sph_int = interaction_row.get(p_col_int, np.nan)
-				eps_int = interaction_row.get('eps', np.nan)
-				p_gg_int = interaction_row.get('p-GG-corr', np.nan)
-				
-				interaction_sphericity_info = {
-					'W': w_sph_int,
-					'p': p_sph_int,
-					'epsilon': eps_int,
-					'p_GG_corrected': p_gg_int,
-					'violated': p_sph_int < 0.05 if not pd.isna(p_sph_int) else False
-				}
-				
-				print(f"    {_MLB['interaction_label']} interaction: W = {w_sph_int:.4f}, p = {p_sph_int:.4f}")
-				if not pd.isna(eps_int):
-					print(f"    Greenhouse-Geisser ε = {eps_int:.4f}")
-				if p_sph_int < 0.05:
-					print(f"    WARNING: Sphericity assumption VIOLATED (p < .05)")
-					print(f"    Using Greenhouse-Geisser corrected p = {p_gg_int:.4f}")
-				else:
-					print(f"    Sphericity assumption met (p >= .05)")
-			else:
-				print(f"    {_MLB['interaction_label']} interaction: No sphericity test (only 2 levels or not applicable)")
-			
+				print(f"    No sphericity test (only 2 levels or not applicable)")
+
+			p_final = sphericity_info.get('p_GG_corrected', p_unc_val) \
+				if sphericity_info.get('violated', False) else p_unc_val
+			if pd.isna(p_final):
+				p_final = p_unc_val
+
 			results[measure_name] = {
 				'measure': measure_name,
 				'anova_table': aov,
-				'sex': {
-					'F': sex_row['F'],
-					'df_effect': sex_row['DF1'],
-					'df_error': sex_row['DF2'],
-					'p': sex_row['p-unc'],
-					'significant': sex_row['p-unc'] < 0.05,
-					'effect_size_eta_squared': eta2_sex if not pd.isna(eta2_sex) else 0.0,
-					'type': 'between-subjects'
-				},
 				wk: {
-					'F': within_row['F'],
-					'df_effect': within_row['DF1'],
-					'df_error': within_row['DF2'],
-					'p': within_row['p-unc'],
-					'p_corrected': within_row.get('p-GG-corr', within_row['p-unc']),
-					'significant': within_row['p-unc'] < 0.05,
-					'effect_size_eta_squared': eta2_within if not pd.isna(eta2_within) else 0.0,
+					'F': float(within_row['F']),
+					'df_effect': df_effect_val,
+					'df_error': df_error_val,
+					'p': p_unc_val,
+					'p_corrected': float(p_final),
+					'significant': float(p_final) < 0.05,
+					'effect_size_eta_squared': float(eta2_within),
 					'type': 'within-subjects (repeated measures)',
-					'sphericity_correction': sphericity_note,
-					'sphericity': within_sphericity_info
+					'sphericity': sphericity_info,
 				},
-				'interaction': {
-					'F': interaction_row['F'],
-					'df_effect': interaction_row['DF1'],
-					'df_error': interaction_row['DF2'],
-					'p': interaction_row['p-unc'],
-					'p_corrected': interaction_row.get('p-GG-corr', interaction_row['p-unc']),
-					'significant': interaction_row['p-unc'] < 0.05,
-					'effect_size_eta_squared': eta2_interaction if not pd.isna(eta2_interaction) else 0.0,
-					'type': 'interaction',
-					'sphericity': interaction_sphericity_info
-				},
-				'group_stats': group_stats,
+				'level_stats': level_stats,
 				'total_n': len(measure_df),
 				'n_subjects': len(measure_df['ID'].unique()),
 				'complete_subjects': len(complete_subjects),
-				'incomplete_subjects': len(incomplete_subjects)
+				'incomplete_subjects': len(incomplete_subjects),
 			}
-			
+
 		except Exception as e:
-			print(f"\nError running mixed ANOVA: {e}")
+			print(f"\nError running RM ANOVA: {e}")
 			import traceback
 			traceback.print_exc()
-			print("\nFalling back to standard ANOVA (does NOT account for repeated measures)")
+			print("\nFalling back to standard one-way ANOVA (does NOT account for repeated measures)")
 			return _perform_standard_anova_fallback(df)
-	
+
 	print("\n" + "="*80)
 	return results
 
 
 def perform_bonferroni_posthoc_weight(weight_results: dict, df: pd.DataFrame) -> dict:
 	"""
-	Perform Bonferroni-corrected paired t-test post-hoc tests for significant main
-	effects in the mixed ANOVA.
+	Perform Bonferroni-corrected paired t-tests for significant within-subjects
+	main effects from the one-way repeated measures ANOVA.
+	Sex is NOT a factor; only within-subjects pairwise comparisons are computed.
 	"""
 	import itertools
 	wc = _MLB['within_col']
@@ -2530,25 +3377,22 @@ def perform_bonferroni_posthoc_weight(weight_results: dict, df: pd.DataFrame) ->
 	if EXPERIMENT_MODE == 'nonramp':
 		cdf = _add_week_column(cdf)
 
-	# Filter to exclude Day < 0 (baseline measurements)
+	# Exclude baseline
 	cdf = cdf[cdf["Day"] >= 0]
 
-	# Keep only rows with complete data
-	required_cols = ["ID", "Sex", wc, "Daily Change", "Total Change"]
+	required_cols = ["ID", wc, "Daily Change", "Total Change"]
 	cdf = cdf.dropna(subset=required_cols)
-
-	# Convert within-factor to integer for cleaner grouping
 	cdf[wc] = cdf[wc].astype(int)
 
 	within_levels = sorted(cdf[wc].unique())
 	pairs = list(itertools.combinations(within_levels, 2))
-	k = len(pairs)  # total comparisons for Bonferroni
+	k = len(pairs)  # number of pairwise comparisons for Bonferroni
 
-	def _bonferroni_paired(data_df, group_col, pairs, k, col):
-		"""Paired t-tests with Bonferroni correction for within-subjects comparisons."""
+	def _bonferroni_paired(data_df, group_col, pair_list, k_total, col):
+		"""Paired t-tests with Bonferroni correction (within-subjects only)."""
 		per_id = data_df.groupby(['ID', group_col])[col].mean().reset_index()
 		comparisons = []
-		for g1, g2 in pairs:
+		for g1, g2 in pair_list:
 			v1s = per_id[per_id[group_col] == g1].set_index('ID')[col]
 			v2s = per_id[per_id[group_col] == g2].set_index('ID')[col]
 			common = v1s.index.intersection(v2s.index)
@@ -2561,10 +3405,8 @@ def perform_bonferroni_posthoc_weight(weight_results: dict, df: pd.DataFrame) ->
 			se_diff = float(np.std(diffs, ddof=1) / np.sqrt(len(diffs)))
 			t_stat, p_raw = stats.ttest_rel(v1, v2)
 			df_val = len(diffs) - 1
-			p_adj = min(float(p_raw) * k, 1.0)
+			p_adj = min(float(p_raw) * k_total, 1.0)
 			t_crit = stats.t.ppf(0.975, df_val)
-			lower_ci = mean_diff - t_crit * se_diff
-			upper_ci = mean_diff + t_crit * se_diff
 			comparisons.append({
 				'group1': _group_label(g1),
 				'group2': _group_label(g2),
@@ -2573,52 +3415,29 @@ def perform_bonferroni_posthoc_weight(weight_results: dict, df: pd.DataFrame) ->
 				'df': df_val,
 				'p_raw': float(p_raw),
 				'p_adj': p_adj,
-				'lower_ci': lower_ci,
-				'upper_ci': upper_ci,
+				'lower_ci': mean_diff - t_crit * se_diff,
+				'upper_ci': mean_diff + t_crit * se_diff,
 				'significant': p_adj < 0.05,
 			})
 		return comparisons
 
-	measures = {
-		'Daily Change': 'Daily Change',
-		'Total Change': 'Total Change'
-	}
+	measures = {'Daily Change': 'Daily Change', 'Total Change': 'Total Change'}
 
 	for measure_name, column in measures.items():
 		if measure_name not in weight_results:
 			continue
 
-		results = weight_results[measure_name]
-
-		# Check if within-factor main effect is significant
-		within_significant = results.get(wk, {}).get('significant', False)
-		interaction_significant = results.get('interaction', {}).get('significant', False)
-
-		if not within_significant and not interaction_significant:
+		within_significant = weight_results[measure_name].get(wk, {}).get('significant', False)
+		if not within_significant:
 			continue
 
-		bonferroni_results[measure_name] = {
-			'measure_name': measure_name,
-			pk: None,
-			'simple_effects': None
-		}
-
 		try:
-			if within_significant:
-				print(f"\nPerforming Bonferroni post-hoc for {_MLB['posthoc_main_label']} ({measure_name})...")
-				comparisons = _bonferroni_paired(cdf, wc, pairs, k, column)
-				bonferroni_results[measure_name][pk] = {'comparisons': comparisons}
-
-			if interaction_significant:
-				print(f"\nPerforming simple effects analysis for {_MLB['interaction_label']} interaction ({measure_name})...")
-				simple_effects = {}
-				for sex in sorted(cdf['Sex'].unique()):
-					sex_df = cdf[cdf['Sex'] == sex].copy()
-					comparisons = _bonferroni_paired(sex_df, wc, pairs, k, column)
-					if comparisons:
-						simple_effects[sex] = {'comparisons': comparisons}
-				bonferroni_results[measure_name]['simple_effects'] = simple_effects
-
+			print(f"\nBonferroni post-hoc for {_MLB['posthoc_main_label']} ({measure_name})...")
+			comparisons = _bonferroni_paired(cdf, wc, pairs, k, column)
+			bonferroni_results[measure_name] = {
+				'measure_name': measure_name,
+				pk: {'comparisons': comparisons},
+			}
 		except Exception as e:
 			bonferroni_results[measure_name] = {
 				'measure_name': measure_name,
@@ -2629,7 +3448,7 @@ def perform_bonferroni_posthoc_weight(weight_results: dict, df: pd.DataFrame) ->
 
 
 def display_bonferroni_posthoc_results(bonferroni_results: dict) -> str:
-	"""Display Bonferroni-corrected paired t-test post-hoc results."""
+	"""Display Bonferroni-corrected paired t-test post-hoc results (within-subjects only)."""
 	pk = _MLB['pairwise_key']
 
 	if not bonferroni_results:
@@ -2637,14 +3456,14 @@ def display_bonferroni_posthoc_results(bonferroni_results: dict) -> str:
 
 	lines = []
 	lines.append("\n" + "="*80)
-	lines.append("BONFERRONI POST-HOC TEST RESULTS (PAIRED T-TESTS)")
+	lines.append("BONFERRONI POST-HOC TEST RESULTS (WITHIN-SUBJECTS PAIRWISE PAIRED T-TESTS)")
 	lines.append("="*80)
 	lines.append("")
 	lines.append(_MLB['bonferroni_desc'])
-	lines.append("Alpha = 0.05 (Bonferroni-adjusted family-wise error rate)")
+	lines.append("Alpha = 0.05 (Bonferroni family-wise error rate)")
 	lines.append("")
 
-	cw = 20 if EXPERIMENT_MODE == 'nonramp' else 15  # comparison column width
+	cw = 20 if EXPERIMENT_MODE == 'nonramp' else 15
 
 	for measure, results in bonferroni_results.items():
 		if 'error' in results:
@@ -2655,466 +3474,41 @@ def display_bonferroni_posthoc_results(bonferroni_results: dict) -> str:
 		lines.append(f"MEASURE: {results['measure_name'].upper()}")
 		lines.append("-"*80)
 		lines.append("")
+		lines.append(_MLB['bonferroni_main_hdr'])
+		lines.append("-"*60)
+		header = (f"{'Comparison':<{cw}} {'Mean Diff':<12} {'T':<8} {'df':<6} "
+		          f"{'p(raw)':<10} {'p(Bonf.)':<10} {'Sig':<6}")
+		lines.append(header)
+		lines.append("-"*80)
 
-		if results.get(pk):
-			lines.append(_MLB['bonferroni_main_hdr'])
-			lines.append("-"*60)
-			header = f"{'Comparison':<{cw}} {'Mean Diff':<12} {'T':<8} {'df':<6} {'p(raw)':<10} {'p(Bonf.)':<10} {'Sig':<6}"
-			lines.append(header)
-			lines.append("-"*80)
-
+		if results.get(pk) and results[pk].get('comparisons'):
 			sorted_comps = sorted(results[pk]['comparisons'], key=lambda x: x['p_adj'])
 			for comp in sorted_comps:
-				comparison_name = f"{comp['group1']} vs {comp['group2']}"
 				sig = "*" if comp['significant'] else "ns"
-				row = (f"{comparison_name:<{cw}} "
-					   f"{comp['meandiff']:<12.3f} "
-					   f"{comp.get('t_stat', float('nan')):<8.3f} "
-					   f"{comp.get('df', 0):<6} "
-					   f"{comp.get('p_raw', float('nan')):<10.4f} "
-					   f"{comp['p_adj']:<10.4f} "
-					   f"{sig:<6}")
+				row = (f"{comp['group1'] + ' vs ' + comp['group2']:<{cw}} "
+				       f"{comp['meandiff']:<12.3f} "
+				       f"{comp.get('t_stat', float('nan')):<8.3f} "
+				       f"{comp.get('df', 0):<6} "
+				       f"{comp.get('p_raw', float('nan')):<10.4f} "
+				       f"{comp['p_adj']:<10.4f} "
+				       f"{sig:<6}")
 				lines.append(row)
-
 			lines.append("")
 			sig_comps = [c for c in results[pk]['comparisons'] if c['significant']]
 			if sig_comps:
-				lines.append(f"Found {len(sig_comps)} significant pairwise difference(s):")
+				lines.append(f"Significant pairwise differences ({len(sig_comps)}):")
 				for comp in sig_comps:
 					lines.append(f"  {comp['group1']} vs {comp['group2']}: p(Bonf.) = {comp['p_adj']:.4f}")
 			else:
 				lines.append("No significant pairwise differences found.")
-			lines.append("")
-
-		# Simple effects for interaction
-		if results.get('simple_effects'):
-			lines.append(f"{_MLB['bonferroni_interact_hdr']}")
-			lines.append("-"*60)
-			lines.append("")
-			for sex, sex_results in sorted(results['simple_effects'].items()):
-				lines.append(f"  Sex = {sex}:")
-				header = f"  {'Comparison':<{cw}} {'Mean Diff':<12} {'T':<8} {'df':<6} {'p(raw)':<10} {'p(Bonf.)':<10} {'Sig':<6}"
-				lines.append(header)
-				lines.append("  " + "-"*70)
-				sorted_comps = sorted(sex_results['comparisons'], key=lambda x: x['p_adj'])
-				for comp in sorted_comps:
-					comparison_name = f"{comp['group1']} vs {comp['group2']}"
-					sig = "*" if comp['significant'] else "ns"
-					row = (f"  {comparison_name:<{cw}} "
-						   f"{comp['meandiff']:<12.3f} "
-						   f"{comp.get('t_stat', float('nan')):<8.3f} "
-						   f"{comp.get('df', 0):<6} "
-						   f"{comp.get('p_raw', float('nan')):<10.4f} "
-						   f"{comp['p_adj']:<10.4f} "
-						   f"{sig:<6}")
-					lines.append(row)
-				sig_comps = [c for c in sex_results['comparisons'] if c['significant']]
-				if sig_comps:
-					lines.append(f"  Found {len(sig_comps)} significant difference(s) for {sex}")
-				else:
-					lines.append(f"  No significant differences for {sex}")
-				lines.append("")
-
+		else:
+			lines.append("  No comparisons computed.")
 		lines.append("")
 
 	lines.append("="*80)
 	lines.append("")
 	formatted_output = "\n".join(lines)
 	print(formatted_output)
-	return formatted_output
-
-
-def perform_mixed_anova_posthoc_weight(data: pd.DataFrame, dv: str, within: str, between_factors: list, subject: str, 
-                                        alpha: float = 0.05, correction: str = 'fdr_bh') -> Dict:
-	"""
-	Perform proper post-hoc tests for mixed ANOVA with repeated measures (weight data).
-	
-	This function performs comprehensive post-hoc analyses for mixed ANOVA with Time as within-subjects
-	factor and Sex/within-factor as between-subjects factors:
-	1. Within-subjects pairwise comparisons (across time points)
-	2. Between-subjects pairwise comparisons (within-factor and Sex)
-	3. Simple effects analysis (Time effect at each within-factor or Sex level)
-	
-	Parameters:
-		data: DataFrame with long-format data
-		dv: Dependent variable column name (e.g., 'Weight')
-		within: Within-subjects factor column (e.g., 'Day')
-		between_factors: List of between-subjects factors (e.g., ['Sex', 'CA (%)'] or ['Sex', 'Week'])
-		subject: Subject identifier column (e.g., 'ID')
-		alpha: Significance level (default 0.05)
-		correction: Multiple comparison correction method ('fdr_bh', 'bonferroni', 'holm')
-	
-	Returns:
-		Dictionary with post-hoc test results
-	"""
-	import pingouin as pg
-	from scipy import stats
-	from statsmodels.stats.multitest import multipletests
-	
-	wc  = _MLB['within_col']
-	bpk = _MLB['posthoc_between_key']
-	sek = _MLB['simple_effects_key']
-	fl  = _MLB['factor_label']
-	
-	results = {
-		'within_pairwise': None,
-		bpk: None,
-		'between_pairwise_sex': None,
-		sek: None,
-		'simple_effects_by_sex': None,
-		'correction_method': correction,
-		'alpha': alpha
-	}
-	
-	# 1. Within-subjects pairwise comparisons (Time points, collapsed across groups)
-	try:
-		within_pw = pg.pairwise_tests(
-			data=data,
-			dv=dv,
-			within=within,
-			subject=subject,
-			parametric=True,
-			padjust=correction,
-			effsize='hedges'
-		)
-		results['within_pairwise'] = within_pw
-	except Exception as e:
-		results['within_pairwise'] = f"Error in within-subjects pairwise: {str(e)}"
-	
-	# 2. Between-subjects pairwise comparisons (CA% and Sex, collapsed across Time)
-	# First, average across time for each subject
-	between_data = data.groupby([subject] + between_factors)[dv].mean().reset_index()
-	
-	# Within-factor comparisons
-	if wc in between_factors:
-		try:
-			wf_levels = between_data[wc].unique()
-			if len(wf_levels) == 2:
-				# For 2 groups, do independent t-test
-				group1 = between_data[between_data[wc] == wf_levels[0]][dv]
-				group2 = between_data[between_data[wc] == wf_levels[1]][dv]
-				t_stat, p_val = stats.ttest_ind(group1, group2)
-				
-				# Calculate effect size (Cohen's d)
-				pooled_std = np.sqrt(((len(group1) - 1) * group1.std()**2 + 
-									   (len(group2) - 1) * group2.std()**2) / 
-									  (len(group1) + len(group2) - 2))
-				cohens_d = (group1.mean() - group2.mean()) / pooled_std if pooled_std > 0 else 0
-				
-				wf_pw = pd.DataFrame({
-					'Contrast': [f"{_group_label(wf_levels[0])} vs {_group_label(wf_levels[1])}"],
-					'A': [f"{_group_label(wf_levels[0])}"],
-					'B': [f"{_group_label(wf_levels[1])}"],
-					'T': [t_stat],
-					'p-unc': [p_val],
-					'p-corr': [p_val],
-					"cohen's d": [cohens_d],
-					'n1': [len(group1)],
-					'n2': [len(group2)]
-				})
-				results[bpk] = wf_pw
-			else:
-				# For >2 groups, use pairwise_tests
-				wf_pw = pg.pairwise_tests(
-					data=between_data,
-					dv=dv,
-					between=wc,
-					parametric=True,
-					padjust=correction,
-					effsize='cohen'
-				)
-				results[bpk] = wf_pw
-		except Exception as e:
-			results[bpk] = f"Error in {fl} pairwise: {str(e)}"
-	
-	# Sex comparisons
-	if 'Sex' in between_factors:
-		try:
-			sex_levels = between_data['Sex'].unique()
-			if len(sex_levels) == 2:
-				# For 2 groups, do independent t-test
-				group1 = between_data[between_data['Sex'] == sex_levels[0]][dv]
-				group2 = between_data[between_data['Sex'] == sex_levels[1]][dv]
-				t_stat, p_val = stats.ttest_ind(group1, group2)
-				
-				# Calculate effect size (Cohen's d)
-				pooled_std = np.sqrt(((len(group1) - 1) * group1.std()**2 + 
-									   (len(group2) - 1) * group2.std()**2) / 
-									  (len(group1) + len(group2) - 2))
-				cohens_d = (group1.mean() - group2.mean()) / pooled_std if pooled_std > 0 else 0
-				
-				sex_pw = pd.DataFrame({
-					'Contrast': [f"{sex_levels[0]} vs {sex_levels[1]}"],
-					'A': [sex_levels[0]],
-					'B': [sex_levels[1]],
-					'T': [t_stat],
-					'p-unc': [p_val],
-					'p-corr': [p_val],
-					"cohen's d": [cohens_d],
-					'n1': [len(group1)],
-					'n2': [len(group2)]
-				})
-				results['between_pairwise_sex'] = sex_pw
-		except Exception as e:
-			results['between_pairwise_sex'] = f"Error in Sex pairwise: {str(e)}"
-	
-	# 3. Simple effects: Time effect at each within-factor level
-	if wc in between_factors:
-		try:
-			wf_levels = data[wc].unique()
-			simple_effects_wf = []
-			
-			for lv in wf_levels:
-				lv_data = data[data[wc] == lv]
-				
-				# Perform repeated measures ANOVA for this level
-				time_levels = lv_data[within].unique()
-				if len(time_levels) >= 2:
-					rm_aov = pg.rm_anova(
-						data=lv_data,
-						dv=dv,
-						within=within,
-						subject=subject,
-						detailed=True
-					)
-					
-					simple_effects_wf.append({
-						wc: lv,
-						'F': rm_aov.loc[0, 'F'],
-						'df1': rm_aov.loc[0, 'ddof1'],
-						'df2': rm_aov.loc[0, 'ddof2'],
-						'p-unc': rm_aov.loc[0, 'p-unc'],
-						'n_subjects': lv_data[subject].nunique(),
-						'n_time_points': len(time_levels)
-					})
-			
-			if simple_effects_wf:
-				simple_effects_wf_df = pd.DataFrame(simple_effects_wf)
-				
-				# Apply multiple comparison correction
-				if len(simple_effects_wf_df) > 1:
-					_, p_corrected, _, _ = multipletests(
-						simple_effects_wf_df['p-unc'],
-						alpha=alpha,
-						method=correction
-					)
-					simple_effects_wf_df['p-corr'] = p_corrected
-				else:
-					simple_effects_wf_df['p-corr'] = simple_effects_wf_df['p-unc']
-				
-				simple_effects_wf_df['significant'] = simple_effects_wf_df['p-corr'] < alpha
-				results[sek] = simple_effects_wf_df
-				
-		except Exception as e:
-			results[sek] = f"Error in {fl} simple effects: {str(e)}"
-	
-	# 4. Simple effects: Time effect at each Sex level
-	if 'Sex' in between_factors:
-		try:
-			sex_levels = data['Sex'].unique()
-			simple_effects_sex = []
-			
-			for sex in sex_levels:
-				sex_data = data[data['Sex'] == sex]
-				
-				# Perform repeated measures ANOVA for this sex
-				time_levels = sex_data[within].unique()
-				if len(time_levels) >= 2:
-					rm_aov = pg.rm_anova(
-						data=sex_data,
-						dv=dv,
-						within=within,
-						subject=subject,
-						detailed=True
-					)
-					
-					simple_effects_sex.append({
-						'Sex': sex,
-						'F': rm_aov.loc[0, 'F'],
-						'df1': rm_aov.loc[0, 'ddof1'],
-						'df2': rm_aov.loc[0, 'ddof2'],
-						'p-unc': rm_aov.loc[0, 'p-unc'],
-						'n_subjects': sex_data[subject].nunique(),
-						'n_time_points': len(time_levels)
-					})
-			
-			if simple_effects_sex:
-				simple_effects_sex_df = pd.DataFrame(simple_effects_sex)
-				
-				# Apply multiple comparison correction
-				if len(simple_effects_sex_df) > 1:
-					_, p_corrected, _, _ = multipletests(
-						simple_effects_sex_df['p-unc'],
-						alpha=alpha,
-						method=correction
-					)
-					simple_effects_sex_df['p-corr'] = p_corrected
-				else:
-					simple_effects_sex_df['p-corr'] = simple_effects_sex_df['p-unc']
-				
-				simple_effects_sex_df['significant'] = simple_effects_sex_df['p-corr'] < alpha
-				results['simple_effects_by_sex'] = simple_effects_sex_df
-				
-		except Exception as e:
-			results['simple_effects_by_sex'] = f"Error in Sex simple effects: {str(e)}"
-	
-	return results
-
-
-def display_posthoc_weight_results(posthoc_results: Dict, measure_name: str) -> str:
-	"""
-	Display post-hoc test results for weight mixed ANOVA in formatted output.
-	
-	Parameters:
-		posthoc_results: Dictionary from perform_mixed_anova_posthoc_weight
-		measure_name: Name of the measure being analyzed
-		
-	Returns:
-		Formatted string with post-hoc results
-	"""
-	lines = []
-	lines.append("\n" + "=" * 80)
-	lines.append(f"POST-HOC TESTS FOR: {measure_name.upper()}")
-	lines.append("=" * 80)
-	lines.append(f"Correction method: {posthoc_results['correction_method']}")
-	lines.append(f"Alpha level: {posthoc_results['alpha']}")
-	lines.append("")
-	
-	# 1. Within-subjects pairwise (Time comparisons)
-	lines.append("1. WITHIN-SUBJECTS PAIRWISE COMPARISONS (Time points)")
-	lines.append("-" * 80)
-	within_pw = posthoc_results['within_pairwise']
-	if isinstance(within_pw, str):
-		lines.append(f"   {within_pw}")
-	elif within_pw is not None and not within_pw.empty:
-		lines.append("   Pairwise comparisons across time points (repeated measures):")
-		lines.append("")
-		for idx, row in within_pw.iterrows():
-			contrast = f"   {row['A']} vs {row['B']}"
-			lines.append(f"{contrast}")
-			lines.append(f"      T-statistic: {row['T']:.4f}")
-			lines.append(f"      p-uncorrected: {row['p-unc']:.6f}")
-			lines.append(f"      p-corrected: {row.get('p-corr', row['p-unc']):.6f}")
-			lines.append(f"      Effect size (Hedges' g): {row.get('hedges', 0):.4f}")
-			if row.get('p-corr', row['p-unc']) < posthoc_results['alpha']:
-				lines.append(f"      *** SIGNIFICANT ***")
-			lines.append("")
-	else:
-		lines.append("   No within-subjects comparisons available")
-	
-	lines.append("")
-	
-	# 2. Between-subjects pairwise (within-factor)
-	fl_local = _MLB['factor_label']
-	bpk_local = _MLB['posthoc_between_key']
-	sek_local = _MLB['simple_effects_key']
-	wc_local  = _MLB['within_col']
-
-	lines.append(f"2. BETWEEN-SUBJECTS PAIRWISE COMPARISONS ({fl_local})")
-	lines.append("-" * 80)
-	wf_pw = posthoc_results[bpk_local]
-	if isinstance(wf_pw, str):
-		lines.append(f"   {wf_pw}")
-	elif wf_pw is not None and not wf_pw.empty:
-		lines.append(f"   Comparison between {fl_local} levels (collapsed across Time):")
-		lines.append("")
-		for idx, row in wf_pw.iterrows():
-			contrast = f"   {row['A']} vs {row['B']}"
-			lines.append(f"{contrast}")
-			lines.append(f"      T-statistic: {row['T']:.4f}")
-			lines.append(f"      p-uncorrected: {row['p-unc']:.6f}")
-			lines.append(f"      p-corrected: {row.get('p-corr', row['p-unc']):.6f}")
-			cohens_d = row.get("cohen's d", row.get('cohen', 0))
-			lines.append(f"      Effect size (Cohen's d): {cohens_d:.4f}")
-			lines.append(f"      n1: {row.get('n1', 'N/A')}, n2: {row.get('n2', 'N/A')}")
-			if row.get('p-corr', row['p-unc']) < posthoc_results['alpha']:
-				lines.append(f"      *** SIGNIFICANT ***")
-			lines.append("")
-	else:
-		lines.append(f"   No {fl_local} comparisons available")
-	
-	lines.append("")
-	
-	# 3. Between-subjects pairwise (Sex)
-	lines.append("3. BETWEEN-SUBJECTS PAIRWISE COMPARISONS (Sex)")
-	lines.append("-" * 80)
-	sex_pw = posthoc_results['between_pairwise_sex']
-	if isinstance(sex_pw, str):
-		lines.append(f"   {sex_pw}")
-	elif sex_pw is not None and not sex_pw.empty:
-		lines.append("   Comparison between sexes (collapsed across Time):")
-		lines.append("")
-		for idx, row in sex_pw.iterrows():
-			contrast = f"   {row['A']} vs {row['B']}"
-			lines.append(f"{contrast}")
-			lines.append(f"      T-statistic: {row['T']:.4f}")
-			lines.append(f"      p-uncorrected: {row['p-unc']:.6f}")
-			lines.append(f"      p-corrected: {row.get('p-corr', row['p-unc']):.6f}")
-			cohens_d = row.get("cohen's d", row.get('cohen', 0))
-			lines.append(f"      Effect size (Cohen's d): {cohens_d:.4f}")
-			lines.append(f"      n1: {row.get('n1', 'N/A')}, n2: {row.get('n2', 'N/A')}")
-			if row.get('p-corr', row['p-unc']) < posthoc_results['alpha']:
-				lines.append(f"      *** SIGNIFICANT ***")
-			lines.append("")
-	else:
-		lines.append("   No Sex comparisons available")
-	
-	lines.append("")
-	
-	# 4. Simple effects by within-factor
-	lines.append(f"4. SIMPLE EFFECTS ANALYSIS (Time effect at each {fl_local} level)")
-	lines.append("-" * 80)
-	simple_wf = posthoc_results[sek_local]
-	if isinstance(simple_wf, str):
-		lines.append(f"   {simple_wf}")
-	elif simple_wf is not None and not simple_wf.empty:
-		lines.append(f"   Time effect separately for each {fl_local} level:")
-		lines.append("")
-		for idx, row in simple_wf.iterrows():
-			lines.append(f"   {fl_local}: {_group_label(row[wc_local])}")
-			lines.append(f"      F({row['df1']:.0f}, {row['df2']:.0f}) = {row['F']:.4f}")
-			lines.append(f"      p-uncorrected: {row['p-unc']:.6f}")
-			lines.append(f"      p-corrected: {row['p-corr']:.6f}")
-			lines.append(f"      n subjects: {row['n_subjects']}")
-			if row['significant']:
-				lines.append(f"      *** SIGNIFICANT Time effect for {_group_label(row[wc_local])} ***")
-			else:
-				lines.append(f"      Not significant")
-			lines.append("")
-	else:
-		lines.append(f"   No {fl_local} simple effects analysis available")
-	
-	lines.append("")
-	
-	# 5. Simple effects by Sex
-	lines.append("5. SIMPLE EFFECTS ANALYSIS (Time effect at each Sex level)")
-	lines.append("-" * 80)
-	simple_sex = posthoc_results['simple_effects_by_sex']
-	if isinstance(simple_sex, str):
-		lines.append(f"   {simple_sex}")
-	elif simple_sex is not None and not simple_sex.empty:
-		lines.append("   Time effect separately for each sex:")
-		lines.append("")
-		for idx, row in simple_sex.iterrows():
-			lines.append(f"   SEX: {row['Sex']}")
-			lines.append(f"      F({row['df1']:.0f}, {row['df2']:.0f}) = {row['F']:.4f}")
-			lines.append(f"      p-uncorrected: {row['p-unc']:.6f}")
-			lines.append(f"      p-corrected: {row['p-corr']:.6f}")
-			lines.append(f"      n subjects: {row['n_subjects']}")
-			if row['significant']:
-				lines.append(f"      *** SIGNIFICANT Time effect for {row['Sex']} ***")
-			else:
-				lines.append(f"      Not significant")
-			lines.append("")
-	else:
-		lines.append("   No Sex simple effects analysis available")
-	
-	lines.append("=" * 80)
-	lines.append("")
-	
-	formatted_output = "\n".join(lines)
-	print(formatted_output)
-	
 	return formatted_output
 
 
@@ -3350,1212 +3744,609 @@ def display_mcnemar_results(mcnemar_results: dict) -> str:
 
 def _perform_standard_anova_fallback(df: pd.DataFrame) -> dict:
 	"""
-	Fallback to standard two-way ANOVA when pingouin is not available.
-	WARNING: This does NOT account for repeated measures and treats observations as independent.
+	Fallback one-way ANOVA when pingouin is not available.
+	WARNING: Does NOT account for repeated measures; treats observations as independent.
 	"""
 	wc = _MLB['within_col']
 	wk = _MLB['result_within_key']
-	fbc = _MLB['anova_fb_col']
 
 	print("\n" + "="*80)
-	print("WARNING: Using standard two-way ANOVA (DOES NOT ACCOUNT FOR REPEATED MEASURES)")
-	print("This analysis assumes all observations are independent, which is NOT appropriate")
-	print("for repeated measures data. Install pingouin for proper mixed ANOVA.")
+	print("WARNING: Using standard one-way ANOVA (DOES NOT ACCOUNT FOR REPEATED MEASURES)")
+	print("Install pingouin for proper RM ANOVA: pip install pingouin")
 	print("="*80)
-	
-	# Clean and prepare data
+
 	cdf = clean_master_dataframe(df)
 	cdf = _add_day_number_column(cdf)
 	if EXPERIMENT_MODE == 'nonramp':
 		cdf = _add_week_column(cdf)
 	cdf = cdf[cdf["Day"] >= 0]
-	required_cols = ["Sex", wc, "Daily Change", "Total Change"]
+	required_cols = ["ID", wc, "Daily Change", "Total Change"]
 	cdf = cdf.dropna(subset=required_cols)
-	
-	# Convert within-factor to integer
 	cdf[wc] = cdf[wc].astype(int)
-	
+
 	results = {}
 	measures = {'Daily Change': 'Daily Change', 'Total Change': 'Total Change'}
-	
+
 	for measure_name, column in measures.items():
 		print(f"\nProcessing: {measure_name}")
-		measure_df = cdf[["Sex", wc, column]].copy()
-		measure_df.columns = ["Sex", fbc, "Value"]
-		
-		sexes = sorted(measure_df["Sex"].unique())
-		within_levels = sorted(measure_df[fbc].unique())
-		grand_mean = measure_df["Value"].mean()
-		grand_n = len(measure_df)
-		
-		# Calculate sum of squares (standard ANOVA)
-		sst = np.sum((measure_df["Value"] - grand_mean) ** 2)
-		
-		# Sex effect
-		ssa = sum(len(measure_df[measure_df["Sex"] == sex]) * 
-				  (measure_df[measure_df["Sex"] == sex]["Value"].mean() - grand_mean) ** 2 
-				  for sex in sexes)
-		
-		# Within-factor effect
-		ssb = sum(len(measure_df[measure_df[fbc] == lvl]) * 
-				  (measure_df[measure_df[fbc] == lvl]["Value"].mean() - grand_mean) ** 2 
-				  for lvl in within_levels)
-		
-		# Interaction
-		ssab = 0
-		for sex in sexes:
-			for lvl in within_levels:
-				cell_data = measure_df[(measure_df["Sex"] == sex) & (measure_df[fbc] == lvl)]["Value"]
-				if len(cell_data) > 0:
-					cell_mean = cell_data.mean()
-					sex_mean = measure_df[measure_df["Sex"] == sex]["Value"].mean()
-					lvl_mean = measure_df[measure_df[fbc] == lvl]["Value"].mean()
-					ssab += len(cell_data) * (cell_mean - sex_mean - lvl_mean + grand_mean) ** 2
-		
-		sse = sst - ssa - ssb - ssab
-		
-		# Degrees of freedom
-		df_sex = len(sexes) - 1
+		within_levels = sorted(cdf[wc].unique())
+		grand_mean = cdf[column].mean()
+		grand_n = len(cdf)
+		sst = np.sum((cdf[column] - grand_mean) ** 2)
+		ssb = sum(
+			len(cdf[cdf[wc] == lvl]) * (cdf[cdf[wc] == lvl][column].mean() - grand_mean) ** 2
+			for lvl in within_levels
+		)
+		sse = sst - ssb
 		df_within = len(within_levels) - 1
-		df_interaction = df_sex * df_within
-		df_error = grand_n - (len(sexes) * len(within_levels))
-		
-		# F-statistics
-		f_sex = (ssa / df_sex) / (sse / df_error) if df_error > 0 and df_sex > 0 else np.nan
+		df_error = grand_n - len(within_levels)
 		f_within = (ssb / df_within) / (sse / df_error) if df_error > 0 and df_within > 0 else np.nan
-		f_interaction = (ssab / df_interaction) / (sse / df_error) if df_error > 0 and df_interaction > 0 else np.nan
-		
-		# P-values
-		p_sex = 1 - stats.f.cdf(f_sex, df_sex, df_error) if not np.isnan(f_sex) else np.nan
 		p_within = 1 - stats.f.cdf(f_within, df_within, df_error) if not np.isnan(f_within) else np.nan
-		p_interaction = 1 - stats.f.cdf(f_interaction, df_interaction, df_error) if not np.isnan(f_interaction) else np.nan
-		
+
 		results[measure_name] = {
 			'measure': measure_name,
-			'sex': {
-				'F': f_sex,
-				'df_effect': df_sex,
-				'df_error': df_error,
-				'p': p_sex,
-				'significant': p_sex < 0.05 if not np.isnan(p_sex) else False,
-				'effect_size_eta_squared': ssa / sst if sst > 0 else 0,
-				'type': 'INDEPENDENCE ASSUMPTION VIOLATED'
-			},
 			wk: {
 				'F': f_within,
 				'df_effect': df_within,
 				'df_error': df_error,
 				'p': p_within,
-				'significant': p_within < 0.05,
-				'effect_size_eta_squared': ssb / sst if sst > 0 else 0,
-				'type': 'INDEPENDENCE ASSUMPTION VIOLATED'
+				'p_corrected': p_within,
+				'significant': p_within < 0.05 if not np.isnan(p_within) else False,
+				'effect_size_eta_squared': ssb / sst if sst > 0 else 0.0,
+				'type': 'INDEPENDENCE ASSUMPTION VIOLATED',
+				'sphericity': {},
 			},
-			'interaction': {
-				'F': f_interaction,
-				'df_effect': df_interaction,
-				'df_error': df_error,
-				'p': p_interaction,
-				'significant': p_interaction < 0.05 if not np.isnan(p_interaction) else False,
-				'effect_size_eta_squared': ssab / sst if sst > 0 else 0,
-				'type': 'INDEPENDENCE ASSUMPTION VIOLATED'
-			}
 		}
-	
+
 	return results
 
 
 def perform_two_way_chi_square_behavioral(df: pd.DataFrame) -> dict:
 	"""
-	Perform repeated measures analysis on binary behavioral measures.
+	Perform within-subjects repeated measures analysis on binary behavioral measures.
+	Sex is NOT included as a factor.
+
+	Primary test: Cochran's Q (within-subjects, complete cases).
+	Sensitivity:  Permutation test (5000 within-subject shuffles).
+	Supplement:   GEE (Binomial, Exchangeable) with within-factor only.
 	"""
 	wc = _MLB['within_col']
 	fl = _MLB['factor_label']
 	wk = _MLB['result_within_key']
 
 	print("\n" + "="*80)
-	print("REPEATED MEASURES ANALYSIS: BINARY BEHAVIORAL MEASURES")
+	print("REPEATED MEASURES ANALYSIS: BINARY BEHAVIORAL MEASURES (within-subjects only)")
 	print("="*80)
-	
+
 	if not HAS_STATSMODELS:
-		print("\nWARNING: statsmodels not installed. Cannot perform Cochran's Q test.")
+		print("\nWARNING: statsmodels not installed. Cannot perform Cochran's Q or GEE.")
 		print("Falling back to chi-square tests (does NOT account for repeated measures).")
 		print("Install with: pip install statsmodels")
 		return _perform_chi_square_fallback(df)
-	
+
 	# Clean and prepare data
 	cdf = clean_master_dataframe(df)
 	cdf = _add_day_number_column(cdf)
 	if EXPERIMENT_MODE == 'nonramp':
 		cdf = _add_week_column(cdf)
-	
-	# Filter to exclude Day < 0
 	cdf = cdf[cdf["Day"] >= 0]
-	
-	# Convert within-factor to integer
 	cdf[wc] = cdf[wc].astype(int)
-	
+
 	behavioral_columns = {
-		'Nest Made': 'Nest Made?',
-		'Lethargy': 'Lethargy?',
-		'CA Spot Digging': 'CA Spot Digging?',
-		'Anxious Behaviors': 'Anxious Behaviors?'
+		'Nest Made':         'Nest Made?',
+		'Lethargy':          'Lethargy?',
+		'CA Spot Digging':   'CA Spot Digging?',
+		'Anxious Behaviors': 'Anxious Behaviors?',
 	}
-	
+
 	results = {}
-	
+
 	for measure_name, column in behavioral_columns.items():
 		if column not in cdf.columns:
 			print(f"\nSkipping {measure_name}: '{column}' column not found")
-			print(f"  Looking for column: '{column}'")
-			print(f"  Similar columns: {[col for col in cdf.columns if measure_name.lower() in col.lower() or any(word in col.lower() for word in column.lower().split())]}")
 			continue
-		
+
 		print(f"\n{'='*60}")
 		print(f"Repeated Measures Analysis for: {measure_name}")
 		print(f"{'='*60}")
-		
-		# DIAGNOSTIC: Check data before filtering
-		print(f"\nDiagnostic - Before filtering:")
-		print(f"  Column '{column}' found: {column in cdf.columns}")
-		print(f"  Non-null values in '{column}': {cdf[column].notna().sum()} / {len(cdf)}")
-		print(f"  Unique values in '{column}': {cdf[column].unique()[:10]}")
-		
-		# Filter data for this measure
-		measure_df = cdf[["ID", "Sex", wc, column]].copy()
-		print(f"\nDiagnostic - After selecting columns:")
-		print(f"  Rows: {len(measure_df)}")
-		print(f"  Non-null in ID: {measure_df['ID'].notna().sum()}")
-		print(f"  Non-null in Sex: {measure_df['Sex'].notna().sum()}")
-		print(f"  Non-null in {fl}: {measure_df[wc].notna().sum()}")
-		print(f"  Non-null in {column}: {measure_df[column].notna().sum()}")
-		
-		measure_df = measure_df.dropna(subset=["ID", "Sex", wc, column])
-		print(f"\nDiagnostic - After dropna:")
-		print(f"  Rows remaining: {len(measure_df)}")
-		
-		# Convert to binary (boolean columns are already True/False, convert to 1/0)
-		# Handle both boolean and string types
+
+		measure_df = cdf[["ID", wc, column]].copy()
+		measure_df = measure_df.dropna(subset=["ID", wc, column])
+
 		measure_df["Response"] = measure_df[column].apply(
 			lambda x: 1 if (x is True or str(x).strip().upper() in ["YES", "TRUE", "1"]) else 0
 		)
-		
+
+		if len(measure_df) == 0:
+			print("ERROR: No data available for this measure")
+			results[measure_name] = {
+				'measure': measure_name, 'error': 'No data available',
+				'total_n': 0, 'yes_count': 0, 'no_count': 0,
+				wk: {'error': 'No data', 'significant': False, 'p': np.nan},
+			}
+			continue
+
 		print(f"\nData summary:")
 		print(f"  Total observations: {len(measure_df)}")
 		print(f"  Unique subjects: {len(measure_df['ID'].unique())}")
-		print(f"  {_MLB['within_levels_print']}: {sorted(measure_df[wc].unique())}")
-		print(f"  Yes responses: {measure_df['Response'].sum()} ({100*measure_df['Response'].mean():.1f}%)")
-		print(f"  No responses: {len(measure_df) - measure_df['Response'].sum()} ({100*(1-measure_df['Response'].mean()):.1f}%)")
-		
-		# Check for complete data across all within-factor levels
+		print(f"  {_MLB['within_levels_print']}: {[int(v) for v in sorted(measure_df[wc].unique())]}")
+		print(f"  Yes: {measure_df['Response'].sum()} ({100*measure_df['Response'].mean():.1f}%)")
+		print(f"  No: {len(measure_df) - measure_df['Response'].sum()} ({100*(1-measure_df['Response'].mean()):.1f}%)")
+
+		# --- Identify complete subjects ---
 		subjects_per_level = measure_df.groupby('ID')[wc].nunique()
 		total_levels = measure_df[wc].nunique()
 		complete_subjects = subjects_per_level[subjects_per_level == total_levels].index.tolist()
 		incomplete_subjects = subjects_per_level[subjects_per_level < total_levels].index.tolist()
-		
+
 		if incomplete_subjects:
-			print(f"\nWarning: {len(incomplete_subjects)} subjects with incomplete data (missing some {fl} levels)")
-			print(f"Complete subjects (all {fl} levels): {len(complete_subjects)}")
-			print(f"Note: Cochran's Q requires complete data; using only complete subjects")
-		
-		# === 1. SEX EFFECT (Between-Subjects): Chi-Square Test ===
-		print(f"\n[1] Sex Effect (between-subjects): Chi-Square Test")
-		print("-" * 50)
-		
-		# Initialize variables early so they exist in all code paths
-		sex_table = pd.DataFrame()
-		glmm_result = None
-		
-		# Check if we have data and variation
-		if len(measure_df) == 0:
-			print("ERROR: No data available for this measure")
-			results[measure_name] = {
-				'measure': measure_name,
-				'error': 'No data available',
-				'total_n': 0,
-				'yes_count': 0,
-				'no_count': 0,
-				'sex': {'error': 'No data available', 'significant': False, 'p': np.nan},
-				wk: {'error': 'No data available', 'significant': False, 'p': np.nan},
-				'interaction': {'error': 'No data available'}
-			}
-			continue
-		
-		if measure_df["Sex"].nunique() < 2:
-			print(f"WARNING: Only one sex present ({measure_df['Sex'].unique()}), cannot perform sex comparison")
-			sex_result = {
-				'chi2': np.nan,
-				'p': np.nan,
-				'dof': np.nan,
-				'significant': False,
-				'error': 'Only one sex present'
-			}
-		elif measure_df["Response"].nunique() < 2:
-			print(f"WARNING: No variation in responses (all {measure_df['Response'].iloc[0]}), cannot perform chi-square test")
-			sex_result = {
-				'chi2': np.nan,
-				'p': np.nan,
-				'dof': np.nan,
-				'significant': False,
-				'error': 'No variation in responses'
-			}
-		else:
-			sex_table = pd.crosstab(measure_df["Sex"], measure_df["Response"], margins=False)
-			print("Contingency table (Sex × Response):")
-			print(sex_table)
-			
-			# Calculate proportions for each sex
-			sex_proportions = sex_table.div(sex_table.sum(axis=1), axis=0)
-			print("\nProportions by Sex:")
-			for sex in sex_table.index:
-				n_yes = sex_table.loc[sex, 1] if 1 in sex_table.columns else 0
-				n_total = sex_table.loc[sex].sum()
-				pct = 100 * n_yes / n_total if n_total > 0 else 0
-				print(f"  {sex}: {n_yes}/{n_total} Yes ({pct:.1f}%)")
-			
-			if sex_table.size == 0:
-				print("ERROR: Empty contingency table")
-				sex_result = {
-					'chi2': np.nan,
-					'p': np.nan,
-					'dof': np.nan,
-					'significant': False,
-					'error': 'Empty contingency table'
-				}
-				glmm_result = None
-			else:
-				chi2_sex, p_sex, dof_sex, expected_sex = stats.chi2_contingency(sex_table)
-				print(f"\nChi-square test: χ²({dof_sex}) = {chi2_sex:.3f}, p = {p_sex:.4f} {'***' if p_sex < 0.001 else '**' if p_sex < 0.01 else '*' if p_sex < 0.05 else 'ns'}")
-				print(f"Interpretation: {'SIGNIFICANT' if p_sex < 0.05 else 'Not significant'}")
-				print(f"Note: Between-subjects factor")
-				sex_result = {
-					'chi2': chi2_sex,
-					'p': p_sex,
-					'dof': dof_sex,
-					'significant': p_sex < 0.05
-				}
-				
-				# === MIXED-EFFECTS LOGISTIC REGRESSION ===
-				# More appropriate for unbalanced designs and repeated measures
-				print(f"\n[1b] Mixed-Effects Logistic Regression (accounts for repeated measures)")
-				print("-" * 50)
-				
-				glmm_result = None
-				if HAS_STATSMODELS:
-					try:
-						print("Attempting to load GEE modules...")
-						import statsmodels.api as sm
-						from statsmodels.genmod.generalized_estimating_equations import GEE
-						from statsmodels.genmod.families import Binomial
-						from statsmodels.genmod.cov_struct import Exchangeable
-						print("✓ GEE modules loaded successfully")
-						
-						# Prepare data for GLMM
-						glmm_df = measure_df[['ID', 'Sex', wc, 'Response']].copy()
-						print(f"Data shape: {glmm_df.shape}, Sexes: {glmm_df['Sex'].value_counts().to_dict()}")
-						
-						# Convert Sex to numeric (0/1) for easier interpretation
-						# Use female as reference (0)
-						glmm_df['Sex_numeric'] = (glmm_df['Sex'] == 'M').astype(int)
-						
-						print("Fitting GEE model for binary repeated measures...")
-						
-						# Sort by ID to ensure proper clustering
-						glmm_df = glmm_df.sort_values('ID')
-						
-						# Define the model
-						fam = Binomial()
-						ind = pd.Categorical(glmm_df['ID']).codes
-						gee_model = GEE.from_formula("Response ~ Sex_numeric", 
-						                            groups=glmm_df['ID'],
-						                            data=glmm_df, 
-						                            family=fam,
-						                            cov_struct=Exchangeable())
-						gee_result = gee_model.fit()
-						
-						# Extract results
-						sex_coef = gee_result.params['Sex_numeric']
-						sex_se = gee_result.bse['Sex_numeric']
-						sex_z = gee_result.tvalues['Sex_numeric']
-						sex_p_gee = gee_result.pvalues['Sex_numeric']
-						
-						# Calculate odds ratio
-						odds_ratio = np.exp(sex_coef)
-						or_ci_lower = np.exp(sex_coef - 1.96 * sex_se)
-						or_ci_upper = np.exp(sex_coef + 1.96 * sex_se)
-						
-						print(f"\nGEE Results (accounts for repeated measures and unbalanced design):")
-						print(f"  Coefficient (Male vs Female): {sex_coef:.3f} (SE = {sex_se:.3f})")
-						print(f"  Z-score: {sex_z:.3f}")
-						print(f"  P-value: {sex_p_gee:.4f} {'***' if sex_p_gee < 0.001 else '**' if sex_p_gee < 0.01 else '*' if sex_p_gee < 0.05 else 'ns'}")
-						print(f"  Odds Ratio (Male/Female): {odds_ratio:.3f} (95% CI: {or_ci_lower:.3f}-{or_ci_upper:.3f})")
-						print(f"  Interpretation: {'SIGNIFICANT' if sex_p_gee < 0.05 else 'Not significant'} sex effect")
-						
-						if odds_ratio > 1:
-							print(f"    Males have {odds_ratio:.2f}x the odds of 'Yes' compared to females")
-						else:
-							print(f"    Females have {1/odds_ratio:.2f}x the odds of 'Yes' compared to males")
-						
-						print(f"\n  NOTE: GEE properly accounts for:")
-						print(f"    • Repeated measurements within each animal")
-						print(f"    • Unbalanced sex groups")
-						print(f"    • Binary outcome (Yes/No)")
-						print(f"  This is more reliable than chi-square for your design.")
-						
-						glmm_result = {
-							'model': 'GEE',
-							'coefficient': sex_coef,
-							'se': sex_se,
-							'z': sex_z,
-							'p': sex_p_gee,
-							'odds_ratio': odds_ratio,
-							'or_ci_lower': or_ci_lower,
-							'or_ci_upper': or_ci_upper,
-							'significant': sex_p_gee < 0.05
-						}
-						
-					except Exception as e:
-						print(f"\n✗ GEE MODEL FAILED")
-						print(f"Error type: {type(e).__name__}")
-						print(f"Error message: {e}")
-						import traceback
-						print("\nFull traceback:")
-						traceback.print_exc()
-						glmm_result = {
-							'model': 'GEE',
-							'error': f'{type(e).__name__}: {str(e)}',
-							'note': 'Model fitting failed'
-						}
-				else:
-					print("✗ Statsmodels not available - install with: pip install statsmodels")
-					glmm_result = {
-						'model': 'GEE',
-						'error': 'statsmodels not installed',
-						'note': 'Install statsmodels for GEE analysis'
-					}
+			print(f"\n  {len(incomplete_subjects)} subjects with incomplete data (missing some {fl} levels)")
+			print(f"  Complete subjects: {len(complete_subjects)} (used for Cochran's Q)")
 
-		# === 1c. FULL GEE MODEL: Sex + Within-Factor + Interaction ===
-		# Primary joint test for all three effects simultaneously.
-		print(f"\n[1c] Full GEE Model: Sex × {fl} (joint model for all effects)")
-		print("-" * 50)
-		print(f"Model: Response ~ Sex + C({fl}) + Sex:C({fl})")
-		print(f"       Family=Binomial, Corr=Exchangeable, groups=ID")
+		# === PRIMARY: Cochran's Q ===
+		print(f"\n[1] {fl} Effect — Cochran's Q (within-subjects, complete subjects only)")
+		print("-"*50)
 
-		gee_full_result = None
-		if HAS_STATSMODELS and len(measure_df) > 0 and measure_df['Sex'].nunique() >= 2:
-			try:
-				from statsmodels.genmod.generalized_estimating_equations import GEE
-				from statsmodels.genmod.families import Binomial
-				from statsmodels.genmod.cov_struct import Exchangeable
+		q_stat = np.nan
+		p_cochran = np.nan
+		df_cochran = np.nan
+		p_perm = np.nan
 
-				gee_full_df = measure_df[['ID', 'Sex', wc, 'Response']].copy()
-				gee_full_df = gee_full_df.rename(columns={wc: 'Within'})
-				gee_full_df['Within'] = gee_full_df['Within'].astype('category')
-				gee_full_df = gee_full_df.sort_values('ID').reset_index(drop=True)
-
-				gee_full_formula = "Response ~ Sex + C(Within) + Sex:C(Within)"
-				gee_full_model = GEE.from_formula(
-					gee_full_formula,
-					groups=gee_full_df['ID'],
-					data=gee_full_df,
-					family=Binomial(),
-					cov_struct=Exchangeable(),
-				)
-				# Use Mancl-DeRouen bias-reduced SE (recommended for n_clusters < 30)
-				# Falls back to standard robust sandwich SE if BC correction is unavailable
-				n_clusters = gee_full_df['ID'].nunique()
-				_bc_warning = ''
-				try:
-					gee_full_fit = gee_full_model.fit(maxiter=100, ddof_scale=None, cov_type='bias_reduced')
-					_bc_warning = f'  SE correction: Mancl-DeRouen bias-reduced (n={n_clusters} clusters)'
-				except Exception:
-					gee_full_fit = gee_full_model.fit(maxiter=100, ddof_scale=None)
-					_bc_warning = f'  SE correction: robust sandwich (BC failed; n={n_clusters} clusters — interpret cautiously)'
-				if n_clusters < 30:
-					print(f"  ⚠️  Small cluster warning: n={n_clusters} animals; {_bc_warning}")
-
-				full_pvals  = gee_full_fit.pvalues
-				full_params = gee_full_fit.params
-				full_bse    = gee_full_fit.bse
-
-				def _term_p(keyword):
-					matches = [p for k, p in full_pvals.items()
-					           if keyword.lower() in k.lower()]
-					return float(np.nanmin(matches)) if matches else float('nan')
-
-				def _term_or(keyword):
-					for k in full_params.index:
-						if keyword.lower() in k.lower():
-							coef = full_params[k]
-							se   = full_bse[k]
-							return (float(np.exp(coef)),
-							        float(np.exp(coef - 1.96 * se)),
-							        float(np.exp(coef + 1.96 * se)))
-					return (float('nan'), float('nan'), float('nan'))
-
-				p_sex_full   = _term_p('sex[t.')
-				# fallback: any Sex param that is NOT an interaction
-				if np.isnan(p_sex_full):
-					sex_main_terms = [p for k, p in full_pvals.items()
-					                  if 'sex' in k.lower() and ':' not in k]
-					p_sex_full = float(np.nanmin(sex_main_terms)) if sex_main_terms else float('nan')
-
-				p_within_full = _term_p('c(within)')
-				if np.isnan(p_within_full):
-					within_main_terms = [p for k, p in full_pvals.items()
-					                     if 'within' in k.lower() and 'sex' not in k.lower()]
-					p_within_full = float(np.nanmin(within_main_terms)) if within_main_terms else float('nan')
-
-				p_inter_full = _term_p(':')
-
-				or_sex, or_sex_lo, or_sex_hi = _term_or('sex[t.')
-				if np.isnan(or_sex):
-					or_sex, or_sex_lo, or_sex_hi = _term_or('sex')
-
-				def _s(p):
-					return '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
-
-				print(f"\nFull GEE results (Wald tests):")
-				print(f"  Sex main effect      : p = {p_sex_full:.4f} {_s(p_sex_full)}  "
-				      f"(OR = {or_sex:.3f}, 95% CI [{or_sex_lo:.3f}–{or_sex_hi:.3f}])")
-				print(f"  {fl} main effect   : p = {p_within_full:.4f} {_s(p_within_full)}")
-				print(f"  Sex × {fl} interaction: p = {p_inter_full:.4f} {_s(p_inter_full)}")
-				print(f"  n = {gee_full_df['ID'].nunique()} subjects, {len(gee_full_df)} observations")
-				print(f"  NOTE: These formal Wald p-values from the joint model should be")
-				print(f"  cited in the paper.  Cochran's Q below serves as sensitivity check.")
-
-				gee_full_result = {
-					'model': f'GEE Binomial Exchangeable — full model',
-					'formula': gee_full_formula,
-					'se_correction': _bc_warning,
-					'n_subjects': int(gee_full_df['ID'].nunique()),
-					'n_obs': int(len(gee_full_df)),
-					'converged': bool(gee_full_fit.converged),
-					'sex': {
-						'p': float(p_sex_full),
-						'significant': bool(not np.isnan(p_sex_full) and p_sex_full < 0.05),
-						'odds_ratio': or_sex,
-						'or_ci_lower': or_sex_lo,
-						'or_ci_upper': or_sex_hi,
-					},
-					'within': {
-						'p': float(p_within_full),
-						'significant': bool(not np.isnan(p_within_full) and p_within_full < 0.05),
-					},
-					'interaction': {
-						'p': float(p_inter_full),
-						'significant': bool(not np.isnan(p_inter_full) and p_inter_full < 0.05),
-					},
-					'pvalues': {k: float(v) for k, v in full_pvals.items()},
-					'params':  {k: float(v) for k, v in full_params.items()},
-				}
-
-			except Exception as e:
-				print(f"\n✗ Full GEE model failed: {type(e).__name__}: {e}")
-				import traceback
-				traceback.print_exc()
-				gee_full_result = {
-					'model': 'GEE full model',
-					'error': f'{type(e).__name__}: {str(e)}',
-					'sex':        {'p': float('nan'), 'significant': False},
-					'within':     {'p': float('nan'), 'significant': False},
-					'interaction':{'p': float('nan'), 'significant': False},
-				}
-		else:
-			reason = 'statsmodels not available' if not HAS_STATSMODELS else 'Insufficient sex groups or data'
-			print(f"  Skipped: {reason}")
-			gee_full_result = {
-				'model': 'GEE full model',
-				'error': reason,
-				'sex':        {'p': float('nan'), 'significant': False},
-				'within':     {'p': float('nan'), 'significant': False},
-				'interaction':{'p': float('nan'), 'significant': False},
-			}
-
-		# === 2. Within-Factor EFFECT (Within-Subjects): Cochran's Q Test ===
-		print(f"\n[2] {fl} Effect (sensitivity — Cochran's Q, complete subjects only)")
-		print("-" * 50)
-
-		# Prepare data in wide format for Cochran's Q (rows = subjects, columns = CA% levels)
-		# Filter to only complete subjects
 		complete_df = measure_df[measure_df['ID'].isin(complete_subjects)].copy()
 
 		if len(complete_subjects) < 3:
-			print("ERROR: Need at least 3 subjects with complete data for Cochran's Q test")
-			q_stat_ca = np.nan
-			p_ca = np.nan
-			df_ca = np.nan
+			print("ERROR: Need at least 3 complete subjects for Cochran's Q")
 		else:
-			# Aggregate by ID and within-factor (take first value since behavioral data is same for all days at a level)
-			# This handles the duplicate ID-level combinations from daily observations
 			aggregated_df = complete_df.groupby(['ID', wc], as_index=False)['Response'].first()
-			
-			# Pivot to wide format: rows = subjects, columns = within-factor levels
 			wide_df = aggregated_df.pivot(index='ID', columns=wc, values='Response')
-			print(f"\nData structure for Cochran's Q:")
-			print(f"  Subjects: {len(wide_df)}")
-			print(f"  Time points ({fl} levels): {list(wide_df.columns)}")
-			print(f"\nSample of data (first 5 subjects):")
-			print(wide_df.head())
-			
-			# Compute Cochran's Q
-			p_ca_perm = float('nan')
-			try:
-				# cochrans_q returns (statistic, pvalue)
-				q_result = cochrans_q(wide_df)
-				q_stat_ca = q_result.statistic
-				p_ca = q_result.pvalue
-				df_ca = len(wide_df.columns) - 1  # k - 1 where k = number of time points
 
-				print(f"\nCochran's Q test: Q({df_ca}) = {q_stat_ca:.3f}, p = {p_ca:.4f} {'***' if p_ca < 0.001 else '**' if p_ca < 0.01 else '*' if p_ca < 0.05 else 'ns'}")
+			print(f"  Subjects: {len(wide_df)}, {fl} levels: {[int(c) for c in wide_df.columns]}")
 
-				# Show proportions per within-factor level
-				print(f"\nProportion 'Yes' by {fl}:")
-				for lvl in sorted(wide_df.columns):
-					prop = wide_df[lvl].mean()
-					count = wide_df[lvl].sum()
-					total = len(wide_df)
-					print(f"  {_group_label(lvl)}: {count}/{total} ({100*prop:.1f}%)")
+			# Print proportions first (always)
+			print(f"\n  Proportion 'Yes' by {fl}:")
+			for lvl in sorted(wide_df.columns):
+				prop = wide_df[lvl].mean()
+				print(f"    {_group_label(lvl)}: {int(wide_df[lvl].sum())}/{len(wide_df)} ({100*prop:.1f}%)")
 
-				# --- Permutation test for within-subjects effect ---
-				# Permutes condition labels within each subject → empirical null for Q
-				# Appropriate for small n where chi² asymptotics may be poor
-				if not np.isnan(q_stat_ca):
+			# Detect zero-variance: all rows identical across columns → Q undefined
+			_total_yes = int(wide_df.values.sum())
+			_total_cells = wide_df.size
+			_all_same = (_total_yes == 0 or _total_yes == _total_cells)
+			if _all_same:
+				_outcome = 'Yes' if _total_yes == _total_cells else 'No'
+				print(f"\n  Cochran's Q: NOT APPLICABLE — all subjects responded '{_outcome}' in every {fl} level")
+				print(f"  (No variation to test; Q is undefined when all responses are identical)")
+				q_stat = np.nan
+				p_cochran = np.nan
+				df_cochran = len(wide_df.columns) - 1
+			else:
+				try:
+					q_result = cochrans_q(wide_df)
+					q_stat = q_result.statistic
+					p_cochran = q_result.pvalue
+					df_cochran = len(wide_df.columns) - 1
+
+					print(f"\n  Cochran's Q: Q({df_cochran}) = {q_stat:.3f}, p = {p_cochran:.4f} "
+					      f"{'***' if p_cochran < 0.001 else '**' if p_cochran < 0.01 else '*' if p_cochran < 0.05 else 'ns'}")
+
+					# Permutation test
 					try:
 						_rng = np.random.default_rng(42)
 						_n_perm = 5000
-						_perm_q = np.empty(_n_perm)
 						_wide_arr = wide_df.values.astype(float)
+						_perm_q = np.empty(_n_perm)
 						for _i in range(_n_perm):
 							_shuffled = np.apply_along_axis(_rng.permutation, axis=1, arr=_wide_arr)
-							_perm_wide = pd.DataFrame(_shuffled, columns=wide_df.columns)
 							try:
-								_perm_q[_i] = cochrans_q(_perm_wide).statistic
+								_perm_q[_i] = cochrans_q(pd.DataFrame(_shuffled, columns=wide_df.columns)).statistic
 							except Exception:
-								_perm_q[_i] = q_stat_ca  # conservative: tie with observed
-						p_ca_perm = float(np.mean(_perm_q >= q_stat_ca))
-						print(f"  Permutation p (5000 within-subject shuffles): p = {p_ca_perm:.4f} "
-						      f"{'***' if p_ca_perm < 0.001 else '**' if p_ca_perm < 0.01 else '*' if p_ca_perm < 0.05 else 'ns'}")
+								_perm_q[_i] = q_stat if not np.isnan(q_stat) else 0.0
+						p_perm = float(np.mean(_perm_q >= q_stat))
+						print(f"  Permutation p (5000 within-subject shuffles): {p_perm:.4f} "
+						      f"{'***' if p_perm < 0.001 else '**' if p_perm < 0.01 else '*' if p_perm < 0.05 else 'ns'}")
 					except Exception as _pe:
 						print(f"  Permutation test error: {_pe}")
 
-			except Exception as e:
-				print(f"ERROR computing Cochran's Q: {e}")
-				import traceback
-				traceback.print_exc()
-				q_stat_ca = np.nan
-				p_ca = np.nan
-				df_ca = np.nan
-		
-		# === 3. Interaction: Stratified Cochran's Q ===
-		print(f"\n[3] {_MLB['interaction_label']} Interaction: Stratified Analysis")
-		print("-" * 50)
-		print("Running separate Cochran's Q tests for each sex to assess interaction")
-		
-		interaction_results = {}
-		for sex in sorted(measure_df['Sex'].unique()):
-			print(f"\n  Cochran's Q for {sex}:")
-			sex_df = measure_df[measure_df['Sex'] == sex].copy()
-			
-			# Get complete subjects for this sex
-			sex_subjects_per_level = sex_df.groupby('ID')[wc].nunique()
-			sex_complete = sex_subjects_per_level[sex_subjects_per_level == total_levels].index.tolist()
-			
-			if len(sex_complete) < 3:
-				print(f"    WARNING: Only {len(sex_complete)} complete subjects - need at least 3")
-				interaction_results[sex] = {'Q': np.nan, 'p': np.nan, 'df': np.nan, 'n': len(sex_complete)}
-				continue
-			
-			sex_complete_df = sex_df[sex_df['ID'].isin(sex_complete)]
-			# Aggregate by ID and within-factor before pivoting
-			sex_aggregated = sex_complete_df.groupby(['ID', wc], as_index=False)['Response'].first()
-			sex_wide = sex_aggregated.pivot(index='ID', columns=wc, values='Response')
-			
-			# Check for variation before running Cochran's Q
-			# If all subjects have the same response across all levels, Cochran's Q is undefined
-			total_variation = sex_wide.var(axis=1).sum()  # Sum of row variances
-			col_variation = sex_wide.var(axis=0).sum()    # Sum of column variances
-			
-			if total_variation == 0 or col_variation == 0:
-				print(f"    WARNING: No variation in responses - all subjects gave same answer")
-				print(f"    Cannot compute Cochran's Q (requires variation across conditions)")
-				print(f"    n = {len(sex_wide)} subjects")
-				interaction_results[sex] = {'Q': np.nan, 'p': np.nan, 'df': np.nan, 'n': len(sex_wide), 
-				                           'note': 'No variation - all same response'}
-				continue
-			
-			try:
-				q_result_sex = cochrans_q(sex_wide)
-				q_stat_sex = q_result_sex.statistic
-				p_sex_q = q_result_sex.pvalue
-				df_sex_q = len(sex_wide.columns) - 1
-				
-				# Check if result is valid (not NaN)
-				if np.isnan(q_stat_sex) or np.isnan(p_sex_q):
-					print(f"    WARNING: Cochran's Q returned invalid result (likely no variation)")
-					print(f"    n = {len(sex_wide)} subjects")
-					interaction_results[sex] = {'Q': np.nan, 'p': np.nan, 'df': df_sex_q, 'n': len(sex_wide),
-					                           'note': 'Invalid result - insufficient variation'}
-				else:
-					print(f"    Q({df_sex_q}) = {q_stat_sex:.3f}, p = {p_sex_q:.4f} {'***' if p_sex_q < 0.001 else '**' if p_sex_q < 0.01 else '*' if p_sex_q < 0.05 else 'ns'}")
-					print(f"    n = {len(sex_wide)} subjects")
-					interaction_results[sex] = {'Q': q_stat_sex, 'p': p_sex_q, 'df': df_sex_q, 'n': len(sex_wide)}
-			except Exception as e:
-				print(f"    ERROR: {e}")
-				interaction_results[sex] = {'Q': np.nan, 'p': np.nan, 'df': np.nan, 'n': len(sex_complete)}
-		
-		print(f"\nNote: Interaction is assessed by comparing Cochran's Q results between sexes.")
-		print(f"      Significant Q in one sex but not the other suggests interaction.")
-		
-		# Store results
+				except Exception as e:
+					print(f"  ERROR computing Cochran's Q: {e}")
+					import traceback
+					traceback.print_exc()
+
+		# === SUPPLEMENT: GEE with within-factor only ===
+		print(f"\n[2] {fl} Effect — GEE (Binomial, Exchangeable, groups=ID, no sex factor)")
+		print("-"*50)
+
+		gee_result = None
+		if HAS_STATSMODELS and len(measure_df) > 0:
+			# Skip GEE when outcome has zero variance (perfect separation: all 0 or all 1)
+			_resp_vals = measure_df['Response'].values
+			_n_unique_resp = len(np.unique(_resp_vals[~np.isnan(_resp_vals.astype(float))]))
+			if _n_unique_resp < 2:
+				_const = 'Yes (1)' if _resp_vals.sum() > 0 else 'No (0)'
+				print(f"  SKIPPED — outcome is constant ({_const}); GEE requires variation.")
+				gee_result = {
+					'model': 'GEE', 'error': f'Constant outcome ({_const}) — perfect separation',
+					'p': float('nan'), 'significant': False,
+				}
+			else:
+				try:
+					from statsmodels.genmod.generalized_estimating_equations import GEE
+					from statsmodels.genmod.families import Binomial
+					from statsmodels.genmod.cov_struct import Exchangeable
+
+					gee_df = measure_df[['ID', wc, 'Response']].copy()
+					gee_df = gee_df.rename(columns={wc: 'Within'})
+					gee_df['Within'] = gee_df['Within'].astype('category')
+					gee_df = gee_df.sort_values('ID').reset_index(drop=True)
+
+					gee_formula = "Response ~ C(Within)"
+					n_clusters = gee_df['ID'].nunique()
+					gee_model = GEE.from_formula(
+						gee_formula,
+						groups=gee_df['ID'],
+						data=gee_df,
+						family=Binomial(),
+						cov_struct=Exchangeable(),
+					)
+					try:
+						gee_fit = gee_model.fit(maxiter=100, ddof_scale=None, cov_type='bias_reduced')
+						se_note = f'SE: Mancl-DeRouen bias-reduced (n={n_clusters} clusters)'
+					except Exception:
+						gee_fit = gee_model.fit(maxiter=100, ddof_scale=None)
+						se_note = f'SE: robust sandwich (n={n_clusters} clusters)'
+	
+					# P-value: minimum over all C(Within) terms (one-sided omnibus)
+					within_pvals = [p for k, p in gee_fit.pvalues.items() if 'within' in k.lower()]
+					p_gee = float(np.nanmin(within_pvals)) if within_pvals else float('nan')
+					sig_gee = '***' if p_gee < 0.001 else '**' if p_gee < 0.01 else '*' if p_gee < 0.05 else 'ns'
+					print(f"  Model: {gee_formula}")
+					print(f"  {se_note}")
+					print(f"  n = {n_clusters} subjects, {len(gee_df)} observations")
+					print(f"  {fl} effect (min Wald p across levels): p = {p_gee:.4f} {sig_gee}")
+	
+					gee_result = {
+						'model': 'GEE Binomial Exchangeable',
+						'formula': gee_formula,
+						'se_correction': se_note,
+						'n_subjects': int(n_clusters),
+						'n_obs': int(len(gee_df)),
+						'converged': bool(gee_fit.converged),
+						'p': float(p_gee),
+						'significant': bool(not np.isnan(p_gee) and p_gee < 0.05),
+						'pvalues': {k: float(v) for k, v in gee_fit.pvalues.items()},
+					}
+				except Exception as e:
+					print(f"  GEE failed: {type(e).__name__}: {e}")
+					gee_result = {'model': 'GEE', 'error': f'{type(e).__name__}: {str(e)}',
+					              'p': float('nan'), 'significant': False}
+		if not HAS_STATSMODELS:
+			gee_result = {'model': 'GEE', 'error': 'statsmodels not available',
+			              'p': float('nan'), 'significant': False}
+
+		# Final significance: use Cochran's Q permutation p if available, else asymptotic Q
+		_sig_p = p_perm if not np.isnan(p_perm) else p_cochran
+		_significant = (not np.isnan(_sig_p) and _sig_p < 0.05)
+
 		results[measure_name] = {
 			'measure': measure_name,
-			'sex': {
-				'test': 'Chi-square',
-				'statistic': sex_result.get('chi2', np.nan),
-				'chi2': sex_result.get('chi2', np.nan),
-				'df': sex_result.get('dof', np.nan),
-				'p': sex_result.get('p', np.nan),
-				'significant': sex_result.get('significant', False),
-				'table': sex_table if not sex_table.empty else pd.DataFrame(),
-				'note': 'Between-subjects factor (chi-square; see sex_gee and gee_full for GEE estimates)',
-				'error': sex_result.get('error', None)
-			},
-			'sex_gee': glmm_result if glmm_result is not None else {
-				'model': 'GEE',
-				'note': 'Not computed - sex comparison skipped',
-				'error': 'Only one sex or no variation in responses'
-			},
-			'gee_full': gee_full_result if gee_full_result is not None else {
-				'model': 'GEE full model',
-				'error': 'Not computed',
-				'sex':        {'p': float('nan'), 'significant': False},
-				'within':     {'p': float('nan'), 'significant': False},
-				'interaction':{'p': float('nan'), 'significant': False},
-			},
 			wk: {
-				'test': "Cochran's Q (sensitivity; see gee_full for primary test)",
-				'statistic': q_stat_ca,
-				'Q': q_stat_ca,
-				'df': df_ca,
-				'p': p_ca,
-				'p_permutation': p_ca_perm,
-				'significant': p_ca < 0.05 if not np.isnan(p_ca) else False,
-				'significant_permutation': (not np.isnan(p_ca_perm) and p_ca_perm < 0.05),
+				'test': "Cochran's Q",
+				'statistic': q_stat,
+				'Q': q_stat,
+				'df': df_cochran,
+				'p': p_cochran,
+				'p_permutation': p_perm,
+				'significant': _significant,
+				'significant_permutation': (not np.isnan(p_perm) and p_perm < 0.05),
 				'n_complete': len(complete_subjects),
 				'n_incomplete': len(incomplete_subjects),
-				'note': 'Sensitivity check — complete subjects only; primary test is GEE full model [1c]'
 			},
-			'interaction': {
-				'test': 'Stratified Cochran\'s Q (sensitivity; see gee_full for primary test)',
-				'by_sex': interaction_results,
-				'note': 'Sensitivity check — compare Q stats across sexes; formal interaction p-value in gee_full'
-			},
+			'gee_within': gee_result,
 			'total_n': len(measure_df),
 			'yes_count': int(measure_df['Response'].sum()),
-			'no_count': int(len(measure_df) - measure_df['Response'].sum())
+			'no_count': int(len(measure_df) - measure_df['Response'].sum()),
 		}
-		# Per-animal mean % Yes (for reporting)
 		_animal_yes = [
 			100.0 * float(adf['Response'].sum()) / len(adf)
-			for _, adf in measure_df.groupby('ID')
-			if len(adf) > 0
+			for _, adf in measure_df.groupby('ID') if len(adf) > 0
 		]
 		results[measure_name]['n_subjects'] = len(_animal_yes)
 		results[measure_name]['mean_yes_pct'] = float(np.mean(_animal_yes)) if _animal_yes else float('nan')
-	
+
 	print("\n" + "="*80)
 	return results
-
-
 def _perform_chi_square_fallback(df: pd.DataFrame) -> dict:
 	"""
 	Fallback to chi-square tests when statsmodels is not available.
 	WARNING: Does NOT account for repeated measures.
+	Sex is NOT included as a factor.
 	"""
 	print("\n" + "="*80)
 	print("WARNING: Using chi-square tests (DOES NOT ACCOUNT FOR REPEATED MEASURES)")
 	print("Install statsmodels for proper Cochran's Q analysis: pip install statsmodels")
 	print("="*80)
-	
+
 	wc = _MLB['within_col']
 	wk = _MLB['result_within_key']
 
-	# Clean and prepare data
 	cdf = clean_master_dataframe(df)
 	cdf = _add_day_number_column(cdf)
 	if EXPERIMENT_MODE == 'nonramp':
 		cdf = _add_week_column(cdf)
 	cdf = cdf[cdf["Day"] >= 0]
-	
-	# Convert within-factor to integer
 	cdf[wc] = cdf[wc].astype(int)
-	
+
 	behavioral_columns = {
-		'Nest Made': 'Nest Made?',
-		'Lethargy': 'Lethargy?',
-		'CA Spot Digging': 'CA Spot Digging?',
-		'Anxious Behaviors': 'Anxious Behaviors?'
+		'Nest Made':         'Nest Made?',
+		'Lethargy':          'Lethargy?',
+		'CA Spot Digging':   'CA Spot Digging?',
+		'Anxious Behaviors': 'Anxious Behaviors?',
 	}
-	
+
 	results = {}
-	
+
 	for measure_name, column in behavioral_columns.items():
 		if column not in cdf.columns:
 			continue
-		
-		measure_df = cdf[["Sex", wc, column]].copy()
-		measure_df = measure_df.dropna()
+
+		measure_df = cdf[["ID", wc, column]].copy().dropna()
 		measure_df["Response"] = measure_df[column].apply(
 			lambda x: 1 if str(x).strip().upper() in ["YES", "TRUE", "1"] else 0
 		)
-		
-		# Chi-square tests
-		sex_table = pd.crosstab(measure_df["Sex"], measure_df["Response"])
-		chi2_sex, p_sex, dof_sex, _ = stats.chi2_contingency(sex_table)
-		
+
 		within_table = pd.crosstab(measure_df[wc], measure_df["Response"])
 		chi2_within, p_within, dof_within, _ = stats.chi2_contingency(within_table)
-		
+
 		results[measure_name] = {
 			'measure': measure_name,
-			'sex': {
-				'test': 'Chi-square (INVALID - independence violated)',
-				'chi2': chi2_sex,
-				'df': dof_sex,
-				'p': p_sex,
-				'significant': p_sex < 0.05,
-				'table': sex_table
-			},
 			wk: {
 				'test': 'Chi-square (INVALID - independence violated)',
 				'Q': chi2_within,
 				'df': dof_within,
 				'p': p_within,
+				'p_permutation': float('nan'),
 				'significant': p_within < 0.05,
 				'n_complete': 0,
-				'n_incomplete': 0
+				'n_incomplete': 0,
 			},
-			'interaction': {
-				'test': 'Not computed',
-				'by_sex': {}
-			},
+			'gee_within': None,
 			'total_n': len(measure_df),
 			'yes_count': int(measure_df['Response'].sum()),
-			'no_count': int(len(measure_df) - measure_df['Response'].sum())
+			'no_count': int(len(measure_df) - measure_df['Response'].sum()),
 		}
-		# Per-animal mean % Yes (for reporting)
 		_animal_yes = [
 			100.0 * float(adf['Response'].sum()) / len(adf)
-			for _, adf in measure_df.groupby('ID')
-			if len(adf) > 0
+			for _, adf in measure_df.groupby('ID') if len(adf) > 0
 		]
 		results[measure_name]['n_subjects'] = len(_animal_yes)
 		results[measure_name]['mean_yes_pct'] = float(np.mean(_animal_yes)) if _animal_yes else float('nan')
-	
+
 	return results
 
 
 def display_two_way_anova_results(weight_results: dict, behavioral_results: dict) -> str:
 	"""
-	Display formatted results from two-way ANOVA and chi-square tests.
-	
-	Parameters:
-		weight_results: Dictionary from perform_two_way_anova_weight
-		behavioral_results: Dictionary from perform_two_way_chi_square_behavioral
-		
-	Returns:
-		Formatted string with results
+	Display formatted results from one-factor RM ANOVA (weight) and behavioral tests.
+	Sex is NOT included as a factor.
 	"""
 	wk = _MLB['result_within_key']
 	fl = _MLB['factor_label']
 
 	lines = []
 	lines.append("\n" + "="*80)
-	lines.append(f"MIXED ANOVA RESULTS: {_MLB['anova_heading']}")
+	lines.append(f"ONE-FACTOR REPEATED MEASURES ANOVA RESULTS: {_MLB['anova_heading']}")
 	lines.append("="*80)
 	lines.append("")
-	lines.append("Design: Repeated Measures (Mixed) ANOVA")
-	lines.append("  Between-subjects factor: Sex (each mouse has one sex)")
-	lines.append(f"  {_MLB['anova_factor_desc']}")
-	lines.append("  This analysis accounts for non-independence of repeated measurements")
+	lines.append("Design: One-factor Repeated Measures ANOVA")
+	lines.append(f"  Within-subjects factor: {fl}")
+	lines.append("  Sex is NOT included as a factor.")
+	lines.append("  Accounts for non-independence of repeated measurements within subjects.")
 	lines.append("")
-	
-	# Weight measures (Mixed ANOVA)
-	lines.append("CONTINUOUS MEASURES (Mixed ANOVA for Repeated Measures)")
+
+	# ── Continuous measures (RM ANOVA) ──────────────────────────────────────
+	lines.append("CONTINUOUS MEASURES (One-factor RM ANOVA)")
 	lines.append("-"*80)
 	lines.append("")
-	
+
 	for measure_name, results in weight_results.items():
 		lines.append(f"MEASURE: {measure_name.upper()}")
 		lines.append("-"*60)
-		
-		# Display subject info if available
+
 		if 'n_subjects' in results:
 			lines.append(f"Subjects: {results['n_subjects']} total, {results.get('complete_subjects', 'N/A')} with complete data")
 			lines.append("")
-		
-		# Sex effect (between-subjects)
-		sex = results['sex']
-		lines.append(f"Main Effect of Sex (between-subjects):")
-		lines.append(f"  F({sex['df_effect']:.0f},{sex['df_error']:.0f}) = {sex['F']:.3f}, p = {sex['p']:.4f} {'***' if sex['p'] < 0.001 else '**' if sex['p'] < 0.01 else '*' if sex['p'] < 0.05 else 'ns'}")
-		if 'effect_size_eta_squared' in sex and sex['effect_size_eta_squared'] > 0:
-			lines.append(f"  Partial η² = {sex['effect_size_eta_squared']:.3f}")
-		lines.append(f"  Interpretation: {'SIGNIFICANT' if sex['significant'] else 'Not significant'}")
-		if 'type' in sex and 'VIOLATED' in sex['type']:
-			lines.append(f"  WARNING: {sex['type']}")
-		lines.append("")
-		
-		# Within-factor effect (within-subjects)
-		wf = results[wk]
+
+		wf = results.get(wk, {})
+		if not wf:
+			lines.append(f"  ERROR: No within-subjects result found.")
+			lines.append("")
+			continue
+
 		lines.append(f"Main Effect of {fl} (within-subjects, repeated measures):")
-		lines.append(f"  F({wf['df_effect']:.0f},{wf['df_error']:.0f}) = {wf['F']:.3f}, p = {wf['p']:.4f} {'***' if wf['p'] < 0.001 else '**' if wf['p'] < 0.01 else '*' if wf['p'] < 0.05 else 'ns'}")
-		
-		# Display sphericity information
-		if 'sphericity' in wf and 'W' in wf.get('sphericity', {}):
-			sph = wf['sphericity']
-			lines.append(f"  Sphericity (Mauchly's test): W = {sph['W']:.4f}, p = {sph['p']:.4f}")
-			if 'epsilon' in sph and not pd.isna(sph['epsilon']):
+		lines.append(f"  F({wf.get('df_effect', '?'):.0f},{wf.get('df_error', '?'):.0f}) = {wf.get('F', float('nan')):.3f}"
+		             f", p = {wf.get('p', float('nan')):.4f} "
+		             f"{'***' if wf.get('p',1)<0.001 else '**' if wf.get('p',1)<0.01 else '*' if wf.get('p',1)<0.05 else 'ns'}")
+
+		sph = wf.get('sphericity', {})
+		if sph.get('W') is not None and not np.isnan(sph.get('W', float('nan'))):
+			lines.append(f"  Mauchly's sphericity: W = {sph['W']:.4f}, p = {sph['p']:.4f}")
+			if not np.isnan(sph.get('epsilon', float('nan'))):
 				lines.append(f"  Greenhouse-Geisser ε = {sph['epsilon']:.4f}")
 			if sph.get('violated', False):
-				lines.append(f"  WARNING: Sphericity assumption VIOLATED - using GG correction")
-				lines.append(f"  Greenhouse-Geisser corrected p = {wf['p_corrected']:.4f}")
+				lines.append(f"  WARNING: Sphericity violated — GG correction applied")
+				lines.append(f"  GG-corrected p = {wf.get('p_corrected', float('nan')):.4f}")
 			else:
 				lines.append(f"  Sphericity assumption met")
-		elif 'p_corrected' in wf and wf['p_corrected'] != wf['p']:
-			lines.append(f"  Greenhouse-Geisser corrected p = {wf['p_corrected']:.4f}")
-		
-		if 'effect_size_eta_squared' in wf and wf['effect_size_eta_squared'] > 0:
+		elif wf.get('p_corrected', wf.get('p')) != wf.get('p'):
+			lines.append(f"  GG-corrected p = {wf.get('p_corrected', float('nan')):.4f}")
+
+		if wf.get('effect_size_eta_squared', 0) > 0:
 			lines.append(f"  Partial η² = {wf['effect_size_eta_squared']:.3f}")
-		lines.append(f"  Interpretation: {'SIGNIFICANT' if wf['significant'] else 'Not significant'}")
-		if 'type' in wf and 'VIOLATED' in wf['type']:
+		lines.append(f"  Interpretation: {'SIGNIFICANT' if wf.get('significant') else 'Not significant'}")
+		if 'type' in wf and 'VIOLATED' in str(wf['type']):
 			lines.append(f"  WARNING: {wf['type']}")
 		lines.append("")
-		
-		# Interaction effect
-		interaction = results['interaction']
-		lines.append(f"{_MLB['interaction_label']} Interaction:")
-		lines.append(f"  F({interaction['df_effect']:.0f},{interaction['df_error']:.0f}) = {interaction['F']:.3f}, p = {interaction['p']:.4f} {'***' if interaction['p'] < 0.001 else '**' if interaction['p'] < 0.01 else '*' if interaction['p'] < 0.05 else 'ns'}")
-		
-		# Display sphericity information for interaction
-		if 'sphericity' in interaction and 'W' in interaction.get('sphericity', {}):
-			sph = interaction['sphericity']
-			lines.append(f"  Sphericity (Mauchly's test): W = {sph['W']:.4f}, p = {sph['p']:.4f}")
-			if 'epsilon' in sph and not pd.isna(sph['epsilon']):
-				lines.append(f"  Greenhouse-Geisser ε = {sph['epsilon']:.4f}")
-			if sph.get('violated', False):
-				lines.append(f"  WARNING: Sphericity assumption VIOLATED - using GG correction")
-				lines.append(f"  Greenhouse-Geisser corrected p = {interaction['p_corrected']:.4f}")
+
+		# Descriptive statistics
+		if 'level_stats' in results and results['level_stats'] is not None and not (isinstance(results['level_stats'], pd.DataFrame) and results['level_stats'].empty):
+			ls = results['level_stats']
+			lines.append(f"Descriptive Statistics by {fl}:")
+			lines.append(f"  {fl:<6} {'N':<4} {'Mean':>9} {'Median':>9} {'SD':>9} {'SEM':>9} {'CI Lo':>9} {'CI Hi':>9}")
+			lines.append("  " + "-"*70)
+			if isinstance(ls, pd.DataFrame):
+				_wc = _MLB['within_col']
+				_sort_col = _wc if _wc in ls.columns else ls.columns[0]
+				for _, row in ls.sort_values(_sort_col).iterrows():
+					lvl = row.get(_wc, row.iloc[0])
+					lines.append(f"  {lvl:<6} {int(row.get('count', 0)):<4} "
+					             f"{row.get('mean', float('nan')):>9.3f} "
+					             f"{row.get('median', float('nan')):>9.3f} "
+					             f"{row.get('std', float('nan')):>9.3f} "
+					             f"{row.get('sem', float('nan')):>9.3f} "
+					             f"{row.get('ci_lower', float('nan')):>9.3f} "
+					             f"{row.get('ci_upper', float('nan')):>9.3f}")
 			else:
-				lines.append(f"  Sphericity assumption met")
-		elif 'p_corrected' in interaction and interaction['p_corrected'] != interaction['p']:
-			lines.append(f"  Greenhouse-Geisser corrected p = {interaction['p_corrected']:.4f}")
-		if 'effect_size_eta_squared' in interaction and interaction['effect_size_eta_squared'] > 0:
-			lines.append(f"  Partial η² = {interaction['effect_size_eta_squared']:.3f}")
-		lines.append(f"  Interpretation: {'SIGNIFICANT' if interaction['significant'] else 'Not significant'}")
-		if 'type' in interaction and 'VIOLATED' in interaction['type']:
-			lines.append(f"  WARNING: {interaction['type']}")
-		lines.append("")
-		
-		# Descriptive Statistics
-		if 'group_stats' in results and not results['group_stats'].empty:
-			lines.append(f"Descriptive Statistics by Sex and {fl}:")
-			lines.append("-"*60)
-			wc_local = _MLB['within_col']
-			
-			# First table: Basic stats
-			lines.append(f"{'Sex':<8} {fl:<6} {'N':<4} {'Mean':<10} {'Median':<10} {'Std':<10} {'SEM':<10}")
-			lines.append("-" * 60)
-			
-			group_stats_df = results['group_stats']
-			for _, row in group_stats_df.iterrows():
-				lines.append(f"{row['Sex']:<8} "
-							f"{int(row[wc_local]):<6} "
-							f"{int(row['count']):<4} "
-							f"{row['mean']:<10.2f} "
-							f"{row.get('median', np.nan):<10.2f} "
-							f"{row['std']:<10.2f} "
-							f"{row.get('sem', np.nan):<10.2f}")
-			
+				for lvl in sorted(ls.keys()):
+					s = ls[lvl]
+					lines.append(f"  {lvl:<6} {int(s.get('n', 0)):<4} "
+					             f"{s.get('mean', float('nan')):>9.3f} "
+					             f"{s.get('median', float('nan')):>9.3f} "
+					             f"{s.get('std', float('nan')):>9.3f} "
+					             f"{s.get('sem', float('nan')):>9.3f} "
+					             f"{s.get('ci_lower', float('nan')):>9.3f} "
+					             f"{s.get('ci_upper', float('nan')):>9.3f}")
 			lines.append("")
-			lines.append("95% Confidence Intervals and Range:")
-			lines.append(f"{'Sex':<8} {fl:<6} {'CI Lower':<12} {'CI Upper':<12} {'Q25':<10} {'Q75':<10} {'Min':<10} {'Max':<10}")
-			lines.append("-" * 80)
-			
-			for _, row in group_stats_df.iterrows():
-				lines.append(f"{row['Sex']:<8} "
-							f"{int(row[wc_local]):<6} "
-							f"{row.get('ci_lower', np.nan):<12.2f} "
-							f"{row.get('ci_upper', np.nan):<12.2f} "
-							f"{row.get('q25', np.nan):<10.2f} "
-							f"{row.get('q75', np.nan):<10.2f} "
-							f"{row.get('min', np.nan):<10.2f} "
-							f"{row.get('max', np.nan):<10.2f}")
-			lines.append("")
-		
 		lines.append("")
-	
-	# Behavioral measures (Cochran's Q and Chi-square)
-	lines.append("CATEGORICAL MEASURES (Repeated Measures Analysis — Binary Outcomes)")
+
+	# ── Behavioral measures (Cochran's Q) ────────────────────────────────────
+	lines.append("CATEGORICAL MEASURES (Binary Outcomes — Repeated Measures)")
 	lines.append("-"*80)
-	lines.append("PRIMARY   : GEE full model [1c] — Response ~ Sex + C(Within) + Sex:C(Within)")
-	lines.append("            Binomial family, Exchangeable correlation, groups = animal ID")
-	lines.append("            SE: Mancl-DeRouen bias-reduced (BC) correction when available (n_clusters<30)")
-	lines.append("            Provides formal Wald p-values for Sex, Within, and interaction")
-	lines.append("SUPPLEMENT: Chi-square for Sex [1], Sex-only GEE [1b]")
-	lines.append("SENSITIVITY: Cochran's Q for within-subjects effect [2] (complete cases only)")
-	lines.append("            + permutation p-value (5000 within-subject shuffles; no asymptotic assumptions)")
-	lines.append("POST-HOC  : Pairwise McNemar (Bonferroni-corrected) with phi effect size")
-	lines.append("FDR NOTE  : p-values marked with (FDR) below are Benjamini-Hochberg corrected")
-	lines.append("            across the 3 primary behavioral measures (Nest Made, Lethargy, Anxious)")
-	if len(behavioral_results) >= 2:
-		_fdr_measures = ['Nest Made', 'Lethargy', 'Anxious Behaviors']
-		_fdr_raw = []
-		_fdr_keys = []
-		for _m in _fdr_measures:
-			if _m in behavioral_results:
-				_gf = behavioral_results[_m].get('gee_full', {})
-				_wf = behavioral_results[_m].get(wk, {})
-				# Prefer GEE within p, fall back to Cochran's Q permutation, then Cochran's Q asymptotic
-				_p = _gf.get('within', {}).get('p', float('nan'))
-				if np.isnan(_p):
-					_p = _wf.get('p_permutation', float('nan'))
-				if np.isnan(_p):
-					_p = _wf.get('p', float('nan'))
-				_fdr_raw.append(_p)
-				_fdr_keys.append(_m)
-		if _fdr_keys:
-			_fdr_adj = [float('nan')] * len(_fdr_raw)
-			_valid_idx = [i for i, p in enumerate(_fdr_raw) if not np.isnan(p)]
-			if _valid_idx:
-				_valid_ps = [_fdr_raw[i] for i in _valid_idx]
-				_m_fdr = len(_valid_ps)
-				# Sort ascending, compute BH, enforce step-up monotonicity in sorted space, map back
-				_order = sorted(range(_m_fdr), key=lambda i: _valid_ps[i])
-				_sorted_ps = [_valid_ps[i] for i in _order]
-				_bh_sorted = [min(1.0, _sorted_ps[k] * _m_fdr / (k + 1)) for k in range(_m_fdr)]
-				for _k in range(_m_fdr - 2, -1, -1):
-					_bh_sorted[_k] = min(_bh_sorted[_k], _bh_sorted[_k + 1])
-				_bh_orig = [0.0] * _m_fdr
-				for _spos, _opos in enumerate(_order):
-					_bh_orig[_opos] = _bh_sorted[_spos]
-				for _vpos, _orig_idx in enumerate(_valid_idx):
-					_fdr_adj[_orig_idx] = _bh_orig[_vpos]
-			lines.append("")
-			lines.append("  BH-FDR corrected within-subjects p-values across behavioral measures:")
-			for _mk, _pr, _pa in zip(_fdr_keys, _fdr_raw, _fdr_adj):
-				_sig = '***' if (not np.isnan(_pa) and _pa < 0.001) else '**' if (not np.isnan(_pa) and _pa < 0.01) else '*' if (not np.isnan(_pa) and _pa < 0.05) else 'ns'
-				lines.append(f"    {_mk:<20}: raw p = {_pr:.4f}  →  BH-FDR p = {_pa:.4f} {_sig}")
+	lines.append("PRIMARY TEST  : Cochran's Q (within-subjects, complete subjects only)")
+	lines.append("               + permutation p-value (5000 within-subject shuffles)")
+	lines.append("SUPPLEMENT    : GEE (Binomial, Exchangeable, groups=ID, within-factor only)")
+	lines.append("POST-HOC      : Pairwise McNemar (Bonferroni-corrected) with phi effect size")
 	lines.append("")
-	
+
+	# BH-FDR across the three primary behavioral measures
+	_fdr_measures = ['Nest Made', 'Lethargy', 'Anxious Behaviors']
+	_fdr_raw, _fdr_keys = [], []
+	for _m in _fdr_measures:
+		if _m in behavioral_results:
+			_wf = behavioral_results[_m].get(wk, {})
+			_p = _wf.get('p_permutation', float('nan'))
+			if np.isnan(_p):
+				_p = _wf.get('p', float('nan'))
+			_fdr_raw.append(_p)
+			_fdr_keys.append(_m)
+	if _fdr_keys:
+		_fdr_adj = [float('nan')] * len(_fdr_raw)
+		_valid_idx = [i for i, p in enumerate(_fdr_raw) if not np.isnan(p)]
+		if _valid_idx:
+			_valid_ps = [_fdr_raw[i] for i in _valid_idx]
+			_m_fdr = len(_valid_ps)
+			_order = sorted(range(_m_fdr), key=lambda i: _valid_ps[i])
+			_sorted_ps = [_valid_ps[i] for i in _order]
+			_bh = [min(1.0, _sorted_ps[k] * _m_fdr / (k + 1)) for k in range(_m_fdr)]
+			for _k in range(_m_fdr - 2, -1, -1):
+				_bh[_k] = min(_bh[_k], _bh[_k + 1])
+			_bh_orig = [0.0] * _m_fdr
+			for _spos, _opos in enumerate(_order):
+				_bh_orig[_opos] = _bh[_spos]
+			for _vi, _oi in enumerate(_valid_idx):
+				_fdr_adj[_oi] = _bh_orig[_vi]
+		lines.append("BH-FDR corrected within-subjects p-values (Nest Made, Lethargy, Anxious Behaviors):")
+		for _mk, _pr, _pa in zip(_fdr_keys, _fdr_raw, _fdr_adj):
+			_sig = '***' if (not np.isnan(_pa) and _pa < 0.001) else '**' if (not np.isnan(_pa) and _pa < 0.01) else '*' if (not np.isnan(_pa) and _pa < 0.05) else 'ns'
+			lines.append(f"  {_mk:<20}: raw p = {_pr:.4f}  →  BH-FDR p = {_pa:.4f} {_sig}")
+		lines.append("")
+
 	for measure_name, results in behavioral_results.items():
 		lines.append(f"MEASURE: {measure_name.upper()}")
 		lines.append("-"*60)
-		
-		# Check if the measure has an error at the top level
+
 		if 'error' in results and 'total_n' not in results:
 			lines.append(f"ERROR: {results['error']}")
 			lines.append("")
 			continue
-		
-		_n_subj = results.get('n_subjects', results['total_n'])
+
+		_n_subj = results.get('n_subjects', results.get('total_n', '?'))
 		_mean_yes = results.get('mean_yes_pct', float('nan'))
-		lines.append(f"n = {_n_subj} animals, {results['total_n']} total observations")
+		lines.append(f"n = {_n_subj} animals, {results.get('total_n', '?')} total observations")
 		if not np.isnan(float(_mean_yes)):
-			lines.append(f"  Mean % Yes per animal: {_mean_yes:.1f}%  |  Mean % No: {100.0 - _mean_yes:.1f}%")
+			lines.append(f"  Mean % Yes per animal: {_mean_yes:.1f}%  |  No: {100.0 - _mean_yes:.1f}%")
 		else:
-			lines.append(f"  Yes: {results['yes_count']}   No: {results['no_count']}")
+			lines.append(f"  Yes: {results.get('yes_count', '?')}   No: {results.get('no_count', '?')}")
 		lines.append("")
 
-		# --- [A] PRIMARY: Full GEE model ---
-		gee_full = results.get('gee_full', {})
-		lines.append(f"[A] PRIMARY — Full GEE Model (Sex + {fl} + Sex×{fl}):")
-		if gee_full and 'error' not in gee_full:
-			n_s = gee_full.get('n_subjects', '?')
-			n_o = gee_full.get('n_obs', '?')
-			conv = "yes" if gee_full.get('converged', False) else "no"
-			# Detect degenerate fit: all Wald p-values ≈ 1.0 (near-complete separation)
-			_all_pvals = [gee_full.get('sex', {}).get('p', float('nan')),
-			             gee_full.get('within', {}).get('p', float('nan')),
-			             gee_full.get('interaction', {}).get('p', float('nan'))]
-			_gee_degenerate = all(not np.isnan(p) and p >= 0.99 for p in _all_pvals)
-			lines.append(f"  Model: {gee_full.get('formula', '?')}   Converged: {conv}")
-			lines.append(f"  n = {n_s} subjects, {n_o} observations")
-			if gee_full.get('se_correction'):
-				lines.append(f"  {gee_full['se_correction']}")
-			if _gee_degenerate:
-				lines.append(f"  ⚠️  DEGENERATE FIT: all Wald p ≈ 1.0 — likely near-complete separation")
-				lines.append(f"      (outcome is near-uniform; GEE p-values unreliable — use Cochran's Q [C] instead)")
-			lines.append("")
-			# Sex
-			sg = gee_full.get('sex', {})
-			p_s = sg.get('p', float('nan'))
-			or_s = sg.get('odds_ratio', float('nan'))
-			or_lo = sg.get('or_ci_lower', float('nan'))
-			or_hi = sg.get('or_ci_upper', float('nan'))
-			sig_s = '***' if p_s < 0.001 else '**' if p_s < 0.01 else '*' if p_s < 0.05 else 'ns'
-			lines.append(f"  Sex main effect: p = {p_s:.4f} {sig_s}")
-			if not np.isnan(or_s):
-				lines.append(f"    OR (Male/Female) = {or_s:.3f} (95% CI: {or_lo:.3f}–{or_hi:.3f})")
-			lines.append(f"    Interpretation: {'SIGNIFICANT' if sg.get('significant') else 'Not significant'}")
-			lines.append("")
-			# Within
-			wg = gee_full.get('within', {})
-			p_w = wg.get('p', float('nan'))
-			sig_w = '***' if p_w < 0.001 else '**' if p_w < 0.01 else '*' if p_w < 0.05 else 'ns'
-			lines.append(f"  {fl} main effect (within-subjects): p = {p_w:.4f} {sig_w}")
-			lines.append(f"    Interpretation: {'SIGNIFICANT' if wg.get('significant') else 'Not significant'}")
-			lines.append("")
-			# Interaction
-			ig = gee_full.get('interaction', {})
-			p_i = ig.get('p', float('nan'))
-			sig_i = '***' if p_i < 0.001 else '**' if p_i < 0.01 else '*' if p_i < 0.05 else 'ns'
-			lines.append(f"  Sex × {fl} interaction: p = {p_i:.4f} {sig_i}")
-			lines.append(f"    Interpretation: {'SIGNIFICANT — sex differences vary across ' + fl + ' levels.' if ig.get('significant') else 'Not significant — sex differences stable across ' + fl + ' levels.'}")
-		elif gee_full and 'error' in gee_full:
-			lines.append(f"  [MODEL FAILED] {gee_full['error']}")
-			lines.append(f"  Rely on chi-square and Cochran's Q results below.")
+		wf_b = results.get(wk, {})
+		lines.append(f"[1] {fl} Effect — Cochran's Q (within-subjects, complete cases):")
+		_Q = wf_b.get('Q', wf_b.get('statistic', float('nan')))
+		_df_q = wf_b.get('df', float('nan'))
+		_p_q = wf_b.get('p', float('nan'))
+		_p_perm = wf_b.get('p_permutation', float('nan'))
+		if not np.isnan(_Q):
+			lines.append(f"  Q({_df_q:.0f}) = {_Q:.3f}, p = {_p_q:.4f} "
+			             f"{'***' if _p_q<0.001 else '**' if _p_q<0.01 else '*' if _p_q<0.05 else 'ns'}")
+			if wf_b.get('n_complete', 0) > 0:
+				lines.append(f"  Complete subjects: {wf_b['n_complete']}, Incomplete: {wf_b.get('n_incomplete', 0)}")
+			if not np.isnan(_p_perm):
+				_sp = '***' if _p_perm<0.001 else '**' if _p_perm<0.01 else '*' if _p_perm<0.05 else 'ns'
+				lines.append(f"  Permutation p (5000 shuffles): {_p_perm:.4f} {_sp}")
+		else:
+			lines.append(f"  Could not be computed.")
+		lines.append(f"  Interpretation: {'SIGNIFICANT' if wf_b.get('significant') else 'Not significant'}")
+		if wf_b.get('note'):
+			lines.append(f"  Note: {wf_b['note']}")
+		lines.append("")
+
+		gee_w = results.get('gee_within', {})
+		lines.append(f"[2] {fl} Effect — GEE Supplement (Binomial, Exchangeable, within-factor only):")
+		if gee_w and 'error' not in gee_w:
+			n_s = gee_w.get('n_subjects', '?')
+			n_o = gee_w.get('n_obs', '?')
+			conv = "yes" if gee_w.get('converged', False) else "no"
+			p_g = gee_w.get('p', float('nan'))
+			lines.append(f"  n = {n_s} subjects, {n_o} observations, converged: {conv}")
+			if gee_w.get('se_correction'):
+				lines.append(f"  {gee_w['se_correction']}")
+			lines.append(f"  {fl} effect: p = {p_g:.4f} "
+			             f"{'***' if p_g<0.001 else '**' if p_g<0.01 else '*' if p_g<0.05 else 'ns'}")
+			lines.append(f"  Interpretation: {'SIGNIFICANT' if gee_w.get('significant') else 'Not significant'}")
+		elif gee_w and 'error' in gee_w:
+			lines.append(f"  [MODEL FAILED] {gee_w['error']}")
 		else:
 			lines.append(f"  Not computed.")
 		lines.append("")
-
-		# --- [B] SUPPLEMENT: Chi-square sex effect ---
-		sex = results['sex']
-		lines.append(f"[B] SUPPLEMENT — Sex Effect (Chi-square, between-subjects):")
-		if 'error' in sex and sex['error'] is not None:
-			lines.append(f"  ERROR: {sex['error']}")
-		elif 'chi2' in sex and not np.isnan(sex['chi2']):
-			lines.append(f"  χ²({sex['df']}) = {sex['chi2']:.3f}, p = {sex['p']:.4f} {'***' if sex['p'] < 0.001 else '**' if sex['p'] < 0.01 else '*' if sex['p'] < 0.05 else 'ns'}")
-			lines.append(f"  Interpretation: {'SIGNIFICANT' if sex['significant'] else 'Not significant'}")
-		elif 'statistic' in sex and not np.isnan(sex.get('statistic', float('nan'))):
-			lines.append(f"  χ²({sex['df']}) = {sex['statistic']:.3f}, p = {sex['p']:.4f} {'***' if sex['p'] < 0.001 else '**' if sex['p'] < 0.01 else '*' if sex['p'] < 0.05 else 'ns'}")
-			lines.append(f"  Interpretation: {'SIGNIFICANT' if sex['significant'] else 'Not significant'}")
-		else:
-			lines.append(f"  Could not be computed")
-		if 'test' in sex and 'INVALID' in sex['test']:
-			lines.append(f"  WARNING: {sex['test']}")
 		lines.append("")
 
-		# Sex-only GEE [1b]
-		if 'sex_gee' in results:
-			gee = results['sex_gee']
-			lines.append(f"[B2] Sex-only GEE (accounts for within-subject correlation):")
-			if 'p' in gee and not np.isnan(gee.get('p', float('nan'))):
-				lines.append(f"  Z = {gee['z']:.3f}, p = {gee['p']:.4f} {'***' if gee['p'] < 0.001 else '**' if gee['p'] < 0.01 else '*' if gee['p'] < 0.05 else 'ns'}")
-				lines.append(f"  OR (Male/Female): {gee['odds_ratio']:.3f} (95% CI: {gee['or_ci_lower']:.3f}–{gee['or_ci_upper']:.3f})")
-				lines.append(f"  Interpretation: {'SIGNIFICANT' if gee['significant'] else 'Not significant'}")
-			else:
-				if 'error' in gee:
-					lines.append(f"  ERROR: {gee['error']}")
-				if 'note' in gee:
-					lines.append(f"  Note: {gee['note']}")
-			lines.append("")
-		
-		# --- [C] SENSITIVITY: Cochran's Q within-factor ---
-		wf_behav = results[wk]
-		lines.append(f"[C] SENSITIVITY — {fl} Effect (Cochran's Q, complete subjects only):")
-		if 'Q' in wf_behav and not np.isnan(wf_behav['Q']):
-			lines.append(f"  Q({wf_behav['df']}) = {wf_behav['Q']:.3f}, p = {wf_behav['p']:.4f} {'***' if wf_behav['p'] < 0.001 else '**' if wf_behav['p'] < 0.01 else '*' if wf_behav['p'] < 0.05 else 'ns'}")
-			if 'n_complete' in wf_behav and wf_behav['n_complete'] > 0:
-				lines.append(f"  Complete subjects: {wf_behav['n_complete']}, Incomplete: {wf_behav.get('n_incomplete', 0)}")
-			_p_perm = wf_behav.get('p_permutation', float('nan'))
-			if not np.isnan(_p_perm):
-				_sig_perm = '***' if _p_perm < 0.001 else '**' if _p_perm < 0.01 else '*' if _p_perm < 0.05 else 'ns'
-				lines.append(f"  Permutation p (5000 shuffles): {_p_perm:.4f} {_sig_perm}")
-		elif 'chi2' in wf_behav:
-			lines.append(f"  χ²({wf_behav['df']}) = {wf_behav['chi2']:.3f}, p = {wf_behav['p']:.4f} (WARNING: assumes independence)")
-		lines.append(f"  Interpretation: {'SIGNIFICANT' if wf_behav['significant'] else 'Not significant'}")
-		if 'note' in wf_behav:
-			lines.append(f"  Note: {wf_behav['note']}")
-		lines.append("")
-		
-		# --- [D] SENSITIVITY: Stratified Cochran's Q interaction ---
-		interaction = results['interaction']
-		lines.append(f"[D] SENSITIVITY — {_MLB['interaction_label']} Interaction (Stratified Cochran's Q):")
-		lines.append(f"  Note: Formal interaction p-value from full GEE model [A] above.")
-		if 'by_sex' in interaction and interaction['by_sex']:
-			for sex_label, sex_results in sorted(interaction['by_sex'].items()):
-				if not np.isnan(sex_results.get('Q', float('nan'))):
-					lines.append(f"  {sex_label}: Q({sex_results['df']}) = {sex_results['Q']:.3f}, p = {sex_results['p']:.4f} {'***' if sex_results['p'] < 0.001 else '**' if sex_results['p'] < 0.01 else '*' if sex_results['p'] < 0.05 else 'ns'} (n={sex_results['n']})")
-				else:
-					lines.append(f"  {sex_label}: Could not compute (n={sex_results.get('n', '?')} subjects)")
-			if 'note' in interaction:
-				lines.append(f"  Sensitivity note: {interaction['note']}")
-		else:
-			lines.append(f"  Could not be computed")
-		lines.append("")
-		lines.append("")
-	
-	# Summary
+	# ── Summary ───────────────────────────────────────────────────────────────
 	lines.append("SUMMARY OF SIGNIFICANT EFFECTS")
 	lines.append("-"*80)
-	
-	# Count significant effects
-	sig_sex = []
-	sig_ca = []
-	sig_interaction = []
-	
-	for measure_name, results in weight_results.items():
-		if results['sex']['significant']:
-			sig_sex.append(f"{measure_name} (ANOVA)")
-		if results[wk]['significant']:
-			sig_ca.append(f"{measure_name} (ANOVA)")
-		if results['interaction']['significant']:
-			sig_interaction.append(f"{measure_name} (ANOVA)")
-	
-	for measure_name, results in behavioral_results.items():
-		# Sex: prefer GEE full model; fall back to chi-square
-		gee_full = results.get('gee_full', {})
-		sex_sig_gee = gee_full.get('sex', {}).get('significant', False)
-		sex_sig_chi = results['sex']['significant']
-		if sex_sig_gee:
-			sig_sex.append(f"{measure_name} (GEE p={gee_full['sex']['p']:.4f})")
-		elif sex_sig_chi:
-			sig_sex.append(f"{measure_name} (χ², sensitivity)")
-		# Within-factor: prefer GEE full model; fall back to Cochran's Q
-		within_sig_gee = gee_full.get('within', {}).get('significant', False)
-		within_sig_q   = results[wk]['significant']
-		if within_sig_gee:
-			sig_ca.append(f"{measure_name} (GEE p={gee_full['within']['p']:.4f})")
-		elif within_sig_q:
-			sig_ca.append(f"{measure_name} (Cochran's Q, sensitivity)")
-		# Interaction: prefer GEE full model; fall back to stratified Q
-		inter_sig_gee = gee_full.get('interaction', {}).get('significant', False)
-		if inter_sig_gee:
-			sig_interaction.append(f"{measure_name} (GEE p={gee_full['interaction']['p']:.4f})")
-		elif 'by_sex' in results['interaction'] and results['interaction']['by_sex']:
-			for sex_label, sex_results in results['interaction']['by_sex'].items():
-				if sex_results.get('p', 1.0) < 0.05:
-					sig_interaction.append(f"{measure_name} ({sex_label} subgroup, Cochran's Q sensitivity)")
-					break
-	
-	lines.append(f"Significant Sex effects ({len(sig_sex)}):")
-	if sig_sex:
-		for item in sig_sex:
-			lines.append(f"  • {item}")
-	else:
-		lines.append("  None")
+
+	sig_within_weight, sig_within_behav = [], []
+
+	for mname, res in weight_results.items():
+		if res.get(wk, {}).get('significant'):
+			sig_within_weight.append(mname)
+
+	for mname, res in behavioral_results.items():
+		_wfb = res.get(wk, {})
+		_gw = res.get('gee_within', {})
+		if _wfb.get('significant') or (_gw and _gw.get('significant')):
+			sig_within_behav.append(mname)
+
+	lines.append(f"Significant {fl} effects — continuous measures ({len(sig_within_weight)}):")
+	for item in sig_within_weight or ["  None"]:
+		lines.append(f"  • {item}")
 	lines.append("")
-	
-	lines.append(f"Significant {fl} effects ({len(sig_ca)}):")
-	if sig_ca:
-		for item in sig_ca:
-			lines.append(f"  • {item}")
-	else:
-		lines.append("  None")
-	lines.append("")
-	
-	lines.append(f"Significant {_MLB['interaction_label']} interactions ({len(sig_interaction)}):")
-	if sig_interaction:
-		for item in sig_interaction:
-			lines.append(f"  • {item}")
-	else:
-		lines.append("  None")
-	
+
+	lines.append(f"Significant {fl} effects — behavioral measures ({len(sig_within_behav)}):")
+	for item in sig_within_behav or ["  None"]:
+		lines.append(f"  • {item}")
 	lines.append("")
 	lines.append("="*80)
-	
-	return "\n".join(lines)
 
+	return "\n".join(lines)
 
 def plot_interaction_effects(
 	weight_results: dict,
@@ -5183,289 +4974,302 @@ def generate_test_registry_report(save_path=None) -> str:
 
 
 def main() -> None:
-	"""Interactive entrypoint: select and load the master CSV, then preview it."""
-	wc = _MLB['within_col']
+	"""Interactive entrypoint with a selection menu for analyses and plots."""
+	import re
+
 	fl = _MLB['factor_label']
 	wk = _MLB['result_within_key']
-	il = _MLB['interaction_label']
 
+	# ── Load data ─────────────────────────────────────────────────────────────
 	try:
 		df, path = get_master_dataframe()
 	except KeyboardInterrupt:
 		print("Selection canceled. No file loaded.")
 		return
 	_preview_dataframe(df, path)
+	cdf = clean_master_dataframe(df)
 
-	# Demonstrate building the per-ID daily change series
-	try:
-		series_by_id = build_daily_change_series_by_id(df, index="day")
-		print("\nPer-ID Daily Change series built:")
-		for i, (mid, s) in enumerate(series_by_id.items()):
-			print(f"\nID: {mid} | points: {len(s)}")
-			print(s.head(3))
-			if i >= 1:
-				break
-	except Exception as e:
-		print(f"\nWarning: failed to build per-ID series: {e}")
+	# ── Cached analysis results ────────────────────────────────────────────────
+	_cache: dict = {}  # keys: 'ols', 'weight', 'bonferroni', 'behavioral', 'mcnemar'
 
-	# Plot all figures
-	try:
-		fig_total = plot_total_change_by_id(
-			df, use_day_number=True, save_svg=False, show=False,
-		)
-		fig_daily = plot_daily_change_by_id(
-			df, use_day_number=True, save_svg=False, show=False,
-		)
-		fig_total_sex = plot_total_change_by_sex(
-			df, use_day_number=True, save_svg=False, show=False,
-		)
-		fig_daily_sex = plot_daily_change_by_sex(
-			df, use_day_number=True, save_svg=False, show=False,
-		)
-		fig_all_pies = plot_all_pie_charts(
-			df, save_svg=False, show=False,
-		)
+	# ── Helpers ───────────────────────────────────────────────────────────────
+	def _safe_svg(base: str) -> Path:
+		name = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("-_.") or "plot"
+		name = name if name.lower().endswith(".svg") else f"{name}.svg"
+		return Path.cwd() / name
 
-		# Mode-specific bar charts and sorted pie charts
-		if EXPERIMENT_MODE == 'ramp':
-			fig_wf_bars = plot_average_weight_change_by_ca(
-				df, save_svg=False, show=False,
-			)
-			fig_wf_pies = plot_pie_charts_by_ca_percent(
-				df, save_svg=False, show=False,
-			)
-		else:
-			fig_wf_bars = plot_average_weight_change_by_week(
-				df, save_svg=False, show=False,
-			)
-			fig_wf_pies = plot_pie_charts_by_week(
-				df, save_svg=False, show=False,
-			)
-
-		fig_aberrant_lines = plot_aberrant_behaviors_lines(
-			df, save_svg=False, show=False,
-		)
-		fig_aberrant_load = plot_aberrant_behaviors_load_bar(
-			df, save_svg=False, show=False,
-		)
-
-		plt.show()
-
-		# After viewing, ask for custom SVG filenames (optional)
+	def _ask_save(fig_obj, default: str) -> None:
 		try:
-			print("\n(Optional) Enter custom SVG filenames (without extension). Leave blank for defaults.")
-			custom_total_svg = input("Filename for Total Change plot (individual): ").strip()
-			custom_daily_svg = input("Filename for Daily Change plot (individual): ").strip()
-			custom_total_sex_svg = input("Filename for Total Change plot (sex-averaged): ").strip()
-			custom_daily_sex_svg = input("Filename for Daily Change plot (sex-averaged): ").strip()
-			custom_pies_svg = input("Filename for combined behavioral pie charts: ").strip()
-			custom_wf_bars_svg = input(f"Filename for {fl} bar charts: ").strip()
+			ans = input(f"  Save as SVG? [y/n or enter name, default '{default}']: ").strip()
+			if not ans or ans.lower() in ('n', 'no'):
+				return
+			name = ans if ans.lower() not in ('y', 'yes') else default
+			out = _safe_svg(name)
+			fig_obj.savefig(str(out), format='svg', bbox_inches='tight')
+			print(f"  Saved: {out}")
+		except Exception as _e:
+			print(f"  Save failed: {_e}")
+
+	def _ensure_anova() -> None:
+		if 'weight' not in _cache:
+			print(f"\nRunning RM ANOVA ({fl})...")
+			_cache['weight'] = perform_two_way_anova_weight(cdf)
+		if 'bonferroni' not in _cache:
+			print("Running Bonferroni post-hoc...")
+			_cache['bonferroni'] = perform_bonferroni_posthoc_weight(_cache['weight'], cdf)
+
+	def _ensure_behavioral() -> None:
+		if 'behavioral' not in _cache:
+			print("\nRunning behavioral Chi-square / Cochran's Q...")
+			_cache['behavioral'] = perform_two_way_chi_square_behavioral(cdf)
+		if 'mcnemar' not in _cache:
+			print("Running McNemar post-hoc...")
+			_cache['mcnemar'] = perform_mcnemar_posthoc_behavioral(_cache['behavioral'], cdf)
+
+	def _do_save_report() -> None:
+		_ensure_anova()
+		_ensure_behavioral()
+		wr  = _cache.get('weight', {})
+		br  = _cache.get('behavioral', {})
+		bfr = _cache.get('bonferroni', {})
+		mcr = _cache.get('mcnemar', {})
+		olr = _cache.get('ols', {})
+		ro  = display_two_way_anova_results(wr, br)
+		bo  = display_bonferroni_posthoc_results(bfr)
+		mo  = display_mcnemar_results(mcr)
+		ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
+		out = Path.cwd() / f"statistical_analysis_report_{ts}.txt"
+		with open(out, 'w', encoding='utf-8') as f:
+			f.write("="*80 + "\n")
+			f.write("COMPREHENSIVE STATISTICAL ANALYSIS REPORT\n")
+			f.write("="*80 + "\n")
+			f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+			f.write(f"Mode: {EXPERIMENT_MODE}\n")
+			f.write(f"Design: One-factor RM ANOVA  |  Within: {fl}  |  Sex: NOT a factor\n")
+			f.write("="*80 + "\n\n")
+			if olr and 'normality' in olr:
+				f.write("OLS ASSUMPTION CHECK (TOTAL CHANGE)\n")
+				f.write("-"*40 + "\n")
+				f.write(f"  Residual mean:    {olr.get('residual_mean', float('nan')):.6f}\n")
+				nres = olr.get('normality', {})
+				hres = olr.get('homoscedasticity', {})
+				sens = olr.get('sensitivity_analysis', {})
+				f.write(f"  Normality (SW):   p = {nres.get('p', float('nan')):.4f}  "
+				        f"{'PASSED' if nres.get('passed') else 'FAILED'}\n")
+				f.write(f"  Homoscedasticity: p = {hres.get('p', float('nan')):.4f}  "
+				        f"{'PASSED' if hres.get('passed') else 'FAILED/N/A'}\n")
+				f.write(f"  Independence(DW): DW= {olr.get('dw', float('nan')):.4f}  "
+				        f"{'PASSED' if olr.get('independence', {}).get('passed') else 'CONCERN'}\n")
+				if sens.get('available'):
+					f.write(f"  Sensitivity ({sens['removal_method']}):\n")
+					f.write(f"    Removed: {sens['n_removed']} obs  |  \u0394R\u00b2 = {sens['delta_r2']:+.4f}\n")
+					f.write(f"    Subjects: {', '.join(sens['removed_subjects'])}\n")
+				f.write("\n")
+			f.write(ro + "\n\n")
+			f.write(bo + "\n\n")
+			f.write(mo + "\n\n")
+			f.write("="*80 + "\n")
+			f.write("SUMMARY OF SIGNIFICANT EFFECTS (p < 0.05)\n")
+			f.write("="*80 + "\n\n")
+			sig = []
+			for measure, res in wr.items():
+				if wk in res and res[wk].get('p', 1.0) < 0.05:
+					sig.append(f"{measure} \u2014 {fl}: p = {res[wk]['p']:.4f} (RM ANOVA)")
+			for measure, res in br.items():
+				if wk in res and res[wk].get('significant', False):
+					_tname = res[wk].get('test', "Cochran's Q")
+					sig.append(f"{measure} \u2014 {fl}: p = {res[wk]['p']:.4f} ({_tname})")
+			if sig:
+				for s in sig:
+					f.write(f"  \u2022 {s}\n")
+			else:
+				f.write("  No significant effects detected (all p \u2265 0.05)\n")
+			f.write("\n" + "="*80 + "\nEND OF REPORT\n" + "="*80 + "\n")
+		print(f"\n{'='*60}\nReport saved: {out}\n{'='*60}")
+
+	# ── Task runner ────────────────────────────────────────────────────────────
+	def _run_task(task: int) -> None:
+		if task == 1:
+			print("\nGenerating individual weight change plots...")
+			fig_t = plot_total_change_by_id(df, use_day_number=True, show=True)
+			_ask_save(fig_t, "total_change_by_id")
+			fig_d = plot_daily_change_by_id(df, use_day_number=True, show=True)
+			_ask_save(fig_d, "daily_change_by_id")
+
+		elif task == 2:
+			print("\nGenerating sex-grouped weight change plots...")
+			fig_ts = plot_total_change_by_sex(df, use_day_number=True, show=True)
+			_ask_save(fig_ts, "total_change_by_sex")
+			fig_ds = plot_daily_change_by_sex(df, use_day_number=True, show=True)
+			_ask_save(fig_ds, "daily_change_by_sex")
+
+		elif task == 3:
+			print(f"\nGenerating average weight change by {fl}...")
 			if EXPERIMENT_MODE == 'ramp':
-				custom_wf_pies_prefix = input(f"Filename prefix for {fl}-sorted pie charts (will add _CA0, _CA1, etc.): ").strip()
+				fig_b = plot_average_weight_change_by_ca(df, show=True)
 			else:
-				custom_wf_pies_prefix = input(f"Filename prefix for {fl}-sorted pie charts (will add _Week1, _Week2, etc.): ").strip()
-			custom_aberrant_lines_svg = input("Filename for aberrant behaviors line plot: ").strip()
-			custom_aberrant_load_svg = input("Filename for aberrant behavior load stacked bar chart: ").strip()
-		except Exception:
-			custom_total_svg = ""
-			custom_daily_svg = ""
-			custom_total_sex_svg = ""
-			custom_daily_sex_svg = ""
-			custom_pies_svg = ""
-			custom_wf_bars_svg = ""
-			custom_wf_pies_prefix = ""
-			custom_aberrant_lines_svg = ""
-			custom_aberrant_load_svg = ""
+				fig_b = plot_average_weight_change_by_week(df, show=True)
+			_ask_save(fig_b, f"average_weight_change_by_{fl.lower().replace(' ', '_')}")
 
-		def _safe_svg_name(base: str) -> str:
-			name = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("-_.") or "plot"
-			return name if name.lower().endswith(".svg") else f"{name}.svg"
+		elif task == 4:
+			print("\nGenerating combined behavioral pie charts...")
+			fig_p = plot_all_pie_charts(df, show=True)
+			_ask_save(fig_p, "all_behavioral_pie_charts")
 
-		bar_default = "average_weight_change_by_ca" if EXPERIMENT_MODE == 'ramp' else "average_weight_change_by_week"
-		out_total = Path.cwd() / _safe_svg_name(custom_total_svg or "total_change_by_id")
-		out_daily = Path.cwd() / _safe_svg_name(custom_daily_svg or "daily_change_by_id")
-		out_total_sex = Path.cwd() / _safe_svg_name(custom_total_sex_svg or "total_change_by_sex")
-		out_daily_sex = Path.cwd() / _safe_svg_name(custom_daily_sex_svg or "daily_change_by_sex")
-		out_pies = Path.cwd() / _safe_svg_name(custom_pies_svg or "all_behavioral_pie_charts")
-		out_wf_bars = Path.cwd() / _safe_svg_name(custom_wf_bars_svg or bar_default)
-		out_aberrant_lines = Path.cwd() / _safe_svg_name(custom_aberrant_lines_svg or "aberrant_behaviors_lines")
-		out_aberrant_load = Path.cwd() / _safe_svg_name(custom_aberrant_load_svg or "aberrant_behaviors_load_bar")
-
-		# Save all figures
-		for fig_obj, out_path, label in [
-			(fig_total, out_total, "Total Change"),
-			(fig_daily, out_daily, "Daily Change"),
-			(fig_total_sex, out_total_sex, "Total Change by Sex"),
-			(fig_daily_sex, out_daily_sex, "Daily Change by Sex"),
-			(fig_all_pies, out_pies, "combined pie charts"),
-			(fig_wf_bars, out_wf_bars, f"{fl} bar charts"),
-			(fig_aberrant_lines, out_aberrant_lines, "aberrant behaviors line plot"),
-			(fig_aberrant_load, out_aberrant_load, "aberrant behavior load bar"),
-		]:
-			try:
-				fig_obj.savefig(str(out_path), format="svg", bbox_inches="tight")
-				print(f"Saved SVG to: {out_path}")
-			except Exception as e:
-				print(f"Warning: failed to save {label} SVG: {e}")
-
-		# Save within-factor-sorted pie charts
-		try:
-			cdf = clean_master_dataframe(df)
-			if EXPERIMENT_MODE == 'nonramp':
-				cdf = _add_day_number_column(cdf)
-				cdf = _add_week_column(cdf)
-				levels = sorted(cdf["Week"].dropna().unique())
-				for i, (fig_pie, lv) in enumerate(zip(fig_wf_pies, levels)):
-					prefix = custom_wf_pies_prefix or "behavioral_pies"
-					base_name = f"{prefix}_Week{int(lv)}"
-					out_pie = Path.cwd() / _safe_svg_name(base_name)
-					fig_pie.savefig(str(out_pie), format="svg", bbox_inches="tight")
-					print(f"Saved SVG to: {out_pie}")
+		elif task == 5:
+			print(f"\nGenerating behavioral pie charts by {fl}...")
+			if EXPERIMENT_MODE == 'ramp':
+				figs_p = plot_pie_charts_by_ca_percent(df, show=True)
 			else:
-				levels = sorted(cdf["CA (%)"].dropna().unique())
-				for i, (fig_pie, lv) in enumerate(zip(fig_wf_pies, levels)):
-					prefix = custom_wf_pies_prefix or "behavioral_pies"
-					base_name = f"{prefix}_CA{int(lv)}"
-					out_pie = Path.cwd() / _safe_svg_name(base_name)
-					fig_pie.savefig(str(out_pie), format="svg", bbox_inches="tight")
-					print(f"Saved SVG to: {out_pie}")
-		except Exception as e:
-			print(f"Warning: failed to save {fl}-sorted pie charts SVG: {e}")
-	except Exception as e:
-		print(f"\nWarning: failed to plot changes: {e}")
-
-	# Perform two-way ANOVA analysis
-	print("\n" + "="*80)
-	print(f"PERFORMING TWO-WAY ANOVA ANALYSIS (SEX × {fl.upper()})")
-	print("="*80)
-	try:
-		cdf = clean_master_dataframe(df)
-
-		print("\nAnalyzing weight change measures...")
-		weight_results = perform_two_way_anova_weight(cdf)
-
-		print(f"\nPerforming Bonferroni post-hoc tests for significant {fl} effects...")
-		bonferroni_results = perform_bonferroni_posthoc_weight(weight_results, cdf)
-
-		print("\nAnalyzing categorical behavioral measures...")
-		behavioral_results = perform_two_way_chi_square_behavioral(cdf)
-
-		print(f"\nPerforming McNemar post-hoc tests for significant {fl} effects...")
-		mcnemar_results = perform_mcnemar_posthoc_behavioral(behavioral_results, cdf)
-
-		results_output = display_two_way_anova_results(weight_results, behavioral_results)
-		bonferroni_output = display_bonferroni_posthoc_results(bonferroni_results)
-		mcnemar_output = display_mcnemar_results(mcnemar_results)
-
-		# Automatically save comprehensive statistical report
-		try:
-			from datetime import datetime
-			timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-			output_filename = f"statistical_analysis_report_{timestamp}.txt"
-			output_path = Path.cwd() / output_filename
-
-			with open(output_path, 'w', encoding='utf-8') as f:
-				f.write("="*80 + "\n")
-				f.write("COMPREHENSIVE STATISTICAL ANALYSIS REPORT\n")
-				f.write("="*80 + "\n")
-				f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-				f.write(f"Mode: {EXPERIMENT_MODE}\n")
-				f.write("="*80 + "\n\n")
-
-				f.write(results_output)
-				f.write("\n\n")
-				f.write(bonferroni_output)
-				f.write("\n\n")
-				f.write(mcnemar_output)
-
-				f.write("\n\n" + "="*80 + "\n")
-				f.write("SUMMARY OF SIGNIFICANT EFFECTS (p < 0.05)\n")
-				f.write("="*80 + "\n\n")
-
-				sig_effects = []
-
-				for measure, results in weight_results.items():
-					if 'sex' in results and results['sex'].get('p', 1.0) < 0.05:
-						sig_effects.append(f"{measure} - Sex: p = {results['sex']['p']:.4f} (Mixed ANOVA)")
-					if wk in results and results[wk].get('p', 1.0) < 0.05:
-						sig_effects.append(f"{measure} - {fl}: p = {results[wk]['p']:.4f} (Mixed ANOVA)")
-					if 'interaction' in results and results['interaction'].get('p', 1.0) < 0.05:
-						sig_effects.append(f"{measure} - {il}: p = {results['interaction']['p']:.4f} (Mixed ANOVA)")
-
-				for measure, results in behavioral_results.items():
-					if 'sex' in results and results['sex'].get('significant', False):
-						sig_effects.append(f"{measure} - Sex: p = {results['sex']['p']:.4f} (Chi-square)")
-					if wk in results and results[wk].get('significant', False):
-						test_name = results[wk].get('test', "Cochran's Q")
-						sig_effects.append(f"{measure} - {fl}: p = {results[wk]['p']:.4f} ({test_name})")
-					if 'interaction' in results and 'by_sex' in results['interaction']:
-						for sex_label, sex_results in results['interaction']['by_sex'].items():
-							if sex_results.get('p', 1.0) < 0.05:
-								sig_effects.append(f"{measure} - {fl} effect in {sex_label}: p = {sex_results['p']:.4f} (Cochran's Q)")
-								break
-
-				if sig_effects:
-					for effect in sig_effects:
-						f.write(f"  • {effect}\n")
-				else:
-					f.write("  No significant effects detected (all p ≥ 0.05)\n")
-
-				f.write("\n" + "="*80 + "\n")
-				f.write("END OF REPORT\n")
-				f.write("="*80 + "\n")
-
-			print(f"\n{'='*80}")
-			print(f"Statistical analysis report saved to:")
-			print(f"  {output_path}")
-			print(f"{'='*80}\n")
-		except KeyboardInterrupt:
-			print("\nSave canceled.")
-		except Exception as e:
-			print(f"\nWarning: failed to save results: {e}")
-
-		# Generate interaction plots (ramp and nonramp)
-		print("\n" + "="*80)
-		print("CHECKING FOR SIGNIFICANT INTERACTIONS TO VISUALIZE")
-		print("="*80)
-		interaction_figures = plot_interaction_effects(weight_results, behavioral_results, cdf)
-
-		if interaction_figures:
-			print(f"\nGenerated {len(interaction_figures)} interaction plot(s).")
+				figs_p = plot_pie_charts_by_week(df, show=True)
 			try:
-				response = input("\nWould you like to save the interaction plots to SVG? (y/n): ").strip().lower()
-				if response == 'y':
-					from datetime import datetime
-					timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-					for measure_name, fig in interaction_figures.items():
-						clean_name = measure_name.replace(" ", "_").replace("?", "").replace("/", "_")
-						svg_filename = f"interaction_plot_{clean_name}_{timestamp}.svg"
-						svg_path = Path.cwd() / svg_filename
-						fig.savefig(svg_path, format='svg', bbox_inches='tight')
-						print(f"  Saved: {svg_path}")
-					print(f"\nAll interaction plots saved successfully!")
-			except KeyboardInterrupt:
-				print("\nSave canceled.")
-			except Exception as e:
-				print(f"\nWarning: failed to save interaction plots: {e}")
+				ans = input(f"  Save {fl}-sorted pies as SVGs? (y/n): ").strip().lower()
+				if ans in ('y', 'yes'):
+					_c2 = clean_master_dataframe(df)
+					if EXPERIMENT_MODE == 'nonramp':
+						_c2 = _add_day_number_column(_c2)
+						_c2 = _add_week_column(_c2)
+						lvls = sorted(_c2["Week"].dropna().unique())
+					else:
+						lvls = sorted(_c2["CA (%)"].dropna().unique())
+					pfx = input("  Filename prefix [behavioral_pies]: ").strip() or "behavioral_pies"
+					for fp, lv in zip(figs_p, lvls):
+						tag = f"Week{int(lv)}" if EXPERIMENT_MODE == 'nonramp' else f"CA{int(lv)}"
+						fp.savefig(str(_safe_svg(f"{pfx}_{tag}")), format='svg', bbox_inches='tight')
+						print(f"  Saved: {pfx}_{tag}.svg")
+			except Exception as _e:
+				print(f"  Save error: {_e}")
+
+		elif task == 6:
+			print("\nGenerating aberrant behavior line plot...")
+			fig_al = plot_aberrant_behaviors_lines(df, show=True)
+			_ask_save(fig_al, "aberrant_behaviors_lines")
+
+		elif task == 7:
+			print("\nGenerating aberrant behavior load bar chart...")
+			fig_alb = plot_aberrant_behaviors_load_bar(df, show=True)
+			_ask_save(fig_alb, "aberrant_behaviors_load_bar")
+
+		elif task == 8:
+			print("\n[OLS] Checking OLS assumptions for Total Change...")
+			_cache['ols'] = check_ols_assumptions_total_change(cdf, show=True, save_svg=False, save_report=True)
+			if _cache['ols'].get('figure'):
+				try:
+					ans = input("  Save OLS diagnostics as SVG? (y/n): ").strip().lower()
+					if ans in ('y', 'yes'):
+						ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+						out = Path.cwd() / f"ols_diagnostics_{ts}.svg"
+						_cache['ols']['figure'].savefig(str(out), format='svg', bbox_inches='tight')
+						print(f"  Saved: {out}")
+				except Exception:
+					pass
+
+		elif task == 9:
+			_ensure_anova()
+			display_two_way_anova_results(_cache['weight'], _cache.get('behavioral', {}))
+			display_bonferroni_posthoc_results(_cache['bonferroni'])
+			try:
+				plot_interaction_effects(_cache['weight'], _cache.get('behavioral', {}), cdf, show=True)
+			except Exception as _pe:
+				print(f"  Note: interaction plots unavailable: {_pe}")
+
+		elif task == 10:
+			_ensure_behavioral()
+			display_two_way_anova_results(_cache.get('weight', {}), _cache['behavioral'])
+			display_mcnemar_results(_cache['mcnemar'])
+
+		elif task == 11:
+			print("\n[Full Pipeline] Running OLS → RM ANOVA → Behavioral → Report")
+			for sub in [8, 9, 10]:
+				try:
+					_run_task(sub)
+				except Exception as _se:
+					print(f"  Sub-task {sub} failed: {_se}")
+					import traceback; traceback.print_exc()
+			_do_save_report()
+
+		elif task == 12:
+			_do_save_report()
+
+		elif task == 13:
+			ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+			reg_path = Path.cwd() / f"behavioral_test_registry_{ts}.txt"
+			report = generate_test_registry_report(save_path=reg_path)
+			print(report)
+
 		else:
-			print("No significant interactions detected - no plots generated.")
+			print(f"  Unknown task: {task}")
 
-	except Exception as e:
-		print(f"\nWarning: failed to perform two-way ANOVA analysis: {e}")
-		import traceback
-		traceback.print_exc()
+	# ── Menu loop ──────────────────────────────────────────────────────────────
+	_LABELS = {
+		1:  "Total & Daily weight change by individual animal",
+		2:  "Total & Daily weight change by sex (group average)",
+		3:  f"Average weight change by {fl} (bar chart)",
+		4:  "All behavioral pie charts (combined)",
+		5:  f"Behavioral pie charts by {fl}",
+		6:  "Aberrant behaviors \u2014 line plot",
+		7:  "Aberrant behaviors \u2014 load bar chart",
+		8:  "OLS assumption diagnostics (Total Change)",
+		9:  f"RM ANOVA ({fl}) + Bonferroni post-hoc",
+		10: "Behavioral Chi-square + McNemar post-hoc",
+		11: "Full statistical pipeline  (8 \u2192 9 \u2192 10 \u2192 report)",
+		12: "Save statistical analysis report",
+		13: "Statistical test registry",
+	}
 
-	# Optional: Save statistical test registry
-	try:
-		save_registry = input("\nSave statistical test registry (methods documentation)? (y/n): ").strip().lower()
-		if save_registry in ['y', 'yes']:
-			from datetime import datetime as _dt
-			_ts = _dt.now().strftime("%Y%m%d_%H%M%S")
-			registry_path = Path.cwd() / f"behavioral_test_registry_{_ts}.txt"
-			registry_report = generate_test_registry_report(save_path=registry_path)
-			print(registry_report)
-	except KeyboardInterrupt:
-		pass
+	while True:
+		print("\n" + "="*72)
+		print(f"  CA PAPER ANALYSIS  \u2014  Mode: {EXPERIMENT_MODE.upper()}  |  {path.name}")
+		print("="*72)
+		print("  WEIGHT CHANGE PLOTS")
+		for t in [1, 2, 3]:
+			print(f"    [{t:>2}] {_LABELS[t]}")
+		print()
+		print("  BEHAVIORAL PLOTS")
+		for t in [4, 5, 6, 7]:
+			print(f"    [{t:>2}] {_LABELS[t]}")
+		print()
+		print("  STATISTICAL ANALYSES")
+		for t in [8, 9, 10, 11]:
+			print(f"    [{t:>2}] {_LABELS[t]}")
+		print()
+		print("  REPORTS")
+		for t in [12, 13]:
+			print(f"    [{t:>2}] {_LABELS[t]}")
+		print()
+		print("    [ A] Run all   [ Q] Quit")
+		print("-"*72)
+
+		try:
+			choice = input("  Selection (comma-separated, e.g.  1,3,8): ").strip().lower()
+		except (KeyboardInterrupt, EOFError):
+			print("\nExiting.")
+			break
+
+		if not choice or choice in ('q', 'quit', 'exit'):
+			print("Exiting.")
+			break
+
+		if choice in ('a', 'all'):
+			tasks = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13]
+		else:
+			try:
+				tasks = [int(x.strip()) for x in choice.split(',') if x.strip()]
+			except ValueError:
+				print("  Invalid input — enter numbers separated by commas, or A / Q.")
+				continue
+
+		for task in tasks:
+			label = _LABELS.get(task, f"Task {task}")
+			print(f"\n{'─'*60}\n  {label}\n{'─'*60}")
+			try:
+				_run_task(task)
+			except KeyboardInterrupt:
+				print("\n  Interrupted.")
+				break
+			except Exception as e:
+				print(f"\n  Error in task {task}: {e}")
+				import traceback; traceback.print_exc()
 
 
 def plot_total_change_by_id(
