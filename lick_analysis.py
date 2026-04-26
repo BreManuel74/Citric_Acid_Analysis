@@ -39,7 +39,7 @@ except ImportError:
 #   'ramp'    → CA% increases each week; within-subjects factor = CA_Percent
 #   'nonramp' → CA% is constant across weeks; within-subjects factor = Week
 # ─────────────────────────────────────────────────────────────────────────────
-EXPERIMENT_MODE = 'nonramp'  # << CHANGE THIS: 'ramp' or 'nonramp'
+EXPERIMENT_MODE = 'ramp'  # << CHANGE THIS: 'ramp' or 'nonramp'
 # ─────────────────────────────────────────────────────────────────────────────
 
 _MODE_LABELS: dict = {
@@ -3495,6 +3495,165 @@ def generate_lick_normality_qq_plots(
             plt.close(fig)
 
 
+def generate_lick_descriptive_stats_report(
+    weekly_averages: dict,
+    *,
+    save_report: bool = True,
+) -> dict:
+    """
+    Generate per-week descriptive statistics for lick analysis DVs:
+      - Lick Count, Lick Bout Count, Fecal Count: mean, median, SD, variance, 95% CI (t-dist)
+      - % Licks in First 5 Min: mean, median, SD, variance, 95% CI (t-dist)
+
+    Prints a formatted table to the console and optionally saves a text report.
+    Returns a dict with keys 'dvs', 'weeks', 'report_path'.
+    """
+    from scipy.stats import t as _t_dist
+
+    fl = _MLB['factor']
+
+    print("\n" + "=" * 80)
+    print(f"DESCRIPTIVE STATISTICS PER {fl.upper()}")
+    print("=" * 80)
+
+    sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+
+    def _week_label(i, d):
+        if EXPERIMENT_MODE == 'ramp':
+            ca = weekly_averages[d].get('ca_percent', '?')
+            return f"CA {ca}%"
+        return f"Week {i + 1}"
+
+    def _ci95(arr):
+        n = len(arr)
+        if n < 2:
+            return float('nan'), float('nan')
+        se = float(np.std(arr, ddof=1)) / np.sqrt(n)
+        margin = float(_t_dist.ppf(0.975, df=n - 1)) * se
+        mean = float(np.mean(arr))
+        return mean - margin, mean + margin
+
+    dv_specs = [
+        ('avg_licks_per_animal',          'Lick Count',              'count'),
+        ('avg_bouts_per_animal',          'Lick Bout Count',         'count'),
+        ('avg_fecal_per_animal',          'Fecal Count',             'count'),
+        ('first_5min_lick_pcts_per_animal', '% Licks in First 5 Min', '%'),
+    ]
+
+    results: dict = {}
+
+    for arr_key, dv_label, dv_type in dv_specs:
+        results[dv_label] = {}
+        note = f" ({dv_type})"
+        print(f"\n  {dv_label}{note} \u2014 per {fl}:")
+        print(f"  {'Level':>8}  {'n':>4}  {'Mean':>8}  {'Median':>8}  "
+              f"{'SD':>8}  {'Var':>10}  {'95% CI':>22}")
+        print(f"  {'-' * 76}")
+        all_vals = []
+        for i, d in enumerate(sorted_dates):
+            entry = weekly_averages[d]
+            arr = entry.get(arr_key)
+            lbl = _week_label(i, d)
+            if arr is None or len(arr) == 0:
+                results[dv_label][lbl] = {'n': 0}
+                print(f"  {lbl:>8}  {0:>4}  {chr(8212):>8}  {chr(8212):>8}  "
+                      f"{chr(8212):>8}  {chr(8212):>10}  {chr(8212):>22}")
+                continue
+            arr = np.asarray(arr, dtype=float)
+            all_vals.append(arr)
+            n = len(arr)
+            mean_v  = float(np.mean(arr))
+            median_v = float(np.median(arr))
+            sd_v    = float(np.std(arr, ddof=1))  if n >= 2 else float('nan')
+            var_v   = float(np.var(arr, ddof=1))  if n >= 2 else float('nan')
+            ci_lo, ci_hi = _ci95(arr)
+            ci_str = f"[{ci_lo:.3f}, {ci_hi:.3f}]" if not np.isnan(ci_lo) else "N/A"
+            results[dv_label][lbl] = {
+                'n': n, 'mean': mean_v, 'median': median_v,
+                'sd': sd_v, 'variance': var_v, 'ci_lo': ci_lo, 'ci_hi': ci_hi,
+            }
+            print(f"  {lbl:>8}  {n:>4}  {mean_v:>8.3f}  {median_v:>8.3f}  "
+                  f"{sd_v:>8.3f}  {var_v:>10.3f}  {ci_str:>22}")
+        # Collapsed "All" row
+        if all_vals:
+            _all = np.concatenate(all_vals)
+            _an = len(_all)
+            _am     = float(np.mean(_all))
+            _amed   = float(np.median(_all))
+            _asd    = float(np.std(_all, ddof=1))  if _an >= 2 else float('nan')
+            _avar   = float(np.var(_all, ddof=1))  if _an >= 2 else float('nan')
+            _aci_lo, _aci_hi = _ci95(_all)
+            _aci_str = f"[{_aci_lo:.3f}, {_aci_hi:.3f}]" if not np.isnan(_aci_lo) else "N/A"
+            results[dv_label]['_all'] = {
+                'n': _an, 'mean': _am, 'median': _amed,
+                'sd': _asd, 'variance': _avar, 'ci_lo': _aci_lo, 'ci_hi': _aci_hi,
+            }
+            print(f"  {'-' * 76}")
+            print(f"  {'All':>8}  {_an:>4}  {_am:>8.3f}  {_amed:>8.3f}  "
+                  f"{_asd:>8.3f}  {_avar:>10.3f}  {_aci_str:>22}")
+
+    week_labels = [_week_label(i, d) for i, d in enumerate(sorted_dates)]
+
+    rpt_path = None
+    if save_report:
+        lines = [
+            "=" * 80,
+            f"LICK DESCRIPTIVE STATISTICS REPORT \u2014 {EXPERIMENT_MODE.upper()} MODE",
+            "=" * 80,
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Within-subjects factor: {fl}  |  Levels: {week_labels}",
+            "=" * 80, "",
+        ]
+        for dv_label, dv_data in results.items():
+            lines += [
+                "\u2500" * 60,
+                f"  {dv_label.upper()}",
+                "\u2500" * 60,
+                f"  {'Level':>8}  {'n':>4}  {'Mean':>8}  {'Median':>8}  "
+                f"{'SD':>8}  {'Var':>10}  {'95% CI':>22}",
+                f"  {'-' * 76}",
+            ]
+            for lbl, s in dv_data.items():
+                if lbl == '_all':
+                    continue
+                if s.get('n', 0) == 0:
+                    lines.append(
+                        f"  {lbl:>8}  {0:>4}  {'N/A':>8}  {'N/A':>8}  "
+                        f"{'N/A':>8}  {'N/A':>10}  {'N/A':>22}"
+                    )
+                    continue
+                ci_str = (f"[{s['ci_lo']:.3f}, {s['ci_hi']:.3f}]"
+                          if not np.isnan(s['ci_lo']) else "N/A")
+                lines.append(
+                    f"  {lbl:>8}  {s['n']:>4}  {s['mean']:>8.3f}  {s['median']:>8.3f}  "
+                    f"{s['sd']:>8.3f}  {s['variance']:>10.3f}  {ci_str:>22}"
+                )
+            if '_all' in dv_data:
+                s = dv_data['_all']
+                ci_str = (f"[{s['ci_lo']:.3f}, {s['ci_hi']:.3f}]"
+                          if not np.isnan(s['ci_lo']) else "N/A")
+                lines.append(f"  {'-' * 76}")
+                lines.append(
+                    f"  {'All':>8}  {s['n']:>4}  {s['mean']:>8.3f}  {s['median']:>8.3f}  "
+                    f"{s['sd']:>8.3f}  {s['variance']:>10.3f}  {ci_str:>22}"
+                )
+            lines.append("")
+        lines += ["=" * 80, "END OF REPORT", "=" * 80, ""]
+        _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        rpt_path = Path.cwd() / f"lick_descriptive_stats_report_{_ts}.txt"
+        try:
+            rpt_path.write_text("\n".join(lines), encoding='utf-8')
+            print(f"\nLick descriptive stats report saved: {rpt_path}")
+        except Exception as _e:
+            print(f"\nWarning: could not save report: {_e}")
+
+    return {
+        'dvs': results,
+        'weeks': week_labels,
+        'report_path': rpt_path,
+    }
+
+
 def parse_date_string(date_str: str) -> datetime:
     """Parse MM/DD/YY date string to datetime object for proper sorting.
     
@@ -5714,6 +5873,11 @@ def main():
             qq_dir = master_csv.parent / f"lick_normality_qq_{timestamp}"
             generate_lick_normality_qq_plots(weekly_averages, save_dir=qq_dir, show=False)
             print(f"[OK] Q-Q plots saved to: {qq_dir}")
+
+    # Optional: Generate descriptive statistics report
+    run_desc = input("\nGenerate per-week descriptive statistics report (lick/bout/fecal counts + 5-min %)? (y/n): ").strip().lower()
+    if run_desc in ['y', 'yes']:
+        generate_lick_descriptive_stats_report(weekly_averages, save_report=True)
 
     print("\n" + "=" * 80)
     print("COMPREHENSIVE STATISTICAL ANALYSIS COMPLETED")

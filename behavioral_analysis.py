@@ -47,7 +47,7 @@ plt.rcParams["svg.fonttype"] = "none"
 # ═══════════════════════════════════════════════════════════════════════════════
 #  EXPERIMENT MODE — change this single value to switch between designs
 # ═══════════════════════════════════════════════════════════════════════════════
-EXPERIMENT_MODE = 'nonramp'   # 'ramp' or 'nonramp'
+EXPERIMENT_MODE = 'ramp'   # 'ramp' or 'nonramp'
 
 _MODE_LABELS = {
     'ramp': {
@@ -3149,6 +3149,253 @@ def check_ols_assumptions_total_change(
 	}
 
 
+def generate_descriptive_stats_report(
+	df: pd.DataFrame,
+	*,
+	save_report: bool = True,
+) -> dict:
+	"""
+	Generate per-week (or per-CA%) descriptive statistics for:
+	  - Total Change and Daily Change: mean, median, SD, variance, 95% CI
+	  - Aberrant behaviors (Nest Made?, Lethargy?, Anxious Behaviors?,
+	    CA Spot Digging?): % True per level, Wilson 95% CI, mean, SD, variance
+
+	Prints a formatted table to the console and optionally saves a text report.
+	Returns a dict with keys 'continuous', 'behavioral', 'weeks', 'report_path'.
+	"""
+	from scipy.stats import t as _t_dist
+
+	wc = _MLB['within_col']
+	fl = _MLB['factor_label']
+
+	print("\n" + "="*80)
+	print(f"DESCRIPTIVE STATISTICS PER {fl.upper()}")
+	print("="*80)
+
+	cdf = clean_master_dataframe(df)
+	if EXPERIMENT_MODE == 'nonramp':
+		cdf = _add_day_number_column(cdf)
+		cdf = _add_week_column(cdf)
+
+	if wc not in cdf.columns:
+		print(f"  Column '{wc}' not found in data.")
+		return {}
+
+	weeks = sorted(w for w in cdf[wc].dropna().unique() if w > 0)
+
+	# ── Helper: 95% CI of the mean (t-distribution) ───────────────────────────
+	def _ci95(arr):
+		n = len(arr)
+		if n < 2:
+			return float('nan'), float('nan')
+		se = float(np.std(arr, ddof=1)) / np.sqrt(n)
+		margin = float(_t_dist.ppf(0.975, df=n - 1)) * se
+		mean = float(np.mean(arr))
+		return mean - margin, mean + margin
+
+	# ── Helper: Wilson score CI for a proportion ──────────────────────────────
+	def _wilson_ci(k, n, z=1.96):
+		if n == 0:
+			return float('nan'), float('nan')
+		p = k / n
+		denom = 1 + z**2 / n
+		center = (p + z**2 / (2 * n)) / denom
+		half = (z * np.sqrt(p * (1 - p) / n + z**2 / (4 * n**2))) / denom
+		return float(max(0.0, center - half)), float(min(1.0, center + half))
+
+	# ── Continuous DVs ────────────────────────────────────────────────────────
+	cont_cols = [c for c in ['Total Change', 'Daily Change'] if c in cdf.columns]
+	results_cont: dict = {}
+
+	for col in cont_cols:
+		results_cont[col] = {}
+		print(f"\n  {col} \u2014 per {fl}:")
+		print(f"  {'Level':>8}  {'n':>4}  {'Mean':>8}  {'Median':>8}  "
+		      f"{'SD':>8}  {'Var':>10}  {'95% CI':>22}")
+		print(f"  {'-'*76}")
+		for wk in weeks:
+			grp = cdf.loc[cdf[wc] == wk, col].dropna().values
+			n = len(grp)
+			lbl = _group_label(wk)
+			if n == 0:
+				results_cont[col][wk] = {'n': 0}
+				print(f"  {lbl:>8}  {n:>4}  {'\u2014':>8}  {'\u2014':>8}  {'\u2014':>8}  {'\u2014':>10}  {'\u2014':>22}")
+				continue
+			mean  = float(np.mean(grp))
+			median = float(np.median(grp))
+			sd    = float(np.std(grp, ddof=1))  if n >= 2 else float('nan')
+			var   = float(np.var(grp, ddof=1))  if n >= 2 else float('nan')
+			ci_lo, ci_hi = _ci95(grp)
+			ci_str = f"[{ci_lo:.3f}, {ci_hi:.3f}]" if not np.isnan(ci_lo) else "N/A"
+			results_cont[col][wk] = {
+				'n': n, 'mean': mean, 'median': median,
+				'sd': sd, 'variance': var, 'ci_lo': ci_lo, 'ci_hi': ci_hi,
+			}
+			print(f"  {lbl:>8}  {n:>4}  {mean:>8.3f}  {median:>8.3f}  "
+			      f"{sd:>8.3f}  {var:>10.3f}  {ci_str:>22}")
+		# Collapsed row
+		_all = cdf.loc[cdf[wc].isin(weeks), col].dropna().values
+		_an = len(_all)
+		if _an > 0:
+			_am = float(np.mean(_all))
+			_amed = float(np.median(_all))
+			_asd = float(np.std(_all, ddof=1)) if _an >= 2 else float('nan')
+			_avar = float(np.var(_all, ddof=1)) if _an >= 2 else float('nan')
+			_aci_lo, _aci_hi = _ci95(_all)
+			_aci_str = f"[{_aci_lo:.3f}, {_aci_hi:.3f}]" if not np.isnan(_aci_lo) else "N/A"
+			results_cont[col]['_all'] = {
+				'n': _an, 'mean': _am, 'median': _amed,
+				'sd': _asd, 'variance': _avar, 'ci_lo': _aci_lo, 'ci_hi': _aci_hi,
+			}
+			print(f"  {'-'*76}")
+			print(f"  {'All':>8}  {_an:>4}  {_am:>8.3f}  {_amed:>8.3f}  "
+			      f"{_asd:>8.3f}  {_avar:>10.3f}  {_aci_str:>22}")
+
+	# ── Aberrant behaviors ────────────────────────────────────────────────────
+	_beh_candidates = ['Nest Made?', 'Lethargy?', 'Anxious Behaviors?', 'CA Spot Digging?']
+	beh_cols = [c for c in _beh_candidates if c in cdf.columns]
+	results_beh: dict = {}
+
+	for col in beh_cols:
+		results_beh[col] = {}
+		print(f"\n  {col} (% True per {fl}):")
+		print(f"  {'Level':>8}  {'n':>4}  {'n True':>7}  {'%':>7}  "
+		      f"{'95% CI (Wilson)':>22}  {'Mean':>8}  {'SD':>8}  {'Var':>10}")
+		print(f"  {'-'*85}")
+		for wk in weeks:
+			grp = cdf.loc[cdf[wc] == wk, col].dropna().astype(float).values
+			n = len(grp)
+			lbl = _group_label(wk)
+			if n == 0:
+				results_beh[col][wk] = {'n': 0}
+				print(f"  {lbl:>8}  {n:>4}  {'\u2014':>7}  {'\u2014':>7}  {'\u2014':>22}  {'\u2014':>8}  {'\u2014':>8}  {'\u2014':>10}")
+				continue
+			n_true  = int(grp.sum())
+			pct     = 100.0 * grp.mean()
+			ci_lo, ci_hi = _wilson_ci(n_true, n)
+			ci_str  = f"[{100*ci_lo:.1f}%, {100*ci_hi:.1f}%]"
+			mean    = float(np.mean(grp))
+			sd      = float(np.std(grp, ddof=1))  if n >= 2 else float('nan')
+			var     = float(np.var(grp, ddof=1))  if n >= 2 else float('nan')
+			results_beh[col][wk] = {
+				'n': n, 'n_true': n_true, 'pct': pct,
+				'ci_lo_pct': 100 * ci_lo, 'ci_hi_pct': 100 * ci_hi,
+				'mean': mean, 'sd': sd, 'variance': var,
+			}
+			print(f"  {lbl:>8}  {n:>4}  {n_true:>7}  {pct:>6.1f}%  "
+			      f"{ci_str:>22}  {mean:>8.3f}  {sd:>8.3f}  {var:>10.3f}")
+		# Collapsed row
+		_all_b = cdf.loc[cdf[wc].isin(weeks), col].dropna().astype(float).values
+		_abn = len(_all_b)
+		if _abn > 0:
+			_ab_ntrue = int(_all_b.sum())
+			_ab_pct   = 100.0 * _all_b.mean()
+			_ab_ci_lo, _ab_ci_hi = _wilson_ci(_ab_ntrue, _abn)
+			_ab_ci_str = f"[{100*_ab_ci_lo:.1f}%, {100*_ab_ci_hi:.1f}%]"
+			_ab_mean = float(np.mean(_all_b))
+			_ab_sd   = float(np.std(_all_b, ddof=1)) if _abn >= 2 else float('nan')
+			_ab_var  = float(np.var(_all_b, ddof=1)) if _abn >= 2 else float('nan')
+			results_beh[col]['_all'] = {
+				'n': _abn, 'n_true': _ab_ntrue, 'pct': _ab_pct,
+				'ci_lo_pct': 100 * _ab_ci_lo, 'ci_hi_pct': 100 * _ab_ci_hi,
+				'mean': _ab_mean, 'sd': _ab_sd, 'variance': _ab_var,
+			}
+			print(f"  {'-'*85}")
+			print(f"  {'All':>8}  {_abn:>4}  {_ab_ntrue:>7}  {_ab_pct:>6.1f}%  "
+			      f"{_ab_ci_str:>22}  {_ab_mean:>8.3f}  {_ab_sd:>8.3f}  {_ab_var:>10.3f}")
+
+	# ── Save report ───────────────────────────────────────────────────────────
+	rpt_path = None
+	if save_report:
+		lines = [
+			"="*80,
+			f"DESCRIPTIVE STATISTICS REPORT \u2014 {EXPERIMENT_MODE.upper()} MODE",
+			"="*80,
+			f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+			f"Within-subjects factor: {fl}  |  Levels: {[_group_label(w) for w in weeks]}",
+			"="*80, "",
+		]
+		for col, col_data in results_cont.items():
+			lines += [
+				"\u2500"*60,
+				f"  {col.upper()}",
+				"\u2500"*60,
+				f"  {'Level':>8}  {'n':>4}  {'Mean':>8}  {'Median':>8}  "
+				f"{'SD':>8}  {'Var':>10}  {'95% CI':>22}",
+				f"  {'-'*76}",
+			]
+			for wk, s in col_data.items():
+				if wk == '_all':
+					continue  # handled below
+				lbl = _group_label(wk)
+				if s.get('n', 0) == 0:
+					lines.append(f"  {lbl:>8}  {0:>4}  {'N/A':>8}  {'N/A':>8}  {'N/A':>8}  {'N/A':>10}  {'N/A':>22}")
+					continue
+				ci_str = (f"[{s['ci_lo']:.3f}, {s['ci_hi']:.3f}]"
+				          if not np.isnan(s['ci_lo']) else "N/A")
+				lines.append(
+					f"  {lbl:>8}  {s['n']:>4}  {s['mean']:>8.3f}  {s['median']:>8.3f}  "
+					f"{s['sd']:>8.3f}  {s['variance']:>10.3f}  {ci_str:>22}"
+				)
+			if '_all' in col_data:
+				s = col_data['_all']
+				ci_str = (f"[{s['ci_lo']:.3f}, {s['ci_hi']:.3f}]"
+				          if not np.isnan(s['ci_lo']) else "N/A")
+				lines.append(f"  {'-'*76}")
+				lines.append(
+					f"  {'All':>8}  {s['n']:>4}  {s['mean']:>8.3f}  {s['median']:>8.3f}  "
+					f"{s['sd']:>8.3f}  {s['variance']:>10.3f}  {ci_str:>22}"
+				)
+			lines.append("")
+		for col, col_data in results_beh.items():
+			lines += [
+				"\u2500"*60,
+				f"  {col.upper()}",
+				"\u2500"*60,
+				f"  {'Level':>8}  {'n':>4}  {'n True':>7}  {'%':>7}  "
+				f"{'95% CI (Wilson)':>22}  {'Mean':>8}  {'SD':>8}  {'Var':>10}",
+				f"  {'-'*85}",
+			]
+			for wk, s in col_data.items():
+				if wk == '_all':
+					continue  # handled below
+				lbl = _group_label(wk)
+				if s.get('n', 0) == 0:
+					lines.append(
+						f"  {lbl:>8}  {0:>4}  {'N/A':>7}  {'N/A':>7}  {'N/A':>22}  {'N/A':>8}  {'N/A':>8}  {'N/A':>10}"
+					)
+					continue
+				ci_str = f"[{s['ci_lo_pct']:.1f}%, {s['ci_hi_pct']:.1f}%]"
+				lines.append(
+					f"  {lbl:>8}  {s['n']:>4}  {s['n_true']:>7}  {s['pct']:>6.1f}%  "
+					f"{ci_str:>22}  {s['mean']:>8.3f}  {s['sd']:>8.3f}  {s['variance']:>10.3f}"
+				)
+			if '_all' in col_data:
+				s = col_data['_all']
+				ci_str = f"[{s['ci_lo_pct']:.1f}%, {s['ci_hi_pct']:.1f}%]"
+				lines.append(f"  {'-'*85}")
+				lines.append(
+					f"  {'All':>8}  {s['n']:>4}  {s['n_true']:>7}  {s['pct']:>6.1f}%  "
+					f"{ci_str:>22}  {s['mean']:>8.3f}  {s['sd']:>8.3f}  {s['variance']:>10.3f}"
+				)
+			lines.append("")
+		lines += ["="*80, "END OF REPORT", "="*80, ""]
+		_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+		rpt_path = Path.cwd() / f"descriptive_stats_report_{_ts}.txt"
+		try:
+			rpt_path.write_text("\n".join(lines), encoding='utf-8')
+			print(f"\nDescriptive stats report saved: {rpt_path}")
+		except Exception as _e:
+			print(f"\nWarning: could not save report: {_e}")
+
+	return {
+		'continuous': results_cont,
+		'behavioral': results_beh,
+		'weeks': weeks,
+		'report_path': rpt_path,
+	}
+
+
 def perform_two_way_anova_weight(df: pd.DataFrame) -> dict:
 	"""
 	Perform one-factor repeated measures ANOVA examining the effect of the
@@ -5197,6 +5444,10 @@ def main() -> None:
 			report = generate_test_registry_report(save_path=reg_path)
 			print(report)
 
+		elif task == 14:
+			print(f"\n[Descriptive Stats] Per-{fl} summary for weight changes and behaviors...")
+			_cache['desc'] = generate_descriptive_stats_report(cdf, save_report=True)
+
 		else:
 			print(f"  Unknown task: {task}")
 
@@ -5215,6 +5466,7 @@ def main() -> None:
 		11: "Full statistical pipeline  (8 \u2192 9 \u2192 10 \u2192 report)",
 		12: "Save statistical analysis report",
 		13: "Statistical test registry",
+		14: f"Descriptive statistics (per {fl}): weight changes + behavior %",
 	}
 
 	while True:
@@ -5234,7 +5486,7 @@ def main() -> None:
 			print(f"    [{t:>2}] {_LABELS[t]}")
 		print()
 		print("  REPORTS")
-		for t in [12, 13]:
+		for t in [12, 13, 14]:
 			print(f"    [{t:>2}] {_LABELS[t]}")
 		print()
 		print("    [ A] Run all   [ Q] Quit")
@@ -5251,7 +5503,7 @@ def main() -> None:
 			break
 
 		if choice in ('a', 'all'):
-			tasks = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13]
+			tasks = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14]
 		else:
 			try:
 				tasks = [int(x.strip()) for x in choice.split(',') if x.strip()]
