@@ -70,17 +70,38 @@ try:
     plt.rcParams["font.sans-serif"] = ["Arial"]
     plt.rcParams["svg.fonttype"] = "none"
     plt.rcParams.update({
-        "font.size": 11,
-        "axes.titlesize": 13,
-        "axes.labelsize": 12,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
-        "legend.fontsize": 10,
-        "figure.titlesize": 14,
+        "font.size": 8,
+        "axes.titlesize": 10,
+        "axes.labelsize": 8,
+        "xtick.labelsize": 8,
+        "ytick.labelsize": 8,
+        "legend.fontsize": 7.5,
+        "figure.titlesize": 10,
+        "lines.linewidth": 0.9,
+        "lines.markersize": 3,
     })
 except ImportError:
     HAS_MATPLOTLIB = False
     print("Warning: matplotlib not installed. Plotting will not be available.")
+
+# Canonical cohort colours
+_COLOR_0PCT  = "#1f77b4"   # 0% CA
+_COLOR_2PCT  = "#f79520"   # 2% CA
+_COLOR_RAMP  = "#2da048"   # Ramp
+_COLOR_OTHER = "#9467bd"   # fallback
+
+
+def _cohort_label_to_color(label: str) -> str:
+    """Map a cohort label to its canonical hex colour."""
+    lo = str(label).lower()
+    if "0%" in lo:
+        return _COLOR_0PCT
+    if "2%" in lo:
+        return _COLOR_2PCT
+    if "ramp" in lo:
+        return _COLOR_RAMP
+    return _COLOR_OTHER
+
 
 # Cache for loaded cohorts
 _LICK_COHORT_DATA: Dict[str, pd.DataFrame] = {}
@@ -243,8 +264,7 @@ def compute_fixed_thresholds(sensor_cols: List[str], fixed_threshold: float = 0.
 def detect_events_above_threshold(df: pd.DataFrame, sensor_cols: List[str], thresholds: pd.Series) -> pd.DataFrame:
     """Detect time points where deviation exceeds the dynamic threshold for each sensor.
     
-    Creates boolean columns indicating when each sensor's deviation peaks above the threshold.
-    Uses scipy.signal.find_peaks for robust peak detection in discrete sampled data.
+    Creates boolean columns indicating when each sensor's deviation peaks above the threshold.    Uses scipy.signal.find_peaks for robust peak detection in discrete sampled data.
     
     Parameters:
         df: DataFrame with Time_sec and deviation columns
@@ -504,8 +524,7 @@ def process_cohort_capacitive_files(
     This function replicates the exact alignment logic where:
     1. Each animal is assigned to a specific sensor via 'selected_sensors' column
     2. Each animal gets the lick count from THEIR assigned sensor only
-    3. One row per animal per week with their individual sensor's data
-    
+    3. One row per animal per week with their individual sensor's data    
     Uses EXACT lick detection algorithm from lick_detection.py with fixed threshold of 0.01.
     
     Parameters:
@@ -2472,8 +2491,7 @@ def generate_lick_normality_report(
     """Shapiro-Wilk normality and Levene's equal-variance tests on lick measures.
 
     Excludes Fecal_Count (tested separately in generate_fecal_normality_report).
-    Stratifies Shapiro-Wilk within CA% cohorts. Levene's test compares variance
-    across CA% cohorts.
+    Stratifies Shapiro-Wilk within CA% cohorts. Levene's test compares variance    across CA% cohorts.
 
     Parameters
     ----------
@@ -3826,8 +3844,7 @@ def plot_fecal_qq(
     Parameters
     ----------
     cohort_dfs : dict of label → per-animal weekly DataFrame
-    save_dir   : directory to save SVGs (created if absent); None = don't save
-    show       : whether to call plt.show()
+    save_dir   : directory to save SVGs (created if absent); None = don't save    show       : whether to call plt.show()
     """
     if not HAS_MATPLOTLIB:
         print('[WARNING] matplotlib not available — cannot create Q-Q plots.')
@@ -3858,8 +3875,7 @@ def plot_fecal_qq(
         )
         fig.suptitle(
             f'Q-Q Plot — {transform_label}  (normal reference)',
-            fontsize=13, fontweight='bold', y=1.01,
-        )
+            fontweight='bold', y=1.01,        )
 
         for row_idx, wk in enumerate(weeks):
             for col_idx, ca_val in enumerate(ca_levels):
@@ -3870,8 +3886,7 @@ def plot_fecal_qq(
 
                 ax.set_title(
                     f'CA% = {ca_val},  Week {int(wk) + 1}  (n={len(sub)})',
-                    fontsize=9,
-                )
+                                    )
                 ax.set_xlabel('Theoretical quantiles', fontsize=8)
                 ax.set_ylabel('Sample quantiles', fontsize=8)
                 ax.tick_params(labelsize=7)
@@ -3879,7 +3894,7 @@ def plot_fecal_qq(
                 if len(sub) < 3:
                     ax.text(0.5, 0.5, 'n < 3\ninsufficient data',
                             ha='center', va='center', transform=ax.transAxes,
-                            fontsize=8, color='gray')
+                            color='gray')
                     continue
 
                 n_sub = len(sub)
@@ -3895,7 +3910,7 @@ def plot_fecal_qq(
                 ax.fill_between(osm, ci_lo, ci_hi, alpha=0.15, color='crimson', zorder=1)
                 x_line = np.array([osm[0], osm[-1]])
                 ax.plot(x_line, slope * x_line + intercept,
-                        color='crimson', linewidth=1.2, zorder=2)
+                        color='crimson', linewidth=0.9, zorder=2)
                 ax.scatter(osm, osr, s=20, color='steelblue', alpha=0.8, zorder=3)
 
                 ax.spines['top'].set_visible(False)
@@ -3945,12 +3960,12 @@ def plot_fecal_counts_by_week(
 
     _FL_COLORS = {
         0.0: {'line': '#1f77b4',  'face': 'lightblue',  'edge': '#1f77b4'},
-        2.0: {'line': '#ff7f0e', 'face': 'moccasin',   'edge': '#ff7f0e'},
+        2.0: {'line': '#f79520', 'face': 'moccasin',   'edge': '#f79520'},
     }
     _DEFAULT_COLORS = [
         {'line': '#1f77b4',  'face': 'lightblue',  'edge': '#1f77b4'},
-        {'line': '#ff7f0e', 'face': 'moccasin',   'edge': '#ff7f0e'},
-        {'line': '#2ca02c',  'face': 'lightgreen', 'edge': '#2ca02c'},
+        {'line': '#f79520', 'face': 'moccasin',   'edge': '#f79520'},
+        {'line': '#2da048',  'face': 'lightgreen', 'edge': '#2da048'},
         {'line': '#9467bd',     'face': 'plum',       'edge': '#9467bd'},
     ]
 
@@ -3964,7 +3979,7 @@ def plot_fecal_counts_by_week(
         group_labels = sorted(combined['CA%'].dropna().unique())
         group_col = 'CA%'
 
-    fig, ax = plt.subplots(figsize=(9, 6))
+    fig, ax = plt.subplots(figsize=(5, 3))
 
     for idx, grp_val in enumerate(group_labels):
         grp = combined[combined[group_col] == grp_val]
@@ -3984,22 +3999,22 @@ def plot_fecal_counts_by_week(
             wk_stats['Week'], wk_stats['mean'],
             yerr=wk_stats['sem'],
             label=label_str,
-            marker='o', markersize=8, linewidth=2, capsize=5,
+            marker='o', linewidth=0.9, capsize=5,
             color=c['line'],
             markerfacecolor=c['face'],
             markeredgecolor=c['edge'],
         )
 
-    ax.set_xlabel('Week', fontsize=12, weight='bold')
-    ax.set_ylabel('Fecal Count (mean \u00b1 SEM)', fontsize=12, weight='bold')
+    ax.set_xlabel('Week', weight='bold')
+    ax.set_ylabel('Fecal Count (mean \u00b1 SEM)', weight='bold')
     ax.set_title('Fecal Count Across Weeks by Cohort (mean \u00b1 SEM)',
-                 fontsize=13, weight='bold')
+                 weight='bold')
     ax.set_xticks(weeks)
     ax.set_xticklabels([str(int(w) + 1) for w in weeks])
     if weeks:
         ax.set_xlim([weeks[0] - 0.1, weeks[-1] + 0.1])
     ax.set_ylim(bottom=0)
-    ax.legend(loc='best', fontsize=10)
+    ax.legend(loc='best')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.tick_params(direction='in', which='both', length=5)
@@ -4054,12 +4069,12 @@ def plot_lick_measure_by_cohort(
     # Color scheme for cohorts (matching lick_nonramp.py style)
     colors = [
         {'line': '#1f77b4', 'marker': 'lightblue', 'edge': '#1f77b4'},
-        {'line': '#ff7f0e', 'marker': 'moccasin', 'edge': '#ff7f0e'},
-        {'line': '#2ca02c', 'marker': 'lightgreen', 'edge': '#2ca02c'},
+        {'line': '#f79520', 'marker': 'moccasin', 'edge': '#f79520'},
+        {'line': '#2da048', 'marker': 'lightgreen', 'edge': '#2da048'},
         {'line': '#9467bd', 'marker': 'plum', 'edge': '#9467bd'}
     ]
     
-    fig, ax = plt.subplots(figsize=(12, 8))
+    fig, ax = plt.subplots(figsize=(5, 3))
     
     if group_by_sex:
         # Plot separate lines for each cohort × sex combination
@@ -4084,7 +4099,7 @@ def plot_lick_measure_by_cohort(
                 label = f"{cohort_label} - {sex}"
                 ax.errorbar(weekly_stats['Week'], weekly_stats['mean'], 
                            yerr=weekly_stats[error_col], label=label,
-                           marker='o', markersize=8, linewidth=2, capsize=5,
+                           marker='o', linewidth=0.9, capsize=5,
                            color=color_scheme['line'], 
                            markerfacecolor=color_scheme['marker'],
                            markeredgecolor=color_scheme['edge'])
@@ -4114,7 +4129,7 @@ def plot_lick_measure_by_cohort(
             
             ax.errorbar(x_pos, weekly_stats['mean'], yerr=weekly_stats[error_col],
                        label=f"{cohort_label} (n={int(weekly_stats['count'].iloc[0])} per week)",
-                       marker='o', markersize=8, linewidth=2, capsize=5,
+                       marker='o', linewidth=0.9, capsize=5,
                        color=color_scheme['line'],
                        markerfacecolor=color_scheme['marker'],
                        markeredgecolor=color_scheme['edge'])
@@ -4122,7 +4137,7 @@ def plot_lick_measure_by_cohort(
             color_idx += 1
     
     # Format axes (EXACT lick_nonramp.py style)
-    ax.set_xlabel('Week', fontsize=12, weight='bold')
+    ax.set_xlabel('Week', weight='bold')
     
     # Create nice label from measure name
     measure_label = measure.replace('_', ' ')
@@ -4131,12 +4146,11 @@ def plot_lick_measure_by_cohort(
     elif 'Avg' in measure:
         measure_label = measure_label
     
-    ax.set_ylabel(measure_label, fontsize=12, weight='bold')
+    ax.set_ylabel(measure_label, weight='bold')
     
     error_type = '±SD' if use_std else '±SEM'
     ax.set_title(f'{measure_label} Across Weeks by Cohort ({error_type})', 
-                fontsize=13, weight='bold')
-    
+                weight='bold')    
     # Set x-ticks to show Week 1, 2, 3, etc.
     if len(combined_df['Week'].unique()) > 0:
         all_weeks = sorted(combined_df['Week'].unique())
@@ -4145,7 +4159,7 @@ def plot_lick_measure_by_cohort(
         ax.set_xlim([all_weeks[0] - 0.1, all_weeks[-1] + 0.1])
     
     ax.set_ylim(bottom=0)
-    ax.legend(loc='best', fontsize=10)
+    ax.legend(loc='best')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.grid(False)
@@ -4193,11 +4207,11 @@ def plot_omnibus_interaction(
     groups = sorted(adf[interaction_factor].unique())
 
     if interaction_factor == 'CA%':
-        palette = ['steelblue', 'darkorange', 'darkgreen', 'purple']
+        palette = ['#1f77b4', '#f79520', '#2da048', '#9467bd']
     else:  # Sex
-        palette = ['steelblue', 'deeppink', 'darkgreen', 'darkorange']
+        palette = ['purple', 'green', '#9467bd', '#d62728']
 
-    fig, ax = plt.subplots(figsize=(9, 6))
+    fig, ax = plt.subplots(figsize=(5, 3))
     weeks = sorted(adf['Week'].unique())
 
     for idx, grp_val in enumerate(groups):
@@ -4206,7 +4220,7 @@ def plot_omnibus_interaction(
         color = palette[idx % len(palette)]
         lbl = f"{grp_val:.0f}% CA" if interaction_factor == 'CA%' else str(grp_val)
         ax.errorbar(stats_df['Week'], stats_df['mean'], yerr=stats_df['sem'],
-                    label=lbl, marker='o', markersize=8, linewidth=2,
+                    label=lbl, marker='o', linewidth=0.9,
                     capsize=5, color=color,
                     markerfacecolor=color, markeredgecolor=color)
 
@@ -4214,15 +4228,15 @@ def plot_omnibus_interaction(
     title = f'{measure_label}: Week \u00d7 {factor_label} Interaction'
     if title_suffix:
         title += f' ({title_suffix})'
-    ax.set_title(title, fontsize=13, weight='bold')
-    ax.set_xlabel('Week', fontsize=12, weight='bold')
-    ax.set_ylabel(f'{measure_label} (mean \u00b1 SEM)', fontsize=12, weight='bold')
+    ax.set_title(title, weight='bold')
+    ax.set_xlabel('Week', weight='bold')
+    ax.set_ylabel(f'{measure_label} (mean \u00b1 SEM)', weight='bold')
     ax.set_xticks(weeks)
     ax.set_xticklabels([str(int(w) + 1) for w in weeks])
     if weeks:
         ax.set_xlim([weeks[0] - 0.1, weeks[-1] + 0.1])
     ax.set_ylim(bottom=0)
-    ax.legend(title=factor_label, loc='best', fontsize=10)
+    ax.legend(title=factor_label, loc='best')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.tick_params(direction='in', which='both', length=5)
@@ -4312,16 +4326,16 @@ def generate_test_registry_report(save_path=None) -> str:
         "",
         f"    {'#':<3}  {'Test':<44}  Library / Function",
         f"    {'─'*3}  {'─'*44}  {'─'*26}",
-        "    1    3-Way Mixed ANOVA  (CA% × Week × Sex)          pingouin / pg.mixed_anova()",
-        "    2    2-Way Mixed ANOVA  (CA% × Week, no Sex)         pingouin / pg.mixed_anova()",
-        "    3    Tukey HSD post-hoc  (CA% pairwise)              statsmodels / pairwise_tukeyhsd()",
+        "    1    3-Way Mixed ANOVA  (CA% × Week × Sex)        pingouin / pg.mixed_anova()",
+        "    2    2-Way Mixed ANOVA  (CA% × Week, no Sex)        pingouin / pg.mixed_anova()",
+        "    3    Tukey HSD post-hoc  (CA% pairwise)        statsmodels / pairwise_tukeyhsd()",
         "    4    BH-FDR correction  (across 5 omnibus measures)  internal _bh_fdr()",
-        "    5    Pairwise within  (Week post-hoc)                pingouin / pg.pairwise_tests()",
-        "    6    Pairwise between  (CA% or Sex post-hoc)         scipy / pingouin / ttest_ind()",
-        "    7    Shapiro-Wilk normality  (fecal count)           scipy.stats / shapiro()",
+        "    5    Pairwise within  (Week post-hoc)        pingouin / pg.pairwise_tests()",
+        "    6    Pairwise between  (CA% or Sex post-hoc)        scipy / pingouin / ttest_ind()",
+        "    7    Shapiro-Wilk normality  (fecal count)        scipy.stats / shapiro()",
         "    8    D'Agostino-Pearson normality  (n > 5000)        scipy.stats / normaltest()",
-        "    9    Chi-square Poisson GoF  (fecal count)           scipy.stats / chi2.sf()",
-        "    VIZ  Q-Q Plot  (normality visualisation)             scipy.stats / probplot()",
+        "    9    Chi-square Poisson GoF  (fecal count)        scipy.stats / chi2.sf()",
+        "    VIZ  Q-Q Plot  (normality visualisation)        scipy.stats / probplot()",
         "",
         "    Multiple comparisons:",
         "      BH-FDR  — _bh_fdr() across 5 omnibus measures (Test 4)",
@@ -4345,7 +4359,7 @@ def generate_test_registry_report(save_path=None) -> str:
         "",
     ]
     lines += _sub("LIBRARY")
-    lines += ["    pingouin.mixed_anova()     import pingouin as pg", ""]
+    lines += ["    pingouin.mixed_anova()    import pingouin as pg", ""]
     lines += _sub("INPUTS")
     lines += _tbl([
         ("data",    "Long-format DataFrame  (one row per ID × Week)",         "pd.DataFrame"),
@@ -4391,7 +4405,7 @@ def generate_test_registry_report(save_path=None) -> str:
         "",
     ]
     lines += _sub("LIBRARY")
-    lines += ["    pingouin.mixed_anova()     import pingouin as pg", ""]
+    lines += ["    pingouin.mixed_anova()    import pingouin as pg", ""]
     lines += _sub("INPUTS")
     lines += _tbl([
         ("data",    "Long-format DataFrame  (one row per ID × Week)",    "pd.DataFrame"),
@@ -4477,7 +4491,7 @@ def generate_test_registry_report(save_path=None) -> str:
         "",
     ]
     lines += _sub("LIBRARY")
-    lines += ["    pingouin.pairwise_tests()     import pingouin as pg", ""]
+    lines += ["    pingouin.pairwise_tests()    import pingouin as pg", ""]
     lines += _sub("INPUTS")
     lines += _tbl([
         ("data",    "Long-format DataFrame  (all subjects × weeks)",    "pd.DataFrame"),
@@ -4503,7 +4517,7 @@ def generate_test_registry_report(save_path=None) -> str:
         "",
     ]
     lines += _sub("LIBRARY  (2 groups)")
-    lines += ["    scipy.stats.ttest_ind()     from scipy import stats", ""]
+    lines += ["    scipy.stats.ttest_ind()    from scipy import stats", ""]
     lines += _sub("INPUTS  (2-group case)")
     lines += _tbl([
         ("group1", "Per-animal means for group 1",  "pd.Series[float64]"),
@@ -4534,7 +4548,7 @@ def generate_test_registry_report(save_path=None) -> str:
         "",
     ]
     lines += _sub("LIBRARY")
-    lines += ["    scipy.stats.shapiro()     from scipy import stats  (n ≤ 5000)", ""]
+    lines += ["    scipy.stats.shapiro()    from scipy import stats  (n ≤ 5000)", ""]
     lines += _sub("INPUTS")
     lines += _tbl([
         ("values", "Fecal_Count  or  Fecal_Count_Sqrt = sqrt(max(Fecal_Count, 0))",
@@ -4558,7 +4572,7 @@ def generate_test_registry_report(save_path=None) -> str:
         "",
     ]
     lines += _sub("LIBRARY")
-    lines += ["    scipy.stats.normaltest()     from scipy import stats", ""]
+    lines += ["    scipy.stats.normaltest()    from scipy import stats", ""]
     lines += _sub("INPUTS  &  OUTPUT")
     lines += _tbl([
         ("values", "1-D array of observations  (same as Test 7)", "pd.Series[float64]"),
@@ -4582,7 +4596,7 @@ def generate_test_registry_report(save_path=None) -> str:
     ]
     lines += _sub("LIBRARY")
     lines += [
-        "    scipy.stats.poisson.pmf(k, lam)    expected Poisson probabilities",
+        "    scipy.stats.poisson.pmf(k, lam)        expected Poisson probabilities",
         "    scipy.stats.chi2.sf(chi2_stat, df) p-value  (survival function = 1 − CDF)",
         "    from scipy import stats",
         "",
@@ -4616,7 +4630,7 @@ def generate_test_registry_report(save_path=None) -> str:
         "",
     ]
     lines += _sub("LIBRARY")
-    lines += ["    scipy.stats.probplot()     from scipy import stats", ""]
+    lines += ["    scipy.stats.probplot()    from scipy import stats", ""]
     lines += _sub("INPUTS  &  PARAMETERS")
     lines += _tbl([
         ("values", "Fecal_Count  or  Fecal_Count_Sqrt", "pd.Series[float64]"),
@@ -4652,8 +4666,8 @@ def generate_test_registry_report(save_path=None) -> str:
         "      1.  First_5min_Lick_Pct   % session licks in first 5 min       float  0–100",
         "      2.  Time_to_50pct_Licks   min to accumulate 50% of licks        float",
         "      3.  First_5min_Bout_Pct   % session bouts in first 5 min        float  0–100",
-        "      4.  Avg_ILI               mean inter-lick interval  (ms)         float",
-        "      5.  Fecal_Count_Sqrt      sqrt(max(Fecal_Count, 0))              float",
+        "      4.  Avg_ILI               mean inter-lick interval  (ms)        float",
+        "      5.  Fecal_Count_Sqrt      sqrt(max(Fecal_Count, 0))        float",
         "          ↳  raw Fecal_Count  = integer count of fecal boli per session",
         "             sqrt transform applied for variance-stabilisation before ANOVA",
         "",
@@ -5090,14 +5104,14 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             ]
 
             _FL_COLORS = {
-                0.0: {'line': 'steelblue',  'face': 'lightblue',  'edge': 'steelblue'},
-                2.0: {'line': 'darkorange', 'face': 'moccasin',   'edge': 'darkorange'},
+                0.0: {'line': '#1f77b4',  'face': 'lightblue',  'edge': '#1f77b4'},
+                2.0: {'line': '#f79520', 'face': 'moccasin',   'edge': '#f79520'},
             }
             _DEFAULT_COLORS = [
-                {'line': 'steelblue',  'face': 'lightblue',  'edge': 'steelblue'},
-                {'line': 'darkorange', 'face': 'moccasin',   'edge': 'darkorange'},
-                {'line': 'darkgreen',  'face': 'lightgreen', 'edge': 'darkgreen'},
-                {'line': 'purple',     'face': 'plum',       'edge': 'purple'},
+                {'line': '#1f77b4',  'face': 'lightblue',  'edge': '#1f77b4'},
+                {'line': '#f79520', 'face': 'moccasin',   'edge': '#f79520'},
+                {'line': '#2da048',  'face': 'lightgreen', 'edge': '#2da048'},
+                {'line': '#9467bd',     'face': 'plum',       'edge': '#9467bd'},
             ]
 
             n_fl_plots = 0
@@ -5106,7 +5120,7 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     print(f"  [WARNING] Column '{col_name}' not found — skipping plot.")
                     continue
                 try:
-                    fig_fl, ax_fl = plt.subplots(figsize=(9, 6))
+                    fig_fl, ax_fl = plt.subplots(figsize=(5, 3))
 
                     ca_levels_fl = sorted(combined_fl['CA%'].dropna().unique())
                     weeks_fl = sorted(combined_fl['Week'].dropna().unique())
@@ -5124,25 +5138,24 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         ax_fl.errorbar(
                             wk_stats['Week'], wk_stats['mean'],
                             yerr=wk_stats['sem'],
-                            label=lbl, marker='o', markersize=8,
-                            linewidth=2, capsize=5,
+                            label=lbl, marker='o',
+                            linewidth=0.9, capsize=5,
                             color=c['line'],
                             markerfacecolor=c['face'],
                             markeredgecolor=c['edge'],
                         )
 
-                    ax_fl.set_xlabel('Week', fontsize=12, weight='bold')
-                    ax_fl.set_ylabel(f'{y_label} (mean \u00b1 SEM)', fontsize=12, weight='bold')
+                    ax_fl.set_xlabel('Week', weight='bold')
+                    ax_fl.set_ylabel(f'{y_label} (mean \u00b1 SEM)', weight='bold')
                     ax_fl.set_title(
                         f'{y_label} Across Weeks by Cohort (mean \u00b1 SEM)',
-                        fontsize=13, weight='bold'
-                    )
+                        weight='bold'                    )
                     ax_fl.set_xticks(weeks_fl)
                     ax_fl.set_xticklabels([str(int(w) + 1) for w in weeks_fl])
                     ax_fl.set_ylim(bottom=y_min if y_min is not None else ax_fl.get_ylim()[0])
                     if y_max is not None:
                         ax_fl.set_ylim(top=y_max)
-                    ax_fl.legend(loc='best', fontsize=10)
+                    ax_fl.legend(loc='best')
                     ax_fl.spines['top'].set_visible(False)
                     ax_fl.spines['right'].set_visible(False)
                     ax_fl.tick_params(direction='in', which='both', length=5)
@@ -5404,9 +5417,9 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             ]
 
             _COHORT_COLORS = [
-                {'line': 'steelblue',  'face': 'lightblue',  'edge': 'steelblue'},
-                {'line': 'darkorange', 'face': 'moccasin',   'edge': 'darkorange'},
-                {'line': 'darkgreen',  'face': 'lightgreen', 'edge': 'darkgreen'},
+                {'line': '#1f77b4',  'face': 'lightblue',  'edge': '#1f77b4'},
+                {'line': '#2da048', 'face': 'moccasin',   'edge': '#2da048'},
+                {'line': '#9467bd',  'face': 'lightgreen', 'edge': '#9467bd'},
                 {'line': 'purple',     'face': 'plum',       'edge': 'purple'},
             ]
 
@@ -5422,7 +5435,7 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     print(f"  [WARNING] Column '{col_name}' not found -- skipping plot.")
                     continue
                 try:
-                    fig_fl, ax_fl = plt.subplots(figsize=(9, 6))
+                    fig_fl, ax_fl = plt.subplots(figsize=(5, 3))
                     weeks_fl = sorted(combined_fl['Week'].dropna().unique())
 
                     for idx, cohort_lbl in enumerate(cohort_labels_fl):
@@ -5438,25 +5451,24 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         ax_fl.errorbar(
                             wk_stats['Week'], wk_stats['mean'],
                             yerr=wk_stats['sem'],
-                            label=lbl, marker='o', markersize=8,
-                            linewidth=2, capsize=5,
+                            label=lbl, marker='o',
+                            linewidth=0.9, capsize=5,
                             color=c['line'],
                             markerfacecolor=c['face'],
                             markeredgecolor=c['edge'],
                         )
 
-                    ax_fl.set_xlabel('Week', fontsize=12, weight='bold')
-                    ax_fl.set_ylabel(f'{y_label} (mean \u00b1 SEM)', fontsize=12, weight='bold')
+                    ax_fl.set_xlabel('Week', weight='bold')
+                    ax_fl.set_ylabel(f'{y_label} (mean \u00b1 SEM)', weight='bold')
                     ax_fl.set_title(
                         f'{y_label} Across Weeks by Cohort (mean \u00b1 SEM)',
-                        fontsize=13, weight='bold'
-                    )
+                        weight='bold'                    )
                     ax_fl.set_xticks(weeks_fl)
                     ax_fl.set_xticklabels([str(int(w) + 1) for w in weeks_fl])
                     ax_fl.set_ylim(bottom=y_min if y_min is not None else ax_fl.get_ylim()[0])
                     if y_max is not None:
                         ax_fl.set_ylim(top=y_max)
-                    ax_fl.legend(loc='best', fontsize=10)
+                    ax_fl.legend(loc='best')
                     ax_fl.spines['top'].set_visible(False)
                     ax_fl.spines['right'].set_visible(False)
                     ax_fl.tick_params(direction='in', which='both', length=5)
@@ -5547,10 +5559,10 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     cohort_labels_fec = list(cohorts.keys())
 
                 _BAR_COLORS = [
-                    {'face': 'steelblue',  'edge': 'navy'},
-                    {'face': 'darkorange', 'edge': 'saddlebrown'},
-                    {'face': 'seagreen',   'edge': 'darkgreen'},
-                    {'face': 'mediumpurple', 'edge': 'indigo'},
+                    {'face': '#1f77b4',  'edge': '#0d3d5c'},
+                    {'face': '#2da048', 'edge': '#155224'},
+                    {'face': '#9467bd',   'edge': '#4a3560'},
+                    {'face': '#d62728', 'edge': '#8b0000'},
                 ]
 
                 fig_fec4, ax_fec4 = _plt.subplots(figsize=(6, 6))
@@ -5574,14 +5586,14 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     ax_fec4.bar(
                         x_positions[i], mean_val,
                         width=bar_width,
-                        color=c['face'], edgecolor=c['edge'], linewidth=1.2,
+                        color=c['face'], edgecolor=c['edge'], linewidth=0.9,
                         zorder=2, label=cohort_lbl,
                     )
                     ax_fec4.errorbar(
                         x_positions[i], mean_val,
                         yerr=sem_val,
                         fmt='none', color='black',
-                        capsize=6, capthick=1.5, linewidth=1.5,
+                        capsize=6, capthick=0.8, linewidth=1.0,
                         zorder=3,
                     )
                     # Individual points with horizontal jitter
@@ -5593,9 +5605,9 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     )
 
                 ax_fec4.set_xticks(x_positions)
-                ax_fec4.set_xticklabels(cohort_labels_fec, fontsize=11)
-                ax_fec4.set_ylabel('Fecal Count (mean \u00b1 SEM)', fontsize=12, weight='bold')
-                ax_fec4.set_title('Fecal Count at Week 4 by Cohort', fontsize=13, weight='bold')
+                ax_fec4.set_xticklabels(cohort_labels_fec)
+                ax_fec4.set_ylabel('Fecal Count (mean \u00b1 SEM)', weight='bold')
+                ax_fec4.set_title('Fecal Count at Week 4 by Cohort', weight='bold')
                 ax_fec4.set_ylim(bottom=0)
                 ax_fec4.spines['top'].set_visible(False)
                 ax_fec4.spines['right'].set_visible(False)
@@ -5772,9 +5784,9 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             ]
 
             _COHORT_COLORS = [
-                {'line': 'steelblue',  'face': 'lightblue',  'edge': 'steelblue'},
-                {'line': 'darkorange', 'face': 'moccasin',   'edge': 'darkorange'},
-                {'line': 'darkgreen',  'face': 'lightgreen', 'edge': 'darkgreen'},
+                {'line': '#f79520',  'face': 'lightblue',  'edge': '#f79520'},
+                {'line': '#2da048', 'face': 'moccasin',   'edge': '#2da048'},
+                {'line': '#9467bd',  'face': 'lightgreen', 'edge': '#9467bd'},
                 {'line': 'purple',     'face': 'plum',       'edge': 'purple'},
             ]
 
@@ -5790,7 +5802,7 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     print(f"  [WARNING] Column '{col_name}' not found -- skipping plot.")
                     continue
                 try:
-                    fig_fl, ax_fl = plt.subplots(figsize=(9, 6))
+                    fig_fl, ax_fl = plt.subplots(figsize=(5, 3))
                     weeks_fl = sorted(combined_fl['Week'].dropna().unique())
 
                     for idx, cohort_lbl in enumerate(cohort_labels_fl):
@@ -5806,25 +5818,24 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         ax_fl.errorbar(
                             wk_stats['Week'], wk_stats['mean'],
                             yerr=wk_stats['sem'],
-                            label=lbl, marker='o', markersize=8,
-                            linewidth=2, capsize=5,
+                            label=lbl, marker='o',
+                            linewidth=0.9, capsize=5,
                             color=c['line'],
                             markerfacecolor=c['face'],
                             markeredgecolor=c['edge'],
                         )
 
-                    ax_fl.set_xlabel('Week', fontsize=12, weight='bold')
-                    ax_fl.set_ylabel(f'{y_label} (mean \u00b1 SEM)', fontsize=12, weight='bold')
+                    ax_fl.set_xlabel('Week', weight='bold')
+                    ax_fl.set_ylabel(f'{y_label} (mean \u00b1 SEM)', weight='bold')
                     ax_fl.set_title(
                         f'{y_label} Across Weeks by Cohort (mean \u00b1 SEM)',
-                        fontsize=13, weight='bold'
-                    )
+                        weight='bold'                    )
                     ax_fl.set_xticks(weeks_fl)
                     ax_fl.set_xticklabels([str(int(w) + 1) for w in weeks_fl])
                     ax_fl.set_ylim(bottom=y_min if y_min is not None else ax_fl.get_ylim()[0])
                     if y_max is not None:
                         ax_fl.set_ylim(top=y_max)
-                    ax_fl.legend(loc='best', fontsize=10)
+                    ax_fl.legend(loc='best')
                     ax_fl.spines['top'].set_visible(False)
                     ax_fl.spines['right'].set_visible(False)
                     ax_fl.tick_params(direction='in', which='both', length=5)
@@ -5915,9 +5926,9 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
 
                 _BAR_COLORS = [
                     {'face': 'steelblue',    'edge': 'navy'},
-                    {'face': 'darkorange',   'edge': 'saddlebrown'},
-                    {'face': 'seagreen',     'edge': 'darkgreen'},
-                    {'face': 'mediumpurple', 'edge': 'indigo'},
+                    {'face': '#2da048',   'edge': '#155224'},
+                    {'face': '#9467bd',     'edge': '#4a3560'},
+                    {'face': '#d62728', 'edge': '#8b0000'},
                 ]
 
                 fig_fec4, ax_fec4 = _plt.subplots(figsize=(6, 6))
@@ -5941,14 +5952,14 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     ax_fec4.bar(
                         x_positions[i], mean_val,
                         width=bar_width,
-                        color=c['face'], edgecolor=c['edge'], linewidth=1.2,
+                        color=c['face'], edgecolor=c['edge'], linewidth=0.9,
                         zorder=2, label=cohort_lbl,
                     )
                     ax_fec4.errorbar(
                         x_positions[i], mean_val,
                         yerr=sem_val,
                         fmt='none', color='black',
-                        capsize=6, capthick=1.5, linewidth=1.5,
+                        capsize=6, capthick=0.8, linewidth=1.0,
                         zorder=3,
                     )
                     jitter = rng_fec.uniform(-0.12, 0.12, size=len(vals))
@@ -5959,9 +5970,9 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     )
 
                 ax_fec4.set_xticks(x_positions)
-                ax_fec4.set_xticklabels(cohort_labels_fec, fontsize=11)
-                ax_fec4.set_ylabel('Fecal Count (mean \u00b1 SEM)', fontsize=12, weight='bold')
-                ax_fec4.set_title('Fecal Count at Week 4 by Cohort', fontsize=13, weight='bold')
+                ax_fec4.set_xticklabels(cohort_labels_fec)
+                ax_fec4.set_ylabel('Fecal Count (mean \u00b1 SEM)', weight='bold')
+                ax_fec4.set_title('Fecal Count at Week 4 by Cohort', weight='bold')
                 ax_fec4.set_ylim(bottom=0)
                 ax_fec4.spines['top'].set_visible(False)
                 ax_fec4.spines['right'].set_visible(False)
@@ -6016,8 +6027,8 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 _BAR_COLORS = [
                     {'face': 'steelblue',    'edge': 'navy'},
                     {'face': 'darkorange',   'edge': 'saddlebrown'},
-                    {'face': 'seagreen',     'edge': 'darkgreen'},
-                    {'face': 'mediumpurple', 'edge': 'indigo'},
+                    {'face': '#9467bd',     'edge': '#4a3560'},
+                    {'face': '#d62728', 'edge': '#8b0000'},
                 ]
 
                 fig_lk3, ax_lk3 = _plt.subplots(figsize=(6, 6))
@@ -6041,14 +6052,14 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     ax_lk3.bar(
                         x_positions[i], mean_val,
                         width=bar_width,
-                        color=c['face'], edgecolor=c['edge'], linewidth=1.2,
+                        color=c['face'], edgecolor=c['edge'], linewidth=0.9,
                         zorder=2, label=cohort_lbl,
                     )
                     ax_lk3.errorbar(
                         x_positions[i], mean_val,
                         yerr=sem_val,
                         fmt='none', color='black',
-                        capsize=6, capthick=1.5, linewidth=1.5,
+                        capsize=6, capthick=0.8, linewidth=1.0,
                         zorder=3,
                     )
                     jitter = rng_lk3.uniform(-0.12, 0.12, size=len(vals))
@@ -6059,9 +6070,9 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     )
 
                 ax_lk3.set_xticks(x_positions)
-                ax_lk3.set_xticklabels(cohort_labels_lk3, fontsize=11)
-                ax_lk3.set_ylabel('Total Licks (mean \u00b1 SEM)', fontsize=12, weight='bold')
-                ax_lk3.set_title('Total Licks at Week 3 by Cohort', fontsize=13, weight='bold')
+                ax_lk3.set_xticklabels(cohort_labels_lk3)
+                ax_lk3.set_ylabel('Total Licks (mean \u00b1 SEM)', weight='bold')
+                ax_lk3.set_title('Total Licks at Week 3 by Cohort', weight='bold')
                 ax_lk3.set_ylim(bottom=0)
                 ax_lk3.spines['top'].set_visible(False)
                 ax_lk3.spines['right'].set_visible(False)
@@ -6238,8 +6249,8 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
 
             _COHORT_COLORS = [
                 {'line': '#1f77b4',  'face': 'lightblue',  'edge': '#1f77b4'},
-                {'line': '#f7941d', 'face': 'moccasin',   'edge': '#f7941d'},
-                {'line': '#2ca02c',  'face': 'lightgreen', 'edge': '#2ca02c'},
+                {'line': '#f79520', 'face': 'moccasin',   'edge': '#f79520'},
+                {'line': '#2da048',  'face': 'lightgreen', 'edge': '#2da048'},
                 {'line': '#9467bd',     'face': 'plum',       'edge': '#9467bd'},
             ]
 
@@ -6255,7 +6266,7 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     print(f"  [WARNING] Column '{col_name}' not found -- skipping plot.")
                     continue
                 try:
-                    fig_fl, ax_fl = plt.subplots(figsize=(9, 6))
+                    fig_fl, ax_fl = plt.subplots(figsize=(5, 3))
                     weeks_fl = sorted(combined_fl['Week'].dropna().unique())
 
                     for idx, cohort_lbl in enumerate(cohort_labels_fl):
@@ -6271,25 +6282,24 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         ax_fl.errorbar(
                             wk_stats['Week'], wk_stats['mean'],
                             yerr=wk_stats['sem'],
-                            label=lbl, marker='o', markersize=8,
-                            linewidth=2, capsize=5,
+                            label=lbl, marker='o',
+                            linewidth=0.9, capsize=5,
                             color=c['line'],
                             markerfacecolor=c['face'],
                             markeredgecolor=c['edge'],
                         )
 
-                    ax_fl.set_xlabel('Week', fontsize=12, weight='bold')
-                    ax_fl.set_ylabel(f'{y_label} (mean \u00b1 SEM)', fontsize=12, weight='bold')
+                    ax_fl.set_xlabel('Week', weight='bold')
+                    ax_fl.set_ylabel(f'{y_label} (mean \u00b1 SEM)', weight='bold')
                     ax_fl.set_title(
                         f'{y_label} Across Weeks by Cohort (mean \u00b1 SEM)',
-                        fontsize=13, weight='bold'
-                    )
+                        weight='bold'                    )
                     ax_fl.set_xticks(weeks_fl)
                     ax_fl.set_xticklabels([str(int(w) + 1) for w in weeks_fl])
                     ax_fl.set_ylim(bottom=y_min if y_min is not None else ax_fl.get_ylim()[0])
                     if y_max is not None:
                         ax_fl.set_ylim(top=y_max)
-                    ax_fl.legend(loc='best', fontsize=10)
+                    ax_fl.legend(loc='best')
                     ax_fl.spines['top'].set_visible(False)
                     ax_fl.spines['right'].set_visible(False)
                     ax_fl.tick_params(direction='in', which='both', length=5)
@@ -6381,8 +6391,8 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 _BAR_COLORS = [
                     {'face': 'steelblue',    'edge': 'navy'},
                     {'face': 'darkorange',   'edge': 'saddlebrown'},
-                    {'face': 'seagreen',     'edge': 'darkgreen'},
-                    {'face': 'mediumpurple', 'edge': 'indigo'},
+                    {'face': '#2da048',     'edge': '#155224'},
+                    {'face': '#9467bd', 'edge': '#4a3560'},
                 ]
 
                 fig_fec4, ax_fec4 = _plt.subplots(figsize=(7, 6))
@@ -6406,14 +6416,14 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     ax_fec4.bar(
                         x_positions[i], mean_val,
                         width=bar_width,
-                        color=c['face'], edgecolor=c['edge'], linewidth=1.2,
+                        color=c['face'], edgecolor=c['edge'], linewidth=0.9,
                         zorder=2, label=cohort_lbl,
                     )
                     ax_fec4.errorbar(
                         x_positions[i], mean_val,
                         yerr=sem_val,
                         fmt='none', color='black',
-                        capsize=6, capthick=1.5, linewidth=1.5,
+                        capsize=6, capthick=0.8, linewidth=1.0,
                         zorder=3,
                     )
                     jitter = rng_fec.uniform(-0.12, 0.12, size=len(vals))
@@ -6424,9 +6434,9 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     )
 
                 ax_fec4.set_xticks(x_positions)
-                ax_fec4.set_xticklabels(cohort_labels_fec, fontsize=11)
-                ax_fec4.set_ylabel('Fecal Count (mean \u00b1 SEM)', fontsize=12, weight='bold')
-                ax_fec4.set_title('Fecal Count at Week 4 by Cohort', fontsize=13, weight='bold')
+                ax_fec4.set_xticklabels(cohort_labels_fec)
+                ax_fec4.set_ylabel('Fecal Count (mean \u00b1 SEM)', weight='bold')
+                ax_fec4.set_title('Fecal Count at Week 4 by Cohort', weight='bold')
                 ax_fec4.set_ylim(bottom=0)
                 ax_fec4.spines['top'].set_visible(False)
                 ax_fec4.spines['right'].set_visible(False)

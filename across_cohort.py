@@ -73,17 +73,38 @@ try:
     plt.rcParams["font.sans-serif"] = ["Arial"]
     plt.rcParams["svg.fonttype"] = "none"
     plt.rcParams.update({
-        "font.size": 11,
-        "axes.titlesize": 13,
-        "axes.labelsize": 12,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
-        "legend.fontsize": 10,
-        "figure.titlesize": 14,
+        "font.size": 8,
+        "axes.titlesize": 10,
+        "axes.labelsize": 8,
+        "xtick.labelsize": 8,
+        "ytick.labelsize": 8,
+        "legend.fontsize": 7.5,
+        "figure.titlesize": 10,
+        "lines.linewidth": 0.9,
+        "lines.markersize": 3,
     })
 except ImportError:
     HAS_MATPLOTLIB = False
     print("Warning: matplotlib not installed. Plotting will not be available.")
+
+# Canonical cohort colours
+_COLOR_0PCT  = "#1f77b4"   # 0% CA
+_COLOR_2PCT  = "#f79520"   # 2% CA
+_COLOR_RAMP  = "#2da048"   # Ramp
+_COLOR_OTHER = "#9467bd"   # fallback
+
+
+def _cohort_label_to_color(label: str) -> str:
+    """Map a cohort label to its canonical hex colour."""
+    lo = str(label).lower()
+    if "0%" in lo:
+        return _COLOR_0PCT
+    if "2%" in lo:
+        return _COLOR_2PCT
+    if "ramp" in lo:
+        return _COLOR_RAMP
+    return _COLOR_OTHER
+
 
 # Cache for loaded cohorts
 _COHORT_DFS: Dict[str, pd.DataFrame] = {}
@@ -1833,11 +1854,11 @@ def _sex_to_style(sex: Optional[str]) -> Tuple[str, str]:
 
 
 def _ca_to_style(ca_pct: Optional[float]) -> Tuple[str, str]:
-    """Return (color, marker) based on CA%: 0=dodgerblue/triangle, 2=orangered/circle."""
+    """Return (color, marker) based on CA%: 0=#1f77b4/triangle, 2=#f79520/circle."""
     if ca_pct == 0.0:
-        return ("dodgerblue", "^")
+        return (_COLOR_0PCT, "^")
     if ca_pct == 2.0:
-        return ("orangered", "o")
+        return (_COLOR_2PCT, "o")
     return ("gray", "d")  # diamond for unknown
 
 
@@ -1917,7 +1938,7 @@ def apply_common_plot_style(
 
     if draw_zero_dotted_line:
         try:
-            ax.axhline(0, linestyle='-', color='0', linewidth=1.5, alpha=0.8, zorder=1)
+            ax.axhline(0, linestyle='-', color='0', linewidth=1.0, alpha=0.8, zorder=1)
         except Exception:
             pass
 
@@ -2011,7 +2032,7 @@ def plot_total_change_by_id(
         print("[WARNING] No data to plot")
         return None
 
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig, ax = plt.subplots(figsize=(5, 3))
 
     # Plot each ID as a separate line
     for mid, s in series_by_id.items():
@@ -2021,8 +2042,7 @@ def plot_total_change_by_id(
             s.values,
             label=str(mid),
             marker=marker,
-            markersize=3,
-            linewidth=1.5,
+            linewidth=1.0,
             alpha=0.9,
             color=color,
         )
@@ -2104,7 +2124,7 @@ def plot_daily_change_by_id(
         print("[WARNING] No data to plot")
         return None
 
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig, ax = plt.subplots(figsize=(5, 3))
 
     # Plot each ID as a separate line
     for mid, s in series_by_id.items():
@@ -2114,8 +2134,7 @@ def plot_daily_change_by_id(
             s.values,
             label=str(mid),
             marker=marker,
-            markersize=3,
-            linewidth=1.5,
+            linewidth=1.0,
             alpha=0.9,
             color=color,
         )
@@ -2204,12 +2223,12 @@ def plot_total_change_by_sex(
     male_mean, male_sem = _compute_mean_sem(male_series)
     female_mean, female_sem = _compute_mean_sem(female_series)
     
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig, ax = plt.subplots(figsize=(5, 3))
     
     # Plot male data
     if not male_mean.empty:
         ax.plot(male_mean.index, male_mean.values, label="Male", color="green", marker="s",
-                markersize=4, linewidth=2, alpha=0.9)
+linewidth=0.9, alpha=0.9)
         ax.fill_between(male_mean.index,
                         male_mean - male_sem,
                         male_mean + male_sem,
@@ -2218,7 +2237,7 @@ def plot_total_change_by_sex(
     # Plot female data
     if not female_mean.empty:
         ax.plot(female_mean.index, female_mean.values, label="Female", color="purple", marker="o",
-                markersize=4, linewidth=2, alpha=0.9)
+linewidth=0.9, alpha=0.9)
         ax.fill_between(female_mean.index,
                         female_mean - female_sem,
                         female_mean + female_sem,
@@ -2303,12 +2322,12 @@ def plot_daily_change_by_sex(
     male_mean, male_sem = _compute_mean_sem(male_series)
     female_mean, female_sem = _compute_mean_sem(female_series)
     
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig, ax = plt.subplots(figsize=(5, 3))
     
     # Plot male data
     if not male_mean.empty:
         ax.plot(male_mean.index, male_mean.values, label="Male", color="green", marker="s",
-                markersize=4, linewidth=2, alpha=0.9)
+linewidth=0.9, alpha=0.9)
         ax.fill_between(male_mean.index,
                         male_mean - male_sem,
                         male_mean + male_sem,
@@ -2317,7 +2336,7 @@ def plot_daily_change_by_sex(
     # Plot female data
     if not female_mean.empty:
         ax.plot(female_mean.index, female_mean.values, label="Female", color="purple", marker="o",
-                markersize=4, linewidth=2, alpha=0.9)
+linewidth=0.9, alpha=0.9)
         ax.fill_between(female_mean.index,
                         female_mean - female_sem,
                         female_mean + female_sem,
@@ -2404,7 +2423,7 @@ def plot_total_change_by_ca(
         sem = df_temp.sem(axis=1)
         return mean, sem
     
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig, ax = plt.subplots(figsize=(5, 3))
     
     # Plot each CA% group
     all_group_means = []
@@ -2414,7 +2433,7 @@ def plot_total_change_by_ca(
         mean, sem = _compute_mean_sem(ca_groups[ca_val])
         if not mean.empty:
             ax.plot(mean.index, mean.values, label=f'{ca_val:.0f}% CA',
-                    marker=marker, markersize=4, linewidth=2, alpha=0.9, color=color)
+                    marker=marker, linewidth=0.9, alpha=0.9, color=color)
             ax.fill_between(mean.index, mean - sem, mean + sem, color=color, alpha=0.2)
             all_group_means.append(mean)
             all_group_indices.append(mean.index.to_series())
@@ -2495,7 +2514,7 @@ def plot_daily_change_by_ca(
         sem = df_temp.sem(axis=1)
         return mean, sem
     
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig, ax = plt.subplots(figsize=(5, 3))
     
     # Plot each CA% group
     all_group_means = []
@@ -2505,7 +2524,7 @@ def plot_daily_change_by_ca(
         mean, sem = _compute_mean_sem(ca_groups[ca_val])
         if not mean.empty:
             ax.plot(mean.index, mean.values, label=f'{ca_val:.0f}% CA',
-                    marker=marker, markersize=4, linewidth=2, alpha=0.9, color=color)
+                    marker=marker, linewidth=0.9, alpha=0.9, color=color)
             ax.fill_between(mean.index, mean - sem, mean + sem, color=color, alpha=0.2)
             all_group_means.append(mean)
             all_group_indices.append(mean.index.to_series())
@@ -2581,13 +2600,12 @@ def plot_total_change_by_cohort(
         df_temp = pd.DataFrame(series_dict)
         return df_temp.mean(axis=1), df_temp.sem(axis=1)
 
-    _COLORS  = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd']
     _MARKERS = ['o', 's', '^', 'D', 'v']
     sorted_cohorts = sorted(cohort_groups.keys())
-    color_map  = {c: _COLORS[i % len(_COLORS)]  for i, c in enumerate(sorted_cohorts)}
+    color_map  = {c: _cohort_label_to_color(c) for c in sorted_cohorts}
     marker_map = {c: _MARKERS[i % len(_MARKERS)] for i, c in enumerate(sorted_cohorts)}
 
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig, ax = plt.subplots(figsize=(5, 3))
 
     all_group_means = []
     all_group_indices = []
@@ -2597,7 +2615,7 @@ def plot_total_change_by_cohort(
         mean, sem = _compute_mean_sem(cohort_groups[cohort_label])
         if not mean.empty:
             ax.plot(mean.index, mean.values, label=cohort_label,
-                    marker=marker, markersize=4, linewidth=2, alpha=0.9, color=color)
+                    marker=marker, linewidth=0.9, alpha=0.9, color=color)
             ax.fill_between(mean.index, mean - sem, mean + sem, color=color, alpha=0.2)
             all_group_means.append(mean)
             all_group_indices.append(mean.index.to_series())
@@ -2669,13 +2687,12 @@ def plot_daily_change_by_cohort(
         df_temp = pd.DataFrame(series_dict)
         return df_temp.mean(axis=1), df_temp.sem(axis=1)
 
-    _COLORS  = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd']
     _MARKERS = ['o', 's', '^', 'D', 'v']
     sorted_cohorts = sorted(cohort_groups.keys())
-    color_map  = {c: _COLORS[i % len(_COLORS)]  for i, c in enumerate(sorted_cohorts)}
+    color_map  = {c: _cohort_label_to_color(c) for c in sorted_cohorts}
     marker_map = {c: _MARKERS[i % len(_MARKERS)] for i, c in enumerate(sorted_cohorts)}
 
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig, ax = plt.subplots(figsize=(5, 3))
 
     all_group_means = []
     all_group_indices = []
@@ -2685,7 +2702,7 @@ def plot_daily_change_by_cohort(
         mean, sem = _compute_mean_sem(cohort_groups[cohort_label])
         if not mean.empty:
             ax.plot(mean.index, mean.values, label=cohort_label,
-                    marker=marker, markersize=4, linewidth=2, alpha=0.9, color=color)
+                    marker=marker, linewidth=0.9, alpha=0.9, color=color)
             ax.fill_between(mean.index, mean - sem, mean + sem, color=color, alpha=0.2)
             all_group_means.append(mean)
             all_group_indices.append(mean.index.to_series())
@@ -2786,7 +2803,7 @@ def plot_interaction_ca_sex(
     measure = anova_results.get('measure', 'Measure')
     
     # Create figure
-    fig, ax = plt.subplots(figsize=(9, 6))
+    fig, ax = plt.subplots(figsize=(5, 3))
     
     # Get unique CA% levels and Sex levels
     ca_levels = sorted(group_stats['CA (%)'].unique())
@@ -2804,7 +2821,7 @@ def plot_interaction_ca_sex(
             sex_data['CA (%)'], 
             sex_data['mean'],
             yerr=sex_data['sem'],
-            marker=marker, markersize=8, linewidth=2.5, capsize=5,
+            marker=marker, linewidth=0.9, capsize=5,
             color=color, label=label, alpha=0.85, markeredgewidth=1.5,
             markeredgecolor='black'
         )
@@ -2896,7 +2913,7 @@ def plot_interaction_time_ca(
     sex_label = 'Males' if sex == 'M' else 'Females'
     
     # Create figure
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig, ax = plt.subplots(figsize=(5, 3))
     
     # Compute mean and SEM for each Day  x  CA% combination
     summary = data_df.groupby(['Day', 'CA (%)'])[measure].agg(['mean', 'sem', 'count']).reset_index()
@@ -2912,7 +2929,7 @@ def plot_interaction_time_ca(
         
         ax.plot(
             ca_data['Day'], ca_data['mean'],
-            marker='o', markersize=4, linewidth=2, alpha=0.9,
+            marker='o', linewidth=0.9, alpha=0.9,
             color=colors[i], label=f'{ca_val:.0f}% CA'
         )
         ax.fill_between(
@@ -3012,7 +3029,7 @@ def plot_interaction_time_sex(
     ca_percent = anova_results.get('ca_percent', 'Unknown')
     
     # Create figure
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig, ax = plt.subplots(figsize=(5, 3))
     
     # Compute mean and SEM for each Day  x  Sex combination
     summary = data_df.groupby(['Day', 'Sex'])[measure].agg(['mean', 'sem', 'count']).reset_index()
@@ -3030,7 +3047,7 @@ def plot_interaction_time_sex(
         
         ax.plot(
             sex_data['Day'], sex_data['mean'],
-            marker=marker, markersize=4, linewidth=2, alpha=0.9,
+            marker=marker, linewidth=0.9, alpha=0.9,
             color=color, label=label
         )
         ax.fill_between(
@@ -3163,7 +3180,7 @@ def plot_three_way_interaction(
             
             ax.plot(
                 ca_data['Day'], ca_data['mean'],
-                marker='o', markersize=4, linewidth=2, alpha=0.9,
+                marker='o', linewidth=0.9, alpha=0.9,
                 color=colors[i], label=f'{ca_val:.0f}% CA'
             )
             ax.fill_between(
@@ -3421,7 +3438,7 @@ def plot_behavioral_metrics_by_cohort(
 
     fig, axes = plt.subplots(1, 3, figsize=(14, 5), sharey=True)
     plot_title = title or "Behavioral Metrics by Cohort — Across Weeks"
-    fig.suptitle(plot_title, fontsize=16, weight='bold', y=0.98)
+    fig.suptitle(plot_title, weight='bold', y=0.98)
 
     for ax, (col, _, panel_title) in zip(axes, BEHAVIORS):
         for i, (label, data) in enumerate(cohort_data.items()):
@@ -3431,8 +3448,8 @@ def plot_behavioral_metrics_by_cohort(
             sems = data['sems'][col]
             ax.plot(
                 xs, ys,
-                color=color, linewidth=2.2,
-                marker='o', markersize=7,
+                color=color, linewidth=0.9,
+                marker='o',
                 markerfacecolor='white',
                 markeredgecolor=color, markeredgewidth=2,
                 label=label,
@@ -3442,21 +3459,21 @@ def plot_behavioral_metrics_by_cohort(
                 yerr=sems,
                 fmt='none',
                 color=color,
-                capsize=4, capthick=1.2, linewidth=1.2,
+                capsize=4, capthick=0.8, linewidth=0.9,
                 alpha=0.7,
             )
         ax.set_xticks(range(len(all_weeks_sorted)))
-        ax.set_xticklabels(x_labels, fontsize=10)
-        ax.set_xlabel('Week', fontsize=12, weight='bold')
+        ax.set_xticklabels(x_labels)
+        ax.set_xlabel('Week', weight='bold')
         ax.set_ylim(0, 100)
-        ax.set_title(panel_title, fontsize=13, weight='bold', pad=10)
+        ax.set_title(panel_title, weight='bold', pad=10)
         ax.grid(False)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.tick_params(direction='in', which='both', length=5)
 
-    axes[0].set_ylabel('% of Observations', fontsize=12, weight='bold')
-    axes[-1].legend(fontsize=10, loc='upper right', frameon=False)
+    axes[0].set_ylabel('% of Observations', weight='bold')
+    axes[-1].legend(loc='upper right', frameon=False)
     fig.tight_layout()
 
     if save_path is not None:
@@ -3540,24 +3557,24 @@ def plot_behavioral_interaction_effects(
             ys = [pcts_by_week.get(w, float('nan')) for w in all_weeks]
             ax.plot(
                 xs, ys,
-                color=color, linewidth=2.2,
-                marker='o', markersize=7,
+                color=color, linewidth=0.9,
+                marker='o',
                 markerfacecolor='white',
                 markeredgecolor=color, markeredgewidth=2,
                 label=label,
             )
 
         ax.set_xticks(range(len(all_weeks)))
-        ax.set_xticklabels([f"Week {w}" for w in all_weeks], fontsize=10)
-        ax.set_xlabel('Week', fontsize=12, weight='bold')
-        ax.set_ylabel('% Observations', fontsize=12, weight='bold')
+        ax.set_xticklabels([f"Week {w}" for w in all_weeks])
+        ax.set_xlabel('Week', weight='bold')
+        ax.set_ylabel('% Observations', weight='bold')
         ax.set_ylim(bottom=0)
         ax.set_title(f"Cohort \u00d7 Week Interaction \u2014 {metric_label}",
-                     fontsize=13, weight='bold')
+                     weight='bold')
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.tick_params(direction='in', which='both', length=5)
-        ax.legend(fontsize=10, frameon=False)
+        ax.legend(frameon=False)
 
         ann = (
             f"GEE (n={gee.get('n_subjects', '?')} subjects)\n"
@@ -3568,8 +3585,7 @@ def plot_behavioral_interaction_effects(
         ax.text(
             0.98, 0.97, ann,
             transform=ax.transAxes,
-            fontsize=9,
-            verticalalignment='top',
+                        verticalalignment='top',
             horizontalalignment='right',
             bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
                       alpha=0.85, edgecolor='#cccccc'),
@@ -3699,8 +3715,8 @@ def plot_weight_interaction_effects(
 
             ax.plot(
                 xs, ys,
-                color=color, linewidth=2.2,
-                marker='o', markersize=7,
+                color=color, linewidth=0.9,
+                marker='o',
                 markerfacecolor='white',
                 markeredgecolor=color, markeredgewidth=2,
                 label=label,
@@ -3716,15 +3732,15 @@ def plot_weight_interaction_effects(
                 )
 
         ax.set_xticks(range(len(all_weeks)))
-        ax.set_xticklabels([f"Week {int(w)}" for w in all_weeks], fontsize=10)
-        ax.set_xlabel('Week', fontsize=12, weight='bold')
-        ax.set_ylabel(f'{measure} (Mean ± SEM)', fontsize=12, weight='bold')
-        ax.set_title(f"Cohort × Week — {measure}", fontsize=13, weight='bold')
+        ax.set_xticklabels([f"Week {int(w)}" for w in all_weeks])
+        ax.set_xlabel('Week', weight='bold')
+        ax.set_ylabel(f'{measure} (Mean ± SEM)', weight='bold')
+        ax.set_title(f"Cohort × Week — {measure}", weight='bold')
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.tick_params(direction='in', which='both', length=5)
         ax.axhline(0, color='gray', linewidth=0.8, linestyle='--', alpha=0.6)
-        ax.legend(fontsize=10, frameon=False)
+        ax.legend(frameon=False)
 
         fig.tight_layout()
 
@@ -3795,8 +3811,7 @@ def perform_behavioral_mixed_analysis(
         from one joint model, properly accounting for within-subject correlation.
         Reports Wald p-values and Odds Ratios with 95% CIs.
 
-      SENSITIVITY — Cochran's Q (non-parametric, complete-cases only):
-        Non-parametric analog of repeated-measures ANOVA for binary data.
+      SENSITIVITY — Cochran's Q (non-parametric, complete-cases only):        Non-parametric analog of repeated-measures ANOVA for binary data.
         Requires complete data across all weeks; included as a robustness check.
 
       POST-HOC (if GEE Week or interaction p < 0.05):
@@ -4247,7 +4262,7 @@ def generate_behavioral_report(
     lines.append("")
     lines.append("  PRIMARY ANALYSIS  : GEE (Generalized Estimating Equations)")
     lines.append("    Model: Response ~ C(Week) + C(Cohort) + C(Week):C(Cohort)")
-    lines.append("    Family: Binomial (logit link)   Corr. structure: Exchangeable")
+    lines.append("    Family: Binomial (logit link)    Corr. structure: Exchangeable")
     lines.append("    Groups: Animal ID")
     lines.append("    SE: Mancl-DeRouen bias-reduced (BC) correction when available (n_clusters<30)")
     lines.append("    Provides: Wald p-values for Week, Cohort, and Cohort×Week interaction")
@@ -5417,6 +5432,885 @@ def generate_cross_cohort_report(
 
 
 # =============================================================================
+# OLS ASSUMPTION DIAGNOSTICS FOR CROSS-COHORT ANALYSES
+# =============================================================================
+
+def check_ols_assumptions_cross_cohort(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    measure: str = "Total Change",
+    weeks: Optional[List[int]] = None,
+    *,
+    save_dir: Optional[Path] = None,
+    show: bool = True,
+    save_svg: bool = False,
+    save_report: bool = False,
+) -> dict:
+    """
+    Assess whether a weight measure meets OLS assumptions for the two-way
+    mixed ANOVA: Week (within-subjects) x Cohort (between-subjects).
+
+    Model: Value ~ C(Week) + C(Cohort) + C(ID)
+      - C(Week) captures systematic change over time (within-subjects).
+      - C(Cohort) captures the mean difference between cohorts (between-subjects).
+      - C(ID) partials out between-subject differences (repeated measures).
+      - Residuals should be IID: mean ≈ 0, normally distributed, constant variance,
+        and uncorrelated across subjects.
+
+    Returns a dict with keys:
+      'residual_mean', 'normality', 'homoscedasticity', 'variance_ratio',
+      'independence', 'outliers', 'influential', 'sensitivity_analysis',
+      'figure', 'figure_reduced', 'n', 'n_subjects', 'week_levels', 'cohort_levels'
+    """
+    if not HAS_STATSMODELS:
+        print("check_ols_assumptions_cross_cohort: statsmodels not available; skipping.")
+        return {'error': 'statsmodels not available'}
+
+    try:
+        import statsmodels.formula.api as smf
+        from statsmodels.stats.anova import anova_lm as _anova_lm
+    except ImportError:
+        return {'error': 'statsmodels not available'}
+
+    from scipy import stats as _scipy_stats
+    import numpy as _np
+
+    print("\n" + "=" * 80)
+    print(f"OLS ASSUMPTION DIAGNOSTICS: {measure}")
+    print("Model: Value ~ C(Week) + C(Cohort) + C(ID)")
+    print("=" * 80)
+
+    # ── Data preparation ──────────────────────────────────────────────────────
+    combined_df = combine_cohorts_for_analysis(cohort_dfs)
+    combined_df = clean_cohort(combined_df)
+    if 'Day' not in combined_df.columns:
+        combined_df = add_day_column_across_cohorts(combined_df)
+    combined_df = _add_week_column_across_cohorts(combined_df)
+    combined_df = combined_df[combined_df['Day'] >= 0]
+
+    required_cols = ['ID', 'Week', 'Cohort', measure]
+    missing = [c for c in required_cols if c not in combined_df.columns]
+    if missing:
+        print(f"ERROR: Missing columns: {missing}")
+        return {'error': f"Missing columns: {missing}"}
+
+    analysis_df = combined_df[required_cols].dropna().copy()
+
+    if weeks is not None:
+        analysis_df = analysis_df[analysis_df['Week'].isin(weeks)]
+        print(f"  Filtered to weeks: {sorted(weeks)}")
+
+    # One value per ID × Week (average within week per animal)
+    agg = (
+        analysis_df
+        .groupby(['ID', 'Week', 'Cohort'], as_index=False)[measure]
+        .mean()
+        .rename(columns={measure: 'Value'})
+    )
+    agg = _filter_complete_subjects_weekly(agg, 'ID', 'Week')
+
+    agg['Week_str'] = agg['Week'].astype(str)
+    agg['ID'] = agg['ID'].astype(str)
+    agg['Cohort'] = agg['Cohort'].astype(str)
+
+    n = len(agg)
+    n_subjects = agg['ID'].nunique()
+    week_levels = sorted(agg['Week'].unique())
+    cohort_levels = sorted(agg['Cohort'].unique())
+
+    print(f"\nData: {n} observations, {n_subjects} subjects, "
+          f"{len(week_levels)} weeks: {week_levels}, "
+          f"{len(cohort_levels)} cohorts: {cohort_levels}")
+
+    if n < 10:
+        print("WARNING: Very small sample — OLS diagnostics may be unreliable.")
+
+    # ── OLS fit ───────────────────────────────────────────────────────────────
+    try:
+        model = smf.ols('Value ~ C(Week_str) + C(Cohort) + C(ID)', data=agg).fit()
+    except Exception as e:
+        print(f"ERROR fitting OLS model: {e}")
+        return {'error': str(e)}
+
+    residuals = model.resid.values
+    fitted = model.fittedvalues.values
+    resid_mean = float(_np.mean(residuals))
+
+    print(f"\nResidual mean: {resid_mean:.6f}  (should be ≈ 0)")
+
+    # ── Normality ──────────────────────────────────────────────────────────────
+    normality = {}
+    if len(residuals) >= 3:
+        sw_stat, sw_p = _scipy_stats.shapiro(residuals)
+        normality = {
+            'test': "Shapiro-Wilk",
+            'statistic': float(sw_stat),
+            'p': float(sw_p),
+            'passed': bool(sw_p >= 0.05),
+        }
+        print(f"\nNormality (Shapiro-Wilk): W = {sw_stat:.4f}, p = {sw_p:.4f} "
+              f"({'PASSED ✓' if sw_p >= 0.05 else 'FAILED ✗ — residuals may not be normal'})")
+    else:
+        normality = {'test': 'Shapiro-Wilk', 'error': 'Too few observations'}
+        print("\nNormality: too few observations for Shapiro-Wilk")
+
+    # ── Homoscedasticity (Levene's by Week) ───────────────────────────────────
+    homoscedasticity = {}
+    week_str_levels = [str(w) for w in week_levels]
+    level_groups = [residuals[agg['Week_str'].values == lv] for lv in week_str_levels
+                    if (agg['Week_str'].values == lv).any()]
+    level_groups = [g for g in level_groups if len(g) >= 2]
+    if len(level_groups) >= 2:
+        lev_stat, lev_p = _scipy_stats.levene(*level_groups, center='median')
+        homoscedasticity = {
+            'test': "Levene (median)",
+            'statistic': float(lev_stat),
+            'p': float(lev_p),
+            'passed': bool(lev_p >= 0.05),
+        }
+        print(f"\nHomoscedasticity (Levene's test by Week): W = {lev_stat:.4f}, p = {lev_p:.4f} "
+              f"({'PASSED ✓' if lev_p >= 0.05 else 'FAILED ✗ — variance may not be constant across weeks'})")
+    else:
+        homoscedasticity = {'test': 'Levene', 'error': 'Need ≥2 week groups with ≥2 obs each'}
+        print("\nHomoscedasticity: insufficient groups for Levene's test")
+
+    # ── Variance ratio (max/min residual variance by Week) ───────────────────
+    variance_ratio_info = {}
+    level_variances = {
+        str(w): float(_np.var(residuals[agg['Week_str'].values == str(w)], ddof=1))
+        for w in week_levels
+        if (agg['Week_str'].values == str(w)).sum() >= 2
+    }
+    if len(level_variances) >= 2:
+        _vars = list(level_variances.values())
+        _max_var = max(_vars)
+        _min_var = min(_vars)
+        _max_lvl = max(level_variances, key=level_variances.get)
+        _min_lvl = min(level_variances, key=level_variances.get)
+        var_ratio = _max_var / _min_var if _min_var > 0 else float('inf')
+        var_ratio_failed = var_ratio > 4.0
+        variance_ratio_info = {
+            'ratio': float(var_ratio),
+            'max_var': float(_max_var),
+            'max_level': _max_lvl,
+            'min_var': float(_min_var),
+            'min_level': _min_lvl,
+            'level_variances': {k: float(v) for k, v in level_variances.items()},
+            'passed': not var_ratio_failed,
+        }
+        print(f"\nVariance Ratio (max/min residual variance by Week): {var_ratio:.3f} "
+              f"({'PASSED ✓' if not var_ratio_failed else 'FAILED ✗ — ratio > 4, mixed ANOVA may be inappropriate'})")
+        print(f"  Per-week residual variances:")
+        for lv in week_str_levels:
+            if lv in level_variances:
+                print(f"    Week {lv}: residual var = {level_variances[lv]:.4f}")
+        if var_ratio_failed:
+            print(f"  WARNING: Largest variance (Week {_max_lvl}, var={_max_var:.4f}) is "
+                  f"{var_ratio:.1f}× the smallest (Week {_min_lvl}, var={_min_var:.4f}).")
+            print(f"  Consider a variance-stabilizing transformation (e.g., log, sqrt).")
+    else:
+        variance_ratio_info = {'error': 'Insufficient groups for variance ratio'}
+        print("\nVariance ratio: insufficient groups")
+
+    # ── Outlier detection ─────────────────────────────────────────────────────
+    _influence_ok = False
+    stud_resid = _np.full(n, _np.nan)
+    cooks_d = _np.zeros(n)
+    try:
+        _infl = model.get_influence()
+        stud_resid = _infl.resid_studentized_external
+        cooks_d, _ = _infl.cooks_distance
+        _influence_ok = True
+    except Exception as _ie:
+        print(f"\nNote: Influence statistics unavailable ({_ie}); outlier/Cook's D checks skipped.")
+
+    _q1, _q3 = _np.percentile(residuals, [25, 75])
+    _iqr = _q3 - _q1
+    _iqr_lo, _iqr_hi = _q1 - 1.5 * _iqr, _q3 + 1.5 * _iqr
+    _iqr_mask = (residuals < _iqr_lo) | (residuals > _iqr_hi)
+    _iqr_idx = _np.where(_iqr_mask)[0]
+
+    _stud_mask = _np.abs(stud_resid) > 3.0 if _influence_ok else _np.zeros(n, dtype=bool)
+    _stud_idx = _np.where(_stud_mask)[0]
+
+    outlier_info = {
+        'iqr': {
+            'lower_bound': float(_iqr_lo),
+            'upper_bound': float(_iqr_hi),
+            'n_outliers': int(_iqr_mask.sum()),
+            'outlier_indices': _iqr_idx.tolist(),
+            'outlier_subjects': [str(agg['ID'].iloc[i]) for i in _iqr_idx],
+            'outlier_weeks': [str(agg['Week'].iloc[i]) for i in _iqr_idx],
+            'outlier_cohorts': [str(agg['Cohort'].iloc[i]) for i in _iqr_idx],
+            'outlier_residuals': [float(residuals[i]) for i in _iqr_idx],
+        },
+        'studentized': {
+            'threshold': 3.0,
+            'available': _influence_ok,
+            'n_outliers': int(_stud_mask.sum()),
+            'outlier_indices': _stud_idx.tolist(),
+            'outlier_subjects': [str(agg['ID'].iloc[i]) for i in _stud_idx],
+            'outlier_values': [float(stud_resid[i]) for i in _stud_idx],
+            'max_abs': float(_np.nanmax(_np.abs(stud_resid))) if _influence_ok else float('nan'),
+        },
+    }
+
+    print(f"\nOutlier Detection:")
+    print(f"  IQR method (1.5×IQR fence):  [{_iqr_lo:.3f}, {_iqr_hi:.3f}]")
+    if _iqr_mask.sum() == 0:
+        print("    No IQR outliers detected ✓")
+    else:
+        print(f"    {_iqr_mask.sum()} outlier(s) detected ✗")
+        for i in _iqr_idx:
+            print(f"      Obs {i}: ID={agg['ID'].iloc[i]}, Week={agg['Week'].iloc[i]}, "
+                  f"Cohort={agg['Cohort'].iloc[i]}, residual = {residuals[i]:.3f}")
+    if _influence_ok:
+        print(f"  Studentized residuals (|t*|>3): max |t*| = {outlier_info['studentized']['max_abs']:.3f}")
+        if _stud_mask.sum() == 0:
+            print("    No studentized outliers detected ✓")
+        else:
+            print(f"    {_stud_mask.sum()} outlier(s) detected ✗")
+            for i in _stud_idx:
+                print(f"      Obs {i}: ID={agg['ID'].iloc[i]}, Week={agg['Week'].iloc[i]}, "
+                      f"Cohort={agg['Cohort'].iloc[i]}, t* = {stud_resid[i]:.3f}")
+
+    # ── Influential observations (Cook's D) ───────────────────────────────────
+    _cooks_thresh = 4.0 / n
+    _inf_mask = cooks_d > _cooks_thresh if _influence_ok else _np.zeros(n, dtype=bool)
+    _inf_idx = _np.where(_inf_mask)[0]
+
+    influential_info = {
+        'test': "Cook's Distance",
+        'available': _influence_ok,
+        'threshold': float(_cooks_thresh),
+        'n_influential': int(_inf_mask.sum()),
+        'max_cooks_d': float(_np.max(cooks_d)) if _influence_ok else float('nan'),
+        'influential_indices': _inf_idx.tolist(),
+        'influential_subjects': [str(agg['ID'].iloc[i]) for i in _inf_idx],
+        'cooks_d_values': [float(cooks_d[i]) for i in _inf_idx],
+        'passed': bool(_inf_mask.sum() == 0),
+    }
+
+    if _influence_ok:
+        print(f"\nInfluential Observations (Cook's D, threshold = 4/n = {_cooks_thresh:.4f}):")
+        print(f"  Max Cook's D = {_np.max(cooks_d):.4f}")
+        if _inf_mask.sum() == 0:
+            print("  No influential observations detected ✓")
+        else:
+            print(f"  {_inf_mask.sum()} influential observation(s) detected ✗")
+            for i in _inf_idx:
+                print(f"    Obs {i}: ID={agg['ID'].iloc[i]}, Week={agg['Week'].iloc[i]}, "
+                      f"Cohort={agg['Cohort'].iloc[i]}, Cook's D = {cooks_d[i]:.4f}")
+
+    # ── Cross-subject independence ────────────────────────────────────────────
+    def _cross_subj_independence(agg_df, resid_arr):
+        """Build per-subject time-ordered residuals and compute cross-subject correlations."""
+        _sr = {}
+        for _subj in agg_df['ID'].unique():
+            _mask = agg_df['ID'].values == _subj
+            _idx = _np.where(_mask)[0]
+            try:
+                _order = _np.argsort(agg_df['Week'].iloc[_idx].astype(float).values)
+            except (ValueError, TypeError):
+                _order = _np.argsort(agg_df['Week'].iloc[_idx].values)
+            _sr[str(_subj)] = resid_arr[_idx[_order]]
+        _subj_ids = list(_sr.keys())
+        _n_subj = len(_subj_ids)
+        _subj_lens = [len(v) for v in _sr.values()]
+        _balanced = len(set(_subj_lens)) == 1 and _subj_lens[0] >= 3
+        _cross_corr_mean = float('nan')
+        _cross_corr_max = float('nan')
+        _corr_matrix = None
+        if _balanced and _n_subj >= 2:
+            _mat = _np.stack([_sr[s] for s in _subj_ids], axis=0)
+            _corr_matrix = _np.corrcoef(_mat)
+            _off_diag = [abs(_corr_matrix[i, j])
+                         for i in range(_n_subj) for j in range(i + 1, _n_subj)]
+            _cross_corr_mean = float(_np.mean(_off_diag)) if _off_diag else float('nan')
+            _cross_corr_max = float(_np.max(_off_diag)) if _off_diag else float('nan')
+        return _sr, _cross_corr_mean, _cross_corr_max, _corr_matrix, _subj_ids, _balanced
+
+    subj_resid, _cross_corr, _cross_corr_max, _corr_mat, _subj_ids_list, _balanced = \
+        _cross_subj_independence(agg, residuals)
+    _indep_pass = bool(_cross_corr < 0.3) if not _np.isnan(_cross_corr) else True
+    independence = {
+        'test': 'Cross-subject residual correlation',
+        'mean_abs_cross_corr': _cross_corr,
+        'max_abs_cross_corr': _cross_corr_max,
+        'correlation_matrix': _corr_mat,
+        'subject_ids': _subj_ids_list,
+        'per_subject_residuals': subj_resid,
+        'balanced': _balanced,
+        'note': ('Mean absolute cross-subject residual correlation. '
+                 'Near 0 = subjects are independent. '
+                 'Threshold 0.3 used as soft indicator.'),
+        'passed': _indep_pass,
+    }
+    print(f"\nIndependence (cross-subject residual correlation):")
+    if _balanced and not _np.isnan(_cross_corr):
+        print(f"  Mean |r| across subject pairs = {_cross_corr:.4f}  (max = {_cross_corr_max:.4f})")
+        print(f"  {'PASSED ✓' if _indep_pass else 'CONCERN ✗ — residuals may be correlated across subjects'} "
+              f"(threshold: mean |r| < 0.3)")
+        print(f"  (n={len(_subj_ids_list)} subjects — treat as indicative only)")
+    else:
+        print("  Unbalanced design or fewer than 2 subjects — cross-subject correlation not computed.")
+
+    if subj_resid:
+        _resid_means = _np.array([_np.mean(v) for v in subj_resid.values()])
+        mean_subj_resid = float(_np.mean(_resid_means))
+        print(f"\nMean within-subject residual (should be ≈ 0 if ID partialled out): {mean_subj_resid:.6f}")
+        independence['mean_subject_residual'] = mean_subj_resid
+
+    # ── Sensitivity analysis (refit excluding studentized outliers) ───────────
+    sensitivity_info: dict = {'available': False,
+                               'reason': 'No studentized residual outliers (|t*| > 3)'}
+    if len(_stud_idx) > 0:
+        agg_sens = agg.drop(index=_stud_idx.tolist()).reset_index(drop=True)
+        n_sens = len(agg_sens)
+        print(f"\n{'─'*60}")
+        print(f"SENSITIVITY ANALYSIS: Refit excluding {len(_stud_idx)} studentized outlier(s) (|t*| > 3)")
+        print(f"  Full model: n={n}  |  Reduced model: n={n_sens}")
+        try:
+            model_sens = smf.ols('Value ~ C(Week_str) + C(Cohort) + C(ID)', data=agg_sens).fit()
+            resid_sens = model_sens.resid.values
+            fitted_sens = model_sens.fittedvalues.values
+
+            sw_s_stat, sw_s_p = (_scipy_stats.shapiro(resid_sens)
+                                  if len(resid_sens) >= 3 else (float('nan'), float('nan')))
+            _wl_sens = sorted(agg_sens['Week_str'].unique())
+            _lg_sens = [resid_sens[agg_sens['Week_str'].values == _lv]
+                        for _lv in _wl_sens
+                        if (agg_sens['Week_str'].values == _lv).sum() >= 2]
+            lev_s_stat, lev_s_p = (_scipy_stats.levene(*_lg_sens, center='median')
+                                    if len(_lg_sens) >= 2 else (float('nan'), float('nan')))
+            _subj_resid_s, _cross_corr_s, _cross_corr_max_s, _, _, _balanced_s = \
+                _cross_subj_independence(agg_sens, resid_sens)
+            _indep_pass_s = bool(_cross_corr_s < 0.3) if not _np.isnan(_cross_corr_s) else True
+            _resid_mean_s = float(_np.mean(resid_sens))
+
+            # Variance ratio for reduced
+            _lvars_s = {
+                lv: float(_np.var(resid_sens[agg_sens['Week_str'].values == lv], ddof=1))
+                for lv in _wl_sens
+                if (agg_sens['Week_str'].values == lv).sum() >= 2
+            }
+            if len(_lvars_s) >= 2:
+                _vr_s = (max(_lvars_s.values()) / min(_lvars_s.values())
+                         if min(_lvars_s.values()) > 0 else float('inf'))
+                _vr_s_pass = bool(_vr_s <= 4.0)
+            else:
+                _vr_s, _vr_s_pass = float('nan'), True
+
+            # IQR / stud / cooks for reduced
+            _q1_s, _q3_s = float(_np.percentile(resid_sens, 25)), float(_np.percentile(resid_sens, 75))
+            _iqr_s_val = _q3_s - _q1_s
+            _n_iqr_s = int(
+                ((resid_sens < _q1_s - 1.5 * _iqr_s_val) |
+                 (resid_sens > _q3_s + 1.5 * _iqr_s_val)).sum()
+            )
+            _n_stud_s = 0; _max_stud_s = float('nan')
+            _n_cooks_s = 0; _max_cooks_s = float('nan')
+            _cooks_thresh_s = 4.0 / n_sens if n_sens > 0 else float('nan')
+            try:
+                _infl_s = model_sens.get_influence()
+                _stud_s_vals = _infl_s.resid_studentized_external
+                _cooks_s_vals, _ = _infl_s.cooks_distance
+                _n_stud_s = int((_np.abs(_stud_s_vals) > 3.0).sum())
+                _max_stud_s = float(_np.nanmax(_np.abs(_stud_s_vals)))
+                _n_cooks_s = int((_cooks_s_vals > _cooks_thresh_s).sum())
+                _max_cooks_s = float(_np.max(_cooks_s_vals))
+            except Exception:
+                pass
+
+            r2_full = float(model.rsquared)
+            r2_sens = float(model_sens.rsquared)
+            rmse_full = float(_np.sqrt(_np.mean(residuals**2)))
+            rmse_sens = float(_np.sqrt(_np.mean(resid_sens**2)))
+
+            # F for Week effect from Type-I ANOVA table
+            f_week_full = float('nan')
+            f_week_sens = float('nan')
+            try:
+                _at_full = _anova_lm(model, typ=1)
+                _at_sens = _anova_lm(model_sens, typ=1)
+                if 'C(Week_str)' in _at_full.index:
+                    f_week_full = float(_at_full.loc['C(Week_str)', 'F'])
+                if 'C(Week_str)' in _at_sens.index:
+                    f_week_sens = float(_at_sens.loc['C(Week_str)', 'F'])
+            except Exception:
+                pass
+
+            _sw_p_full = normality.get('p', float('nan'))
+            _lev_p_full = homoscedasticity.get('p', float('nan'))
+
+            print(f"\n  {'Metric':<26} {'Full model':>12}  {'Reduced model':>14}  {'Δ':>10}")
+            print(f"  {'─'*66}")
+            print(f"  {'n':<26} {n:>12d}  {n_sens:>14d}  {n_sens - n:>+10d}")
+            print(f"  {'R²':<26} {r2_full:>12.4f}  {r2_sens:>14.4f}  {r2_sens - r2_full:>+10.4f}")
+            print(f"  {'Residual RMSE':<26} {rmse_full:>12.4f}  {rmse_sens:>14.4f}  {rmse_sens - rmse_full:>+10.4f}")
+            if not _np.isnan(f_week_full):
+                print(f"  {'F (Week)':<26} {f_week_full:>12.3f}  {f_week_sens:>14.3f}  {f_week_sens - f_week_full:>+10.3f}")
+            print(f"  {'SW normality p':<26} {_sw_p_full:>12.4f}  {sw_s_p:>14.4f}  {sw_s_p - _sw_p_full:>+10.4f}")
+            print(f"  {'Levene p':<26} {_lev_p_full:>12.4f}  {lev_s_p:>14.4f}  {lev_s_p - _lev_p_full:>+10.4f}")
+            if not (_np.isnan(_cross_corr) or _np.isnan(_cross_corr_s)):
+                print(f"  {'Cross-subj mean |r|':<26} {_cross_corr:>12.4f}  {_cross_corr_s:>14.4f}  {_cross_corr_s - _cross_corr:>+10.4f}")
+            _delta_r2 = r2_sens - r2_full
+            if abs(_delta_r2) > 0.05:
+                print(f"\n  WARNING: R² changed by {_delta_r2:+.4f} — influential points substantially affect model fit.")
+            else:
+                print(f"\n  Model is robust to removal of influential observations (ΔR² = {_delta_r2:+.4f}).")
+
+            sensitivity_info = {
+                'available': True,
+                'n_removed': len(_stud_idx),
+                'removed_subjects': [str(agg['ID'].iloc[i]) for i in _stud_idx],
+                'n_full': n, 'n_reduced': n_sens,
+                'r2_full': r2_full, 'r2_reduced': r2_sens, 'delta_r2': float(_delta_r2),
+                'rmse_full': rmse_full, 'rmse_reduced': rmse_sens,
+                'delta_rmse': float(rmse_sens - rmse_full),
+                'f_week_full': f_week_full, 'f_week_reduced': f_week_sens,
+                'sw_p_full': float(_sw_p_full), 'sw_p_reduced': float(sw_s_p),
+                'levene_p_full': float(_lev_p_full), 'levene_p_reduced': float(lev_s_p),
+                'cross_corr_full': _cross_corr, 'cross_corr_reduced': _cross_corr_s,
+                'cross_corr_max_full': _cross_corr_max, 'cross_corr_max_reduced': _cross_corr_max_s,
+                'per_subj_resid_reduced': _subj_resid_s,
+                'resid_mean_reduced': _resid_mean_s,
+                'vr_reduced': _vr_s, 'vr_pass_reduced': _vr_s_pass,
+                'sw_pass_reduced': bool(sw_s_p > 0.05),
+                'lev_pass_reduced': bool(lev_s_p > 0.05),
+                'indep_pass_reduced': _indep_pass_s,
+                'n_iqr_reduced': _n_iqr_s, 'n_stud_reduced': _n_stud_s,
+                'max_stud_reduced': _max_stud_s, 'n_cooks_reduced': _n_cooks_s,
+                'max_cooks_reduced': _max_cooks_s, 'cooks_thresh_reduced': _cooks_thresh_s,
+                'model_reduced': model_sens,
+                'residuals_reduced': resid_sens,
+                'fitted_reduced': fitted_sens,
+                'agg_reduced': agg_sens,
+            }
+        except Exception as _se:
+            print(f"  Sensitivity refit failed: {_se}")
+            sensitivity_info = {'available': False, 'reason': str(_se)}
+    else:
+        print(f"\nSensitivity analysis: no studentized outliers (|t*| > 3) — full model is the final model.")
+
+    # ── Diagnostic plots ──────────────────────────────────────────────────────
+    import matplotlib.pyplot as _plt
+
+    def _make_diag_fig(
+        fig_title, n_obs, n_subj, resid_arr, fitted_arr,
+        sw_p_val, lev_p_val, indep_info, wk_levels, agg_df,
+        stud_arr, cooks_arr, iqr_mask_arr, iqr_lo_val, iqr_hi_val,
+        stud_mask_arr, inf_mask_arr, cooks_thresh_val, infl_ok,
+    ):
+        _fig, _axes = _plt.subplots(3, 3, figsize=(18, 12))
+        _fig.suptitle(fig_title, fontsize=12, fontweight='bold')
+
+        # 1. Residuals vs Fitted
+        _ax = _axes[0, 0]
+        _ax.scatter(fitted_arr, resid_arr, alpha=0.6, edgecolors='k', linewidths=0.5)
+        _ax.axhline(0, color='red', linestyle='--', linewidth=1.5)
+        _ax.set_xlabel("Fitted Values")
+        _ax.set_ylabel("Residuals")
+        _ax.set_title("Residuals vs Fitted\n(should scatter around 0 uniformly)")
+
+        # 2. Q-Q plot
+        _ax = _axes[0, 1]
+        (osm, osr), (slope, intercept, _) = _scipy_stats.probplot(resid_arr, dist="norm")
+        _ax.scatter(osm, osr, alpha=0.6, edgecolors='k', linewidths=0.5)
+        _xlim = _np.array([min(osm), max(osm)])
+        _ax.plot(_xlim, slope * _xlim + intercept, color='red', linestyle='--', linewidth=1.5)
+        _ax.set_xlabel("Theoretical Quantiles")
+        _ax.set_ylabel("Sample Quantiles")
+        _ax.set_title(f"Normal Q-Q Plot\nShapiro-Wilk p = {sw_p_val:.4f}")
+
+        # 3. Scale-Location
+        _ax = _axes[0, 2]
+        _ax.scatter(fitted_arr, _np.sqrt(_np.abs(resid_arr)), alpha=0.6, edgecolors='k', linewidths=0.5)
+        _ax.set_xlabel("Fitted Values")
+        _ax.set_ylabel("√|Residuals|")
+        _ax.set_title(f"Scale-Location\nLevene p = {lev_p_val:.4f}")
+
+        # 4. IQR Outlier Detection
+        _ax = _axes[1, 0]
+        _iqr_cols = ['red' if m else 'steelblue' for m in iqr_mask_arr]
+        _iqr_flagged = _np.where(iqr_mask_arr)[0]
+        _ax.scatter(range(n_obs), resid_arr, c=_iqr_cols, alpha=0.7,
+                    edgecolors='k', linewidths=0.4, zorder=3)
+        _ax.axhline(iqr_hi_val, color='orange', linestyle='--', linewidth=1.5,
+                    label=f'Upper fence ({iqr_hi_val:.2f})')
+        _ax.axhline(iqr_lo_val, color='orange', linestyle='--', linewidth=1.5,
+                    label=f'Lower fence ({iqr_lo_val:.2f})')
+        _ax.axhline(0, color='black', linestyle='-', linewidth=0.8)
+        for _i in _iqr_flagged:
+            _ax.annotate(f"{agg_df['ID'].iloc[_i]}\nWk{agg_df['Week'].iloc[_i]}",
+                         xy=(_i, resid_arr[_i]), xytext=(4, 4),
+                         textcoords='offset points', fontsize=7, color='red')
+        _ax.set_xlabel("Observation Index")
+        _ax.set_ylabel("Residuals")
+        _ax.set_title(f"IQR Outlier Detection (1.5×IQR fence)\n"
+                      f"{iqr_mask_arr.sum()} outlier(s) — red=flagged, blue=normal")
+        _ax.legend(fontsize=7)
+
+        # 5. Residuals by Week
+        _ax = _axes[1, 1]
+        _lvl_data = [resid_arr[agg_df['Week_str'].values == str(w)] for w in wk_levels]
+        _ax.boxplot(_lvl_data, tick_labels=[str(w) for w in wk_levels], patch_artist=True)
+        _ax.axhline(0, color='red', linestyle='--', linewidth=1.5)
+        _ax.set_xlabel("Week")
+        _ax.set_ylabel("Residuals")
+        _ax.set_title("Residuals by Week\n(boxes should be centered near 0 with similar spread)")
+
+        # 6. Residual Histogram
+        _ax = _axes[1, 2]
+        _ax.hist(resid_arr, bins=max(8, int(_np.sqrt(n_obs))), edgecolor='black', alpha=0.7)
+        _mu, _std = float(_np.mean(resid_arr)), float(_np.std(resid_arr))
+        _xn = _np.linspace(_mu - 3.5 * _std, _mu + 3.5 * _std, 200)
+        _ax.plot(_xn, _scipy_stats.norm.pdf(_xn, _mu, _std) * n_obs * (_xn[1] - _xn[0]),
+                 color='red', linestyle='--', linewidth=1.5, label='Normal fit')
+        _ax.set_xlabel("Residuals")
+        _ax.set_ylabel("Count")
+        _ax.set_title(f"Residual Histogram\nmean = {_mu:.3f}")
+        _ax.legend(fontsize=8)
+
+        # 7. Per-subject residuals (cross-subject independence)
+        _ax = _axes[2, 0]
+        _cr = indep_info.get('mean_abs_cross_corr', float('nan'))
+        _ps = indep_info.get('per_subject_residuals', {})
+        _prop_cycle = _plt.rcParams['axes.prop_cycle'].by_key()['color']
+        for _ci, (_sid, _sv) in enumerate(_ps.items()):
+            _col = _prop_cycle[_ci % len(_prop_cycle)]
+            _ax.plot(range(len(_sv)), _sv, 'o-', alpha=0.7,
+                     markersize=4, color=_col, label=str(_sid))
+        _ax.axhline(0, color='red', linestyle='--', linewidth=1.5)
+        _ax.set_xlabel("Week order within subject")
+        _ax.set_ylabel("Residuals")
+        _cr_str = f"mean |r| = {_cr:.4f}" if not _np.isnan(_cr) else "unbalanced"
+        _ax.set_title(f"Residuals per Subject\n({_cr_str}; parallel lines → concern)")
+        _ax.legend(fontsize=7, ncol=max(1, len(_ps) // 4))
+
+        # 8. Cook's Distance
+        _ax = _axes[2, 1]
+        if infl_ok:
+            _stems = _ax.stem(range(n_obs), cooks_arr, markerfmt='o', linefmt='grey', basefmt=' ')
+            _plt.setp(_stems.markerline, markersize=4)
+            _ax.axhline(cooks_thresh_val, color='red', linestyle='--', linewidth=1.5,
+                        label=f"Threshold 4/n={cooks_thresh_val:.3f}")
+            for _i in _np.where(inf_mask_arr)[0]:
+                _ax.annotate(f"{agg_df['ID'].iloc[_i]}",
+                             xy=(_i, cooks_arr[_i]), xytext=(4, 4),
+                             textcoords='offset points', fontsize=7, color='red')
+            _ax.set_title(f"Cook's Distance\n({inf_mask_arr.sum()} influential, "
+                          f"threshold={cooks_thresh_val:.3f})")
+            _ax.legend(fontsize=8)
+        else:
+            _ax.text(0.5, 0.5, "Unavailable", ha='center', va='center',
+                     transform=_ax.transAxes)
+            _ax.set_title("Cook's Distance")
+        _ax.set_xlabel("Observation Index")
+        _ax.set_ylabel("Cook's D")
+
+        # 9. Externally Studentized Residuals
+        _ax = _axes[2, 2]
+        if infl_ok:
+            _stud_flag = _np.where(stud_mask_arr)[0]
+            _ax.scatter(range(n_obs), stud_arr, alpha=0.6, edgecolors='k', linewidths=0.5)
+            _ax.axhline(0, color='black', linestyle='-', linewidth=0.8)
+            _ax.axhline(3, color='red', linestyle='--', linewidth=1.5, label='|t*| = 3')
+            _ax.axhline(-3, color='red', linestyle='--', linewidth=1.5)
+            for _i in _stud_flag:
+                _ax.annotate(f"{agg_df['ID'].iloc[_i]}",
+                             xy=(_i, stud_arr[_i]), xytext=(4, 4),
+                             textcoords='offset points', fontsize=7, color='red')
+            _ax.set_title(f"Studentized Residuals\n({stud_mask_arr.sum()} outliers, |t*| > 3)")
+            _ax.legend(fontsize=8)
+        else:
+            _ax.text(0.5, 0.5, "Unavailable", ha='center', va='center',
+                     transform=_ax.transAxes)
+            _ax.set_title("Studentized Residuals")
+        _ax.set_xlabel("Observation Index")
+        _ax.set_ylabel("Studentized Residual (t*)")
+
+        try:
+            _plt.tight_layout()
+        except Exception:
+            pass
+        return _fig
+
+    # ── Build full model figure ───────────────────────────────────────────────
+    _full_title = (f"OLS Residual Diagnostics — {measure} (Full Model)\n"
+                   f"Model: Value ~ C(Week) + C(Cohort) + C(ID)   "
+                   f"[n={n}, subjects={n_subjects}, cohorts={cohort_levels}]")
+    fig = _make_diag_fig(
+        fig_title=_full_title,
+        n_obs=n, n_subj=n_subjects,
+        resid_arr=residuals, fitted_arr=fitted,
+        sw_p_val=normality.get('p', float('nan')),
+        lev_p_val=homoscedasticity.get('p', float('nan')),
+        indep_info=independence,
+        wk_levels=week_levels, agg_df=agg,
+        stud_arr=stud_resid, cooks_arr=cooks_d,
+        iqr_mask_arr=_iqr_mask, iqr_lo_val=_iqr_lo, iqr_hi_val=_iqr_hi,
+        stud_mask_arr=_stud_mask, inf_mask_arr=_inf_mask,
+        cooks_thresh_val=_cooks_thresh, infl_ok=_influence_ok,
+    )
+
+    # ── Reduced model figure (sensitivity) ───────────────────────────────────
+    fig_reduced = None
+    if sensitivity_info.get('available'):
+        _si = sensitivity_info
+        _red_model = _si['model_reduced']
+        _red_resid = _si['residuals_reduced']
+        _red_fitted = _si['fitted_reduced']
+        _red_agg = _si['agg_reduced']
+        _red_n = _si['n_reduced']
+        _red_n_subj = _red_agg['ID'].nunique()
+        _red_wlevels = sorted(_red_agg['Week'].unique())
+
+        _q1r, _q3r = _np.percentile(_red_resid, [25, 75])
+        _iqr_r = _q3r - _q1r
+        _iqr_lo_r, _iqr_hi_r = _q1r - 1.5 * _iqr_r, _q3r + 1.5 * _iqr_r
+        _iqr_mask_r = (_red_resid < _iqr_lo_r) | (_red_resid > _iqr_hi_r)
+
+        _stud_r_arr = _np.full(_red_n, _np.nan)
+        _cooks_r_arr = _np.zeros(_red_n)
+        _infl_ok_r = False
+        try:
+            _infl_r = _red_model.get_influence()
+            _stud_r_arr = _infl_r.resid_studentized_external
+            _cooks_r_arr, _ = _infl_r.cooks_distance
+            _infl_ok_r = True
+        except Exception:
+            pass
+        _stud_mask_r = _np.abs(_stud_r_arr) > 3.0 if _infl_ok_r else _np.zeros(_red_n, dtype=bool)
+        _cooks_thresh_r = 4.0 / _red_n if _red_n > 0 else float('nan')
+        _inf_mask_r = _cooks_r_arr > _cooks_thresh_r if _infl_ok_r else _np.zeros(_red_n, dtype=bool)
+
+        _red_title = (
+            f"OLS Residual Diagnostics — {measure} (Reduced Model)\n"
+            f"Model: Value ~ C(Week) + C(Cohort) + C(ID)   "
+            f"[n={_red_n}, subjects={_red_n_subj}, {_si['n_removed']} outlier(s) removed]"
+        )
+        fig_reduced = _make_diag_fig(
+            fig_title=_red_title,
+            n_obs=_red_n, n_subj=_red_n_subj,
+            resid_arr=_red_resid, fitted_arr=_red_fitted,
+            sw_p_val=_si['sw_p_reduced'],
+            lev_p_val=_si['levene_p_reduced'],
+            indep_info={
+                'mean_abs_cross_corr': _si.get('cross_corr_reduced', float('nan')),
+                'per_subject_residuals': _si.get('per_subj_resid_reduced', {}),
+            },
+            wk_levels=_red_wlevels, agg_df=_red_agg,
+            stud_arr=_stud_r_arr, cooks_arr=_cooks_r_arr,
+            iqr_mask_arr=_iqr_mask_r, iqr_lo_val=_iqr_lo_r, iqr_hi_val=_iqr_hi_r,
+            stud_mask_arr=_stud_mask_r, inf_mask_arr=_inf_mask_r,
+            cooks_thresh_val=_cooks_thresh_r, infl_ok=_infl_ok_r,
+        )
+
+    _fig_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _fig_pairs = [(fig, 'full'), (fig_reduced, 'reduced')]
+
+    if save_dir is not None:
+        _save_dir = Path(save_dir)
+        _save_dir.mkdir(parents=True, exist_ok=True)
+        for _save_fig, _suffix in _fig_pairs:
+            if _save_fig is None:
+                continue
+            _png = _save_dir / f"ols_cross_cohort_{measure.replace(' ', '_')}_{_suffix}_{_fig_ts}.png"
+            _save_fig.savefig(_png, dpi=150, bbox_inches='tight')
+            print(f"\nSaved OLS diagnostics ({_suffix} model) to: {_png}")
+            if save_svg:
+                _svg = _save_dir / f"ols_cross_cohort_{measure.replace(' ', '_')}_{_suffix}_{_fig_ts}.svg"
+                _save_fig.savefig(_svg, format='svg', bbox_inches='tight')
+    elif save_report:
+        for _save_fig, _suffix in _fig_pairs:
+            if _save_fig is None:
+                continue
+            _png = Path.cwd() / f"ols_cross_cohort_{measure.replace(' ', '_')}_{_suffix}_{_fig_ts}.png"
+            try:
+                _save_fig.savefig(_png, dpi=150, bbox_inches='tight')
+                print(f"\nSaved OLS diagnostics ({_suffix} model) to: {_png}")
+            except Exception as _fe:
+                print(f"\nWarning: could not save OLS figure ({_suffix}): {_fe}")
+
+    if show:
+        _plt.show()
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print("\n" + "-" * 50)
+    print("ASSUMPTION CHECK SUMMARY:")
+    print(f"  Residual mean ≈ 0:  {resid_mean:.6f}")
+    print(f"  Normality:          {'PASSED' if normality.get('passed') else 'FAILED'} (SW p={normality.get('p', float('nan')):.4f})")
+    print(f"  Homoscedasticity:   {'PASSED' if homoscedasticity.get('passed') else 'FAILED/N/A'} (Levene p={homoscedasticity.get('p', float('nan')):.4f})")
+    _vr = variance_ratio_info.get('ratio', float('nan'))
+    _vr_pass = variance_ratio_info.get('passed', True)
+    print(f"  Variance ratio:     {'PASSED' if _vr_pass else 'FAILED'} (max/min residual var = {_vr:.3f}{'  ← > 4: mixed ANOVA may be inappropriate' if not _vr_pass else ''})")
+    _cr_display = (f"mean |r| = {_cross_corr:.4f}" if not _np.isnan(_cross_corr)
+                   else "unbalanced — not computed")
+    print(f"  Independence:       {'PASSED' if independence.get('passed') else 'CONCERN'} ({_cr_display})")
+    print(f"  Outliers (IQR):     {outlier_info['iqr']['n_outliers']} flagged "
+          f"{'✓' if outlier_info['iqr']['n_outliers'] == 0 else '✗'}")
+    if outlier_info['studentized']['available']:
+        print(f"  Outliers (|t*|>3):  {outlier_info['studentized']['n_outliers']} flagged "
+              f"{'✓' if outlier_info['studentized']['n_outliers'] == 0 else '✗'} "
+              f"(max |t*|={outlier_info['studentized']['max_abs']:.3f})")
+    if influential_info['available']:
+        print(f"  Cook's D (>4/n):    {influential_info['n_influential']} influential "
+              f"{'✓' if influential_info['passed'] else '✗'} "
+              f"(max D={influential_info['max_cooks_d']:.4f})")
+    all_pass = (normality.get('passed', False) and homoscedasticity.get('passed', False)
+                and independence.get('passed', False) and _vr_pass)
+    if all_pass:
+        print(f"\nOverall: All OLS assumptions met — mixed ANOVA is appropriate.")
+    elif not _vr_pass:
+        print(f"\nOverall: Variance ratio > 4 — mixed ANOVA results should be interpreted with caution.")
+        print(f"  Consider a transformation (log, sqrt) or a non-parametric alternative.")
+    else:
+        print(f"\nOverall: One or more assumptions FAILED — interpret mixed ANOVA results cautiously.")
+    print("=" * 80)
+
+    # ── Text report ───────────────────────────────────────────────────────────
+    if save_report:
+        def _fmt_sum(label, n_obs, resid_mean_val, sw_p, sw_pass, lev_p, lev_pass,
+                     vr, vr_pass, cross_corr, cross_corr_pass, n_iqr, n_stud, max_stud,
+                     n_cooks_d, max_cooks_d, cooks_thresh, r2, rmse):
+            L = ["-" * 50,
+                 f"ASSUMPTION SUMMARY — {label}", f"  n observations: {n_obs}",
+                 f"  R²: {r2:.4f}  |  RMSE: {rmse:.4f}",
+                 f"  Residual mean ≈ 0:  {resid_mean_val:.6f}",
+                 f"  Normality:          {'PASSED' if sw_pass else 'FAILED'} (SW p={sw_p:.4f})",
+                 f"  Homoscedasticity:   {'PASSED' if lev_pass else 'FAILED/N/A'} (Levene p={lev_p:.4f})"]
+            _vr_str = f"{vr:.3f}" if not _np.isnan(vr) else "N/A"
+            L.append(f"  Variance ratio:     {'PASSED' if vr_pass else 'FAILED'} "
+                     f"(max/min = {_vr_str}{'  ← > 4: mixed ANOVA may be inappropriate' if not vr_pass else ''})")
+            _cc_str = f"{cross_corr:.4f}" if not _np.isnan(cross_corr) else "N/A (unbalanced)"
+            L.append(f"  Independence:       {'PASSED' if cross_corr_pass else 'CONCERN'} (mean |r| = {_cc_str})")
+            L.append(f"  Outliers (IQR):     {n_iqr} flagged {'✓' if n_iqr == 0 else '✗'}")
+            _ms = f"{max_stud:.3f}" if not _np.isnan(max_stud) else "N/A"
+            L.append(f"  Outliers (|t*|>3):  {n_stud} flagged {'✓' if n_stud == 0 else '✗'} (max |t*|={_ms})")
+            _mc = f"{max_cooks_d:.4f}" if not _np.isnan(max_cooks_d) else "N/A"
+            _ct = f"{cooks_thresh:.4f}" if not _np.isnan(cooks_thresh) else "4/n"
+            L.append(f"  Cook's D (>{_ct}):  {n_cooks_d} influential "
+                     f"{'✓' if n_cooks_d == 0 else '✗'} (max D={_mc})")
+            _all = sw_pass and lev_pass and cross_corr_pass and vr_pass
+            if _all:
+                L.append("Overall: All OLS assumptions met — mixed ANOVA is appropriate.")
+            elif not vr_pass:
+                L.append("Overall: Variance ratio > 4 — mixed ANOVA results should be interpreted with caution.")
+            else:
+                L.append("Overall: One or more assumptions FAILED — interpret mixed ANOVA results cautiously.")
+            return "\n".join(L)
+
+        _r2_full = float(model.rsquared)
+        _rmse_full = float(_np.sqrt(_np.mean(residuals**2)))
+        _full_sum = _fmt_sum(
+            label="FULL MODEL", n_obs=n, resid_mean_val=resid_mean,
+            sw_p=normality.get('p', float('nan')), sw_pass=normality.get('passed', False),
+            lev_p=homoscedasticity.get('p', float('nan')), lev_pass=homoscedasticity.get('passed', False),
+            vr=variance_ratio_info.get('ratio', float('nan')), vr_pass=variance_ratio_info.get('passed', True),
+            cross_corr=_cross_corr, cross_corr_pass=independence.get('passed', False),
+            n_iqr=outlier_info['iqr']['n_outliers'],
+            n_stud=outlier_info['studentized'].get('n_outliers', 0),
+            max_stud=outlier_info['studentized'].get('max_abs', float('nan')),
+            n_cooks_d=influential_info.get('n_influential', 0),
+            max_cooks_d=influential_info.get('max_cooks_d', float('nan')),
+            cooks_thresh=influential_info.get('threshold', 4.0 / n if n > 0 else float('nan')),
+            r2=_r2_full, rmse=_rmse_full,
+        )
+
+        _rpt = [
+            "=" * 80,
+            "OLS ASSUMPTION CHECK REPORT — CROSS-COHORT",
+            "=" * 80,
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Measure: {measure}",
+            f"Model: Value ~ C(Week) + C(Cohort) + C(ID)   [n={n}, subjects={n_subjects}]",
+            f"Cohorts: {cohort_levels}",
+            f"Weeks: {week_levels}",
+            "=" * 80, "",
+            _full_sum,
+        ]
+
+        _si = sensitivity_info
+        if _si.get('available'):
+            _red_sum = _fmt_sum(
+                label=f"REDUCED MODEL (n={_si['n_reduced']}, {_si['n_removed']} outlier(s) removed)",
+                n_obs=_si['n_reduced'], resid_mean_val=_si.get('resid_mean_reduced', float('nan')),
+                sw_p=_si['sw_p_reduced'], sw_pass=_si.get('sw_pass_reduced', _si['sw_p_reduced'] > 0.05),
+                lev_p=_si['levene_p_reduced'], lev_pass=_si.get('lev_pass_reduced', _si['levene_p_reduced'] > 0.05),
+                vr=_si.get('vr_reduced', float('nan')), vr_pass=_si.get('vr_pass_reduced', True),
+                cross_corr=_si.get('cross_corr_reduced', float('nan')),
+                cross_corr_pass=_si.get('indep_pass_reduced', False),
+                n_iqr=_si.get('n_iqr_reduced', 0),
+                n_stud=_si.get('n_stud_reduced', 0), max_stud=_si.get('max_stud_reduced', float('nan')),
+                n_cooks_d=_si.get('n_cooks_reduced', 0), max_cooks_d=_si.get('max_cooks_reduced', float('nan')),
+                cooks_thresh=_si.get('cooks_thresh_reduced',
+                                     4.0 / _si['n_reduced'] if _si['n_reduced'] > 0 else float('nan')),
+                r2=_si['r2_reduced'], rmse=_si['rmse_reduced'],
+            )
+            _rpt.extend([
+                "", "=" * 80, "SENSITIVITY ANALYSIS — REDUCED MODEL",
+                f"Removed {_si['n_removed']} studentized outlier(s) (|t*| > 3)",
+                f"Removed subjects: {', '.join(_si['removed_subjects'])}",
+                "=" * 80, "",
+                _red_sum, "",
+                "─" * 60, "COMPARISON TABLE (Full vs Reduced)",
+                f"  {'Metric':<26} {'Full model':>12}  {'Reduced model':>14}  {'Δ':>10}",
+                "  " + "─" * 66,
+                f"  {'n':<26} {n:>12d}  {_si['n_reduced']:>14d}  {_si['n_reduced']-n:>+10d}",
+                f"  {'R²':<26} {_si['r2_full']:>12.4f}  {_si['r2_reduced']:>14.4f}  {_si['delta_r2']:>+10.4f}",
+                f"  {'RMSE':<26} {_si['rmse_full']:>12.4f}  {_si['rmse_reduced']:>14.4f}  {_si['delta_rmse']:>+10.4f}",
+                f"  {'SW normality p':<26} {_si['sw_p_full']:>12.4f}  {_si['sw_p_reduced']:>14.4f}  {_si['sw_p_reduced']-_si['sw_p_full']:>+10.4f}",
+                f"  {'Levene p':<26} {_si['levene_p_full']:>12.4f}  {_si['levene_p_reduced']:>14.4f}  {_si['levene_p_reduced']-_si['levene_p_full']:>+10.4f}",
+            ])
+            if not (_np.isnan(_si.get('cross_corr_full', float('nan'))) or
+                    _np.isnan(_si.get('cross_corr_reduced', float('nan')))):
+                _rpt.append(
+                    f"  {'Cross-subj mean |r|':<26} {_si['cross_corr_full']:>12.4f}"
+                    f"  {_si['cross_corr_reduced']:>14.4f}  {_si['cross_corr_reduced']-_si['cross_corr_full']:>+10.4f}"
+                )
+            if not _np.isnan(_si.get('f_week_full', float('nan'))):
+                _rpt.append(
+                    f"  {'F (Week)':<26} {_si['f_week_full']:>12.3f}"
+                    f"  {_si['f_week_reduced']:>14.3f}  {_si['f_week_reduced']-_si['f_week_full']:>+10.3f}"
+                )
+            _dr2 = _si['delta_r2']
+            if abs(_dr2) > 0.05:
+                _rpt.append(f"\nWARNING: R² changed by {_dr2:+.4f} — outliers substantially affect model fit.")
+            else:
+                _rpt.append(f"\nModel is robust to removal of outliers (ΔR² = {_dr2:+.4f}).")
+        else:
+            _rpt.extend(["", f"SENSITIVITY ANALYSIS: {_si.get('reason', 'not run')}"])
+
+        _rpt.extend(["", "=" * 80, "END OF REPORT", "=" * 80, ""])
+        _rpt_text = "\n".join(_rpt)
+        _rpt_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _rpt_path = Path.cwd() / f"ols_cross_cohort_{measure.replace(' ', '_')}_{_rpt_ts}.txt"
+        try:
+            _rpt_path.write_text(_rpt_text, encoding='utf-8')
+            print(f"\nOLS assumption report saved to: {_rpt_path}")
+        except Exception as _re:
+            print(f"\nWarning: could not save OLS report: {_re}")
+
+    return {
+        'n': n,
+        'n_subjects': n_subjects,
+        'week_levels': week_levels,
+        'cohort_levels': cohort_levels,
+        'residual_mean': resid_mean,
+        'normality': normality,
+        'homoscedasticity': homoscedasticity,
+        'variance_ratio': variance_ratio_info,
+        'independence': independence,
+        'cross_corr': _cross_corr,
+        'outliers': outlier_info,
+        'influential': influential_info,
+        'sensitivity_analysis': sensitivity_info,
+        'figure': fig,
+        'figure_reduced': fig_reduced,
+    }
+
+
+# =============================================================================
 # WEEK-LEVEL MIXED ANOVA FUNCTIONS (CONSERVATIVE, BONFERRONI-CORRECTED)
 # =============================================================================
 
@@ -6271,8 +7165,7 @@ def perform_mixed_anova_ca_x_week(
 
     This collapses across sex to give the clearest view of the CA%  x  time interaction
     with maximum power. Includes:
-      - Mauchly's sphericity test for the Week within-subjects factor
-      - Greenhouse-Geisser epsilon and corrected p-values when sphericity is violated
+      - Mauchly's sphericity test for the Week within-subjects factor      - Greenhouse-Geisser epsilon and corrected p-values when sphericity is violated
       - Post-hoc pairwise comparisons (Bonferroni-adjusted paired t-tests) for Week
       - Simple-effects post-hoc when CA%  x  Week interaction is significant:
           * CA% comparison at each Week (independent samples, Bonferroni across weeks)
@@ -7349,8 +8242,7 @@ def calculate_animal_slopes(
     combined_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
-    Calculate linear regression slope for each animal's weight change over time.
-    
+    Calculate linear regression slope for each animal's weight change over time.    
     For each animal, fits a linear regression: measure ~ time
     Returns slopes, intercepts, R^2, and metadata for all animals.
     
@@ -7487,8 +8379,7 @@ def compare_slopes_within_cohorts(slopes_df: pd.DataFrame) -> Dict:
         slopes_df: DataFrame from calculate_animal_slopes()
         
     Returns:
-        Dictionary with within-cohort statistics and Levene's test results
-    """
+        Dictionary with within-cohort statistics and Levene's test results    """
     from scipy import stats
     
     print("\n" + "="*80)
@@ -7576,10 +8467,8 @@ def compare_slopes_between_cohorts(slopes_df: pd.DataFrame) -> Dict:
     Statistically compare average slopes between cohorts.
     
     Performs:
-    1. Independent samples t-test (or Welch's t-test if variances unequal)
-    2. Mann-Whitney U test (non-parametric alternative)
-    3. Effect size calculation (Cohen's d)
-    
+    1. Independent samples t-test (or Welch's t-test if variances unequal)    2. Mann-Whitney U test (non-parametric alternative)
+    3. Effect size calculation (Cohen's d)    
     Parameters:
         slopes_df: DataFrame from calculate_animal_slopes()
         
@@ -7778,8 +8667,8 @@ def plot_slopes_comparison(
     bp = ax1.boxplot(box_data, positions=positions, widths=0.5, patch_artist=True,
                      boxprops=dict(facecolor='lightblue', alpha=0.7),
                      medianprops=dict(color='red', linewidth=2),
-                     whiskerprops=dict(linewidth=1.5),
-                     capprops=dict(linewidth=1.5))
+                     whiskerprops=dict(linewidth=1.0),
+                     capprops=dict(linewidth=1.0))
     
     # Overlay individual points
     for i, ca_val in enumerate(ca_groups):
@@ -7808,7 +8697,7 @@ def plot_slopes_comparison(
     colors = ['dodgerblue', 'orangered']
     bars = ax2.bar(positions, means, yerr=sems, capsize=8, width=0.6, 
                    color=colors[:len(ca_groups)], alpha=0.7, 
-                   edgecolor='black', linewidth=1.5, error_kw={'linewidth': 2})
+                   edgecolor='black', linewidth=1.0, error_kw={'linewidth': 2})
     
     ax2.set_xticks(positions)
     ax2.set_xticklabels(ca_groups)
@@ -7843,7 +8732,7 @@ def plot_slopes_comparison(
     # Overall title
     if title is None:
         title = f'Slope Analysis: {measure} vs {time_unit}'
-    fig.suptitle(title, fontsize=14, fontweight='bold', y=0.98)
+    fig.suptitle(title, fontweight='bold', y=0.98)
     
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     
@@ -8229,8 +9118,7 @@ def test_slope_analysis():
     
     This will:
     1. Load two cohort CSV files via GUI
-    2. Calculate linear slopes for each animal's Total Change vs Week
-    3. Compare slopes within each cohort
+    2. Calculate linear slopes for each animal's Total Change vs Week    3. Compare slopes within each cohort
     4. Compare slopes between cohorts
     5. Generate plots and report
     """
@@ -8340,13 +9228,11 @@ def combine_cohorts_with_weeks(
     Combine cohort DataFrames into a single DataFrame aligned on Week number.
 
     Works for both ramp and nonramp cohorts.  Week numbers are derived from each
-    animal's own measurement timeline (Week 1 = first measurement week, Week 2 =
-    second, ...), so cohorts starting on different calendar dates still line up.
+    animal's own measurement timeline (Week 1 = first measurement week, Week 2 =    second, ...), so cohorts starting on different calendar dates still line up.
 
     Adds a 'CA_at_week' column from either:
       - the raw 'CA (%)' column in the data  (for ramp cohorts that store it per row), or
       - 'ca_schedule' in cohort_metadata  (for nonramp cohorts that don't have CA per row).
-
     Parameters
     ----------
     cohort_dfs : dict
@@ -8444,8 +9330,7 @@ def perform_cohort_week_mixed_anova(
     ------
     - Within-subjects:   Week  (1 ... N, chronological measurement order)
     - Between-subjects:  Cohort [ x  Sex]  (combined into a 'Group' label so
-                         pingouin's single-between-factor API can handle it)
-    - Post-hoc:
+                         pingouin's single-between-factor API can handle it)    - Post-hoc:
         - Week pairwise (paired Bonferroni, within-subjects)
         - Cohort pairwise on per-animal means (independent Bonferroni)
         - Simple effects: Week RM-ANOVA within each Cohort
@@ -8926,12 +9811,11 @@ def plot_weekly_means_by_cohort(
     n_cohorts = len(cohorts)
 
     # Colour / marker palette -- supports up to 5 cohorts
-    _COLORS  = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd']
     _MARKERS = ['o', 's', '^', 'D', 'v']
-    color_map  = {c: _COLORS[i % len(_COLORS)]  for i, c in enumerate(cohorts)}
+    color_map  = {c: _cohort_label_to_color(c) for c in cohorts}
     marker_map = {c: _MARKERS[i % len(_MARKERS)] for i, c in enumerate(cohorts)}
 
-    fig, ax = plt.subplots(figsize=(9, 6))
+    fig, ax = plt.subplots(figsize=(5, 3))
 
     group_cols = ['Cohort', 'Week']
     if by_sex and 'Sex' in combined_df.columns:
@@ -8957,7 +9841,7 @@ def plot_weekly_means_by_cohort(
                     wk_stats['Week'], wk_stats['mean'], yerr=wk_stats['sem'],
                     label=f"{cohort_label} ({sex_label})",
                     color=color, marker=marker, linestyle=linestyle,
-                    linewidth=2, markersize=6, capsize=4, alpha=0.85,
+                    linewidth=0.9, capsize=4, alpha=0.85,
                 )
         else:
             wk_stats = (
@@ -8970,7 +9854,7 @@ def plot_weekly_means_by_cohort(
                 wk_stats['Week'], wk_stats['mean'], yerr=wk_stats['sem'],
                 label=cohort_label,
                 color=color, marker=marker,
-                linewidth=2, markersize=6, capsize=4, alpha=0.9,
+                linewidth=0.9, capsize=4, alpha=0.9,
             )
 
     # X-axis annotation (CA% per week) from the first cohort with a schedule
@@ -8992,7 +9876,7 @@ def plot_weekly_means_by_cohort(
 
     if not annotated:
         ax.set_xticks(week_nums)
-        ax.set_xticklabels([f"Week {w}" for w in week_nums], fontsize=10)
+        ax.set_xticklabels([f"Week {w}" for w in week_nums])
 
     ax.set_xlabel("Week")
     ax.set_ylabel(f"{measure} (Mean +/- SEM)")
@@ -9002,8 +9886,8 @@ def plot_weekly_means_by_cohort(
         # Add line-style key entries so the legend explains solid = Males, dashed = Females
         from matplotlib.lines import Line2D
         key_handles = [
-            Line2D([0], [0], color='black', linewidth=1.5, linestyle='-',  label='── Males'),
-            Line2D([0], [0], color='black', linewidth=1.5, linestyle='--', label='- - Females'),
+            Line2D([0], [0], color='black', linewidth=1.0, linestyle='-',  label='── Males'),
+            Line2D([0], [0], color='black', linewidth=1.0, linestyle='--', label='- - Females'),
         ]
         handles, labels = ax.get_legend_handles_labels()
         ax.legend(
@@ -9108,11 +9992,11 @@ def generate_test_registry_report(save_path=None) -> str:
         "",
         f"    {'#':<3}  {'Test':<44}  Library / Function",
         f"    {'─'*3}  {'─'*44}  {'─'*26}",
-        "    1    Mixed ANOVA  (CA% × Week × Sex)               pingouin / pg.mixed_anova()",
-        "    2    Between-subjects ANOVA  (CA% × Sex)            pingouin / pg.anova()",
-        "    3    Pairwise post-hoc  (Bonferroni)                pingouin / pg.pairwise_tests()",
-        "    4    Cochran's Q  (binary outcomes across weeks)    statsmodels / cochrans_q()",
-        "    5    McNemar  (pairwise week post-hoc, binary)      statsmodels / mcnemar()",
+        "    1    Mixed ANOVA  (CA% × Week × Sex)        pingouin / pg.mixed_anova()",
+        "    2    Between-subjects ANOVA  (CA% × Sex)        pingouin / pg.anova()",
+        "    3    Pairwise post-hoc  (Bonferroni)        pingouin / pg.pairwise_tests()",
+        "    4    Cochran's Q  (binary outcomes across weeks)        statsmodels / cochrans_q()",
+        "    5    McNemar  (pairwise week post-hoc, binary)        statsmodels / mcnemar()",
         "",
         "    Multiple comparisons:",
         "      Bonferroni  — Test 3  (padjust='bonf')  and  Test 5  (p × n_pairs)",
@@ -9131,7 +10015,7 @@ def generate_test_registry_report(save_path=None) -> str:
         "",
     ]
     lines += _sub("LIBRARY")
-    lines += ["    pingouin.mixed_anova()     import pingouin as pg", ""]
+    lines += ["    pingouin.mixed_anova()    import pingouin as pg", ""]
     lines += _sub("INPUTS")
     lines += _tbl([
         ("data",    "Long-format DataFrame  (one row per ID × Week)",       "pd.DataFrame"),
@@ -9175,7 +10059,7 @@ def generate_test_registry_report(save_path=None) -> str:
         "",
     ]
     lines += _sub("LIBRARY")
-    lines += ["    pingouin.anova()     import pingouin as pg", ""]
+    lines += ["    pingouin.anova()    import pingouin as pg", ""]
     lines += _sub("INPUTS")
     lines += _tbl([
         ("data",    "subject_means_clean  — one row per animal  (week-averaged)",  "pd.DataFrame"),
@@ -9218,7 +10102,7 @@ def generate_test_registry_report(save_path=None) -> str:
         "",
     ]
     lines += _sub("LIBRARY")
-    lines += ["    pingouin.pairwise_tests()     import pingouin as pg", ""]
+    lines += ["    pingouin.pairwise_tests()    import pingouin as pg", ""]
     lines += _sub("INPUTS")
     lines += _tbl([
         ("data",    "subject_means  — one row per animal",               "pd.DataFrame"),
@@ -9385,6 +10269,7 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     Interactive analysis menu for the 0% vs 2% nonramp comparison.
     All analyses use Week as the time axis (not Day).
     Reports are auto-saved with timestamps.
+    Sex-based analyses removed; OLS assumption diagnostics added.
     """
     from datetime import datetime
 
@@ -9402,88 +10287,43 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print(f"\nAvailable measures : {available_measures}")
     print(f"CA% levels present : {[int(c) if c == int(c) else c for c in ca_levels]}")
     print()
-    print("  1. Full weekly omnibus  -- CA%  x  Week  x  Sex mixed ANOVA (all measures)")
-    print("  2. Sex-collapsed        -- 2-way CA%  x  Week mixed ANOVA + sphericity/GG (all measures)")
-    print("  3. Sex-stratified       -- CA%  x  Week mixed ANOVA separately for Males and Females")
-    print("  4. CA%-stratified       -- Week  x  Sex mixed ANOVA separately for 0% and 2%")
-    print("  5. Slope analysis       -- Compare rate of weight change between cohorts")
-    print("  6. Weight plots         -- Total/Daily Change by ID, Sex, and CA%")
-    print("  7. Behavioral plots     -- Nesting, lethargy, anxiety prevalence across weeks")
-    print("  8. Behavioral stats     -- Cohort x Week analysis of binary behavioral metrics")
-    print("  9. BH-FDR 2-way omnibus -- CA% x Week for all measures, BH-FDR corrected across measures")
-    print(" 10. Statistical registry -- Print/save methods documentation for all tests used")
-    print(" 11. Run all (1-10)")
+    print("  1. OLS assumption diagnostics -- 2-way model: Value ~ C(Week) + C(Cohort) + C(ID)")
+    print("  2. 2-way Cohort x Week mixed ANOVA + sphericity/GG + post-hoc (all measures)")
+    print("  3. Slope analysis       -- Compare rate of weight change between cohorts")
+    print("  4. Weight plots         -- Total/Daily Change by ID and CA%")
+    print("  5. Behavioral plots     -- Nesting, lethargy, anxiety prevalence across weeks")
+    print("  6. Behavioral stats     -- Cohort x Week analysis of binary behavioral metrics")
+    print("  7. BH-FDR 2-way omnibus -- CA% x Week for all measures, BH-FDR corrected across measures")
+    print("  8. Statistical registry -- Print/save methods documentation for all tests used")
+    print("  9. Run all (1-8)")
     print()
 
-    user_input = input("Select option (1-11) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '11')
+    run_all = (user_input == '9')
 
     # ------------------------------------------------------------------ #
-    # Option 1 / part of 7: Full weekly omnibus (CA%  x  Week  x  Sex)
+    # Option 1: OLS assumption diagnostics
     # ------------------------------------------------------------------ #
     if user_input == '1' or run_all:
         print("\n" + "=" * 80)
-        print("RUNNING: Full weekly omnibus (CA%  x  Week  x  Sex) -- all measures")
+        print("RUNNING: OLS assumption diagnostics -- Cohort x Week model")
         print("=" * 80)
-
-        all_sections = []
-        for i, measure in enumerate(available_measures):
-            w_mixed   = None
-            w_males   = None
-            w_females = None
-            w_ca0     = None
-            w_ca2     = None
-
+        diag_dir = Path(f"0v2_ols_diagnostics_{timestamp}")
+        for measure in available_measures:
             try:
-                w_mixed = perform_cross_cohort_mixed_anova_weekly(cohorts, measure=measure)
+                check_ols_assumptions_cross_cohort(
+                    cohorts, measure=measure,
+                    save_dir=diag_dir, show=True, save_report=True,
+                )
             except Exception as e:
-                print(f"  [WARNING] Omnibus week ANOVA failed for {measure}: {e}")
-
-            try:
-                w_males = perform_mixed_anova_sex_stratified_weekly(cohorts, sex="M", measure=measure)
-            except Exception as e:
-                print(f"  [WARNING] Sex-stratified (Males) week ANOVA failed for {measure}: {e}")
-
-            try:
-                w_females = perform_mixed_anova_sex_stratified_weekly(cohorts, sex="F", measure=measure)
-            except Exception as e:
-                print(f"  [WARNING] Sex-stratified (Females) week ANOVA failed for {measure}: {e}")
-
-            if 0.0 in ca_levels or 0 in ca_levels:
-                try:
-                    w_ca0 = perform_mixed_anova_ca_stratified_weekly(cohorts, ca_percent=0, measure=measure)
-                except Exception as e:
-                    print(f"  [WARNING] CA%-stratified (0%) week ANOVA failed for {measure}: {e}")
-
-            if 2.0 in ca_levels or 2 in ca_levels:
-                try:
-                    w_ca2 = perform_mixed_anova_ca_stratified_weekly(cohorts, ca_percent=2, measure=measure)
-                except Exception as e:
-                    print(f"  [WARNING] CA%-stratified (2%) week ANOVA failed for {measure}: {e}")
-
-            section = generate_cross_cohort_report_weekly(
-                mixed_results=w_mixed,
-                results_males=w_males,
-                results_females=w_females,
-                results_ca0=w_ca0,
-                results_ca2=w_ca2,
-                cohort_dfs=cohorts if i == 0 else None,
-                include_preamble=(i == 0),
-                include_footer=(i == len(available_measures) - 1),
-            )
-            all_sections.append(section)
-
-        combined_report = "\n\n".join(all_sections)
-        rpt_path = Path(f"0v2_weekly_omnibus_{timestamp}.txt")
-        rpt_path.write_text(combined_report, encoding='utf-8')
-        print(f"\n[OK] Report saved -> {rpt_path}")
+                print(f"  [WARNING] OLS diagnostics failed for {measure}: {e}")
 
     # ------------------------------------------------------------------ #
-    # Option 2 / part of 7: Sex-collapsed CA%  x  Week
+    # Option 2: 2-way Cohort x Week mixed ANOVA (sex collapsed)
     # ------------------------------------------------------------------ #
     if user_input == '2' or run_all:
         print("\n" + "=" * 80)
@@ -9507,94 +10347,14 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             all_sections.append(section)
 
         combined_report = "\n\n".join(all_sections)
-        rpt_path = Path(f"0v2_CA_x_week_sex_collapsed_{timestamp}.txt")
+        rpt_path = Path(f"0v2_CA_x_week_{timestamp}.txt")
         rpt_path.write_text(combined_report, encoding='utf-8')
         print(f"\n[OK] Report saved -> {rpt_path}")
 
     # ------------------------------------------------------------------ #
-    # Option 3 / part of 7: Sex-stratified (Males and Females separately)
+    # Option 3: Slope analysis
     # ------------------------------------------------------------------ #
     if user_input == '3' or run_all:
-        print("\n" + "=" * 80)
-        print("RUNNING: Sex-stratified CA%  x  Week -- Males and Females separately")
-        print("=" * 80)
-
-        all_sections = []
-        for i, measure in enumerate(available_measures):
-            m_males = None
-            m_females = None
-            try:
-                m_males = perform_mixed_anova_sex_stratified_weekly(
-                    cohorts, sex="M", measure=measure
-                )
-            except Exception as e:
-                print(f"  [WARNING] Sex-stratified (Males) week ANOVA failed for {measure}: {e}")
-            try:
-                m_females = perform_mixed_anova_sex_stratified_weekly(
-                    cohorts, sex="F", measure=measure
-                )
-            except Exception as e:
-                print(f"  [WARNING] Sex-stratified (Females) week ANOVA failed for {measure}: {e}")
-
-            section = generate_cross_cohort_report_weekly(
-                results_males=m_males,
-                results_females=m_females,
-                cohort_dfs=cohorts if i == 0 else None,
-                include_preamble=(i == 0),
-                include_footer=(i == len(available_measures) - 1),
-            )
-            all_sections.append(section)
-
-        combined_report = "\n\n".join(all_sections)
-        rpt_path = Path(f"0v2_sex_stratified_{timestamp}.txt")
-        rpt_path.write_text(combined_report, encoding='utf-8')
-        print(f"\n[OK] Report saved -> {rpt_path}")
-
-    # ------------------------------------------------------------------ #
-    # Option 4 / part of 7: CA%-stratified (0% and 2% separately)
-    # ------------------------------------------------------------------ #
-    if user_input == '4' or run_all:
-        print("\n" + "=" * 80)
-        print("RUNNING: CA%-stratified Week  x  Sex -- 0% and 2% separately")
-        print("=" * 80)
-
-        all_sections = []
-        for i, measure in enumerate(available_measures):
-            s_ca0 = None
-            s_ca2 = None
-            if 0.0 in ca_levels or 0 in ca_levels:
-                try:
-                    s_ca0 = perform_mixed_anova_ca_stratified_weekly(
-                        cohorts, ca_percent=0, measure=measure
-                    )
-                except Exception as e:
-                    print(f"  [WARNING] CA%-stratified (0%) week ANOVA failed for {measure}: {e}")
-            if 2.0 in ca_levels or 2 in ca_levels:
-                try:
-                    s_ca2 = perform_mixed_anova_ca_stratified_weekly(
-                        cohorts, ca_percent=2, measure=measure
-                    )
-                except Exception as e:
-                    print(f"  [WARNING] CA%-stratified (2%) week ANOVA failed for {measure}: {e}")
-
-            section = generate_cross_cohort_report_weekly(
-                results_ca0=s_ca0,
-                results_ca2=s_ca2,
-                cohort_dfs=cohorts if i == 0 else None,
-                include_preamble=(i == 0),
-                include_footer=(i == len(available_measures) - 1),
-            )
-            all_sections.append(section)
-
-        combined_report = "\n\n".join(all_sections)
-        rpt_path = Path(f"0v2_ca_stratified_{timestamp}.txt")
-        rpt_path.write_text(combined_report, encoding='utf-8')
-        print(f"\n[OK] Report saved -> {rpt_path}")
-
-    # ------------------------------------------------------------------ #
-    # Option 5 / part of 7: Slope analysis
-    # ------------------------------------------------------------------ #
-    if user_input == '5' or run_all:
         print("\n" + "=" * 80)
         print("RUNNING: Slope analysis")
         print("=" * 80)
@@ -9609,14 +10369,14 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 print(f"  [WARNING] Slope analysis failed for {measure}: {e}")
 
     # ------------------------------------------------------------------ #
-    # Option 6 / part of 7: Weight plots
+    # Option 4: Weight plots (by ID and CA%)
     # ------------------------------------------------------------------ #
-    if user_input == '6' or run_all:
+    if user_input == '4' or run_all:
         if not HAS_MATPLOTLIB:
             print("\n[WARNING] matplotlib not available -- cannot generate plots")
         else:
             print("\n" + "=" * 80)
-            print("GENERATING: Weight plots (by ID, Sex, CA%)")
+            print("GENERATING: Weight plots (by ID and CA%)")
             print("=" * 80)
 
             combined = combine_cohorts_for_analysis(cohorts)
@@ -9631,8 +10391,6 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             for fname, fn, arg in [
                 ("total_change_by_id",    plot_total_change_by_id,    combined),
                 ("daily_change_by_id",    plot_daily_change_by_id,    combined),
-                ("total_change_by_sex",   plot_total_change_by_sex,   combined),
-                ("daily_change_by_sex",   plot_daily_change_by_sex,   combined),
                 ("total_change_by_ca",    plot_total_change_by_ca,    combined),
                 ("daily_change_by_ca",    plot_daily_change_by_ca,    combined),
             ]:
@@ -9643,14 +10401,14 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 except Exception as e:
                     print(f"  [WARNING] Plot {fname} failed: {e}")
 
-            # Cohort x Week weekly mean plots (+/- SEM) -- same approach as ramp menus
+            # Cohort x Week weekly mean plots (+/- SEM)
             print("\n  Generating Cohort x Week weekly mean plots (+/- SEM)...")
             try:
                 combined_wk = combined[combined['Day'] >= 0].copy()
                 combined_wk = _add_week_column_across_cohorts(combined_wk)
 
                 for measure in available_measures:
-                    fname_wk = "cohort_week_{}_all.svg".format(
+                    fname_wk = "cohort_week_{}.svg".format(
                         measure.lower().replace(' ', '_')
                     )
                     try:
@@ -9666,25 +10424,7 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         if fig_wk:
                             figs[fname_wk] = fig_wk
                     except Exception as e:
-                        print(f"  [WARNING] Cohort x Week plot (all) for {measure} failed: {e}")
-
-                    fname_wk_sex = "cohort_week_{}_by_sex.svg".format(
-                        measure.lower().replace(' ', '_')
-                    )
-                    try:
-                        fig_wk_sex = plot_weekly_means_by_cohort(
-                            combined_wk,
-                            measure=measure,
-                            cohort_metadata=None,
-                            by_sex=True,
-                            title="{} by Cohort and Sex Across Weeks (0% vs 2%)".format(measure),
-                            save_path=plot_dir / fname_wk_sex,
-                            show=False,
-                        )
-                        if fig_wk_sex:
-                            figs[fname_wk_sex] = fig_wk_sex
-                    except Exception as e:
-                        print(f"  [WARNING] Cohort x Week plot (by sex) for {measure} failed: {e}")
+                        print(f"  [WARNING] Cohort x Week plot for {measure} failed: {e}")
             except Exception as e:
                 print(f"  [WARNING] Cohort x Week plots failed: {e}")
 
@@ -9697,9 +10437,9 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 plt.close('all')
 
     # ------------------------------------------------------------------ #
-    # Option 7 / part of 9: Behavioral metric plots
+    # Option 5: Behavioral metric plots
     # ------------------------------------------------------------------ #
-    if user_input == '7' or run_all:
+    if user_input == '5' or run_all:
         if not HAS_MATPLOTLIB:
             print("\n[WARNING] matplotlib not available -- cannot generate plots")
         else:
@@ -9729,9 +10469,9 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 plt.close('all')
 
     # ------------------------------------------------------------------ #
-    # Option 8 / part of 9: Behavioral stats (Cohort x Week)
+    # Option 6: Behavioral stats (Cohort x Week)
     # ------------------------------------------------------------------ #
-    if user_input == '8' or run_all:
+    if user_input == '6' or run_all:
         print("\n" + "=" * 80)
         print("RUNNING: Behavioral statistics (Cohort x Week for binary metrics)")
         print("=" * 80)
@@ -9772,9 +10512,9 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 print(f"  [WARNING] Interaction plot generation failed: {e}")
 
     # ------------------------------------------------------------------ #
-    # Option 9 / part of 10: BH-FDR 2-way omnibus (CA% × Week, all measures)
+    # Option 7: BH-FDR 2-way omnibus (CA% × Week, all measures)
     # ------------------------------------------------------------------ #
-    if user_input == '9' or run_all:
+    if user_input == '7' or run_all:
         print("\n" + "=" * 80)
         print("RUNNING: BH-FDR 2-Way Omnibus — CA% × Week (all measures)")
         print("=" * 80)
@@ -9809,8 +10549,8 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         adf = _r['analysis_df']
                         ca_levels_plot = sorted(adf['CA (%)'].unique())
                         weeks_plot = sorted(adf['Week'].unique())
-                        palette = ['steelblue', 'darkorange', 'darkgreen', 'purple']
-                        fig, ax = plt.subplots(figsize=(9, 6))
+                        palette = ['#1f77b4', '#f79520', '#2da048', '#9467bd']
+                        fig, ax = plt.subplots(figsize=(5, 3))
                         for idx, ca_val in enumerate(ca_levels_plot):
                             grp = adf[adf['CA (%)'] == ca_val]
                             stats_df = grp.groupby('Week')[_m].agg(['mean', 'sem']).reset_index()
@@ -9818,16 +10558,16 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                             lbl = f"{ca_val:.0f}% CA"
                             ax.errorbar(stats_df['Week'], stats_df['mean'],
                                         yerr=stats_df['sem'],
-                                        label=lbl, marker='o', markersize=8,
-                                        linewidth=2, capsize=5, color=color,
+                                        label=lbl, marker='o',
+                                        linewidth=0.9, capsize=5, color=color,
                                         markerfacecolor=color, markeredgecolor=color)
-                        ax.set_title(f'{_m}: Week × CA% Interaction', fontsize=13, weight='bold')
-                        ax.set_xlabel('Week', fontsize=12, weight='bold')
-                        ax.set_ylabel(f'{_m} (mean ± SEM)', fontsize=12, weight='bold')
+                        ax.set_title(f'{_m}: Week × CA% Interaction', weight='bold')
+                        ax.set_xlabel('Week', weight='bold')
+                        ax.set_ylabel(f'{_m} (mean ± SEM)', weight='bold')
                         ax.set_xticks(weeks_plot)
                         ax.set_xticklabels([str(int(w)) for w in weeks_plot])
                         ax.set_ylim(bottom=min(0, ax.get_ylim()[0]))
-                        ax.legend(title='CA%', loc='best', fontsize=10)
+                        ax.legend(title='CA%', loc='best')
                         ax.spines['top'].set_visible(False)
                         ax.spines['right'].set_visible(False)
                         fig.tight_layout()
@@ -9845,9 +10585,9 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 import traceback; traceback.print_exc()
 
     # ------------------------------------------------------------------ #
-    # Option 10 / part of run_all: Statistical test registry
+    # Option 8: Statistical test registry
     # ------------------------------------------------------------------ #
-    if user_input == '10' or run_all:
+    if user_input == '8' or run_all:
         print("\n" + "=" * 80)
         print("RUNNING: Statistical test registry (methods documentation)")
         print("=" * 80)
@@ -9868,6 +10608,7 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     """
     Interactive analysis menu for the 0% nonramp vs ramp comparison.
     All analyses use Week as the time axis.
+    Sex-based analyses removed; OLS assumption diagnostics added.
     """
     from datetime import datetime
 
@@ -9914,8 +10655,8 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     if ramp_label and ramp_schedule:
         print(f"Ramp CA schedule   : {ramp_schedule}")
     print()
-    print("  1. Weight plots by ID     -- Total/Daily Change per animal across time")
-    print("  2. Weight plots by Sex    -- Total/Daily Change averaged by sex across time")
+    print("  1. OLS assumption diagnostics -- 2-way model: Value ~ C(Week) + C(Cohort) + C(ID)")
+    print("  2. Weight plots by ID     -- Total/Daily Change per animal across time")
     print("  3. Cohort x Week plots    -- Weekly group means (+/- SEM) per cohort")
     print("  4. Behavioral plots       -- Nesting, Lethargy, Anxiety prevalence across weeks")
     print("  5. Cohort-avg plots       -- Total/Daily Change averaged by cohort (CA%-agnostic)")
@@ -9933,9 +10674,26 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     plot_dir = Path(f"0vramp_plots_{timestamp}")
 
     # ------------------------------------------------------------------ #
-    # Option 1: Weight plots by ID
+    # Option 1: OLS assumption diagnostics
     # ------------------------------------------------------------------ #
     if user_input == '1' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: OLS assumption diagnostics -- Cohort x Week model")
+        print("=" * 80)
+        diag_dir = Path(f"0vramp_ols_diagnostics_{timestamp}")
+        for measure in available_measures:
+            try:
+                check_ols_assumptions_cross_cohort(
+                    cohorts, measure=measure,
+                    save_dir=diag_dir, show=True, save_report=True,
+                )
+            except Exception as e:
+                print(f"  [WARNING] OLS diagnostics failed for {measure}: {e}")
+
+    # ------------------------------------------------------------------ #
+    # Option 2: Weight plots by ID
+    # ------------------------------------------------------------------ #
+    if user_input == '2' or run_all:
         if not HAS_MATPLOTLIB:
             print("\n[WARNING] matplotlib not available -- cannot generate plots")
         else:
@@ -9953,63 +10711,12 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ramp_mask = combined['Cohort'] == ramp_label
                 combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
             combined = combined[combined['Day'] >= 0].copy()  # remove 0% baseline (Day -1)
-            # Ramp Day 0 (first weight measurement) is included in plots — the weight
-            # itself is valid to display. Day 0 is only excluded from analyses (Option 6)
-            # where Daily/Total Change on Day 0 is meaningless (no prior baseline).
 
             plot_dir.mkdir(exist_ok=True)
             figs = {}
             for fname, fn in [
                 ("total_change_by_id", plot_total_change_by_id),
                 ("daily_change_by_id", plot_daily_change_by_id),
-            ]:
-                try:
-                    fig = fn(combined, save_path=plot_dir / f"{fname}.svg", show=False)
-                    if fig:
-                        figs[fname] = fig
-                except Exception as e:
-                    print(f"  [WARNING] Plot {fname} failed: {e}")
-
-            print(f"\n[OK] {len(figs)} plot(s) saved -> {plot_dir}")
-            show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
-            if show_now == 'y':
-                plt.show()
-            else:
-                plt.close('all')
-
-    # ------------------------------------------------------------------ #
-    # Option 2: Weight plots by Sex
-    # ------------------------------------------------------------------ #
-    if user_input == '2' or run_all:
-        if not HAS_MATPLOTLIB:
-            print("\n[WARNING] matplotlib not available -- cannot generate plots")
-        else:
-            print("\n" + "=" * 80)
-            print("GENERATING: Weight plots by Sex (Total Change and Daily Change)")
-            print("=" * 80)
-
-            combined = combine_cohorts_for_analysis(cohorts)
-            combined = clean_cohort(combined)
-            if 'Day' not in combined.columns:
-                combined = add_day_column_across_cohorts(combined)
-            # Ramp has no pre-experiment baseline: shift its days +1 so first real
-            # day aligns to Day 0 (matching the 0% group after baseline removal).
-            if ramp_label and 'Cohort' in combined.columns:
-                ramp_mask = combined['Cohort'] == ramp_label
-                combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
-            combined = combined[combined['Day'] >= 0].copy()  # remove 0% baseline (Day -1)
-            # By-sex plots average across cohort, so ramp Day 0 (no valid change baseline)
-            # is excluded to avoid skewing the sex-stratified means.
-            if ramp_label and 'Cohort' in combined.columns:
-                combined = combined[
-                    ~((combined['Cohort'] == ramp_label) & (combined['Day'] == 0))
-                ].copy()
-
-            plot_dir.mkdir(exist_ok=True)
-            figs = {}
-            for fname, fn in [
-                ("total_change_by_sex", plot_total_change_by_sex),
-                ("daily_change_by_sex", plot_daily_change_by_sex),
             ]:
                 try:
                     fig = fn(combined, save_path=plot_dir / f"{fname}.svg", show=False)
@@ -10037,8 +10744,6 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             print("=" * 80)
 
             try:
-                # Build week-aligned dataframe manually so we can apply the
-                # per-cohort day offset before filtering (ramp has no baseline).
                 combined_wk = combine_cohorts_for_analysis(cohorts)
                 combined_wk = clean_cohort(combined_wk)
                 if 'Day' not in combined_wk.columns:
@@ -10047,8 +10752,7 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     ramp_mask = combined_wk['Cohort'] == ramp_label
                     combined_wk.loc[ramp_mask, 'Day'] = combined_wk.loc[ramp_mask, 'Day'] + 1
                 combined_wk = combined_wk[combined_wk['Day'] >= 0].copy()
-                # Weekly plots average within each week bin; ramp Day 0 has no valid
-                # change value so exclude it before week numbers are assigned.
+                # Ramp Day 0 excluded before week assignment (no valid change value).
                 if ramp_label and 'Cohort' in combined_wk.columns:
                     combined_wk = combined_wk[
                         ~((combined_wk['Cohort'] == ramp_label) & (combined_wk['Day'] == 0))
@@ -10062,8 +10766,7 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 plot_dir.mkdir(exist_ok=True)
                 figs = {}
                 for measure in available_measures:
-                    # All sexes collapsed
-                    fname = "cohort_week_{}_all.svg".format(
+                    fname = "cohort_week_{}.svg".format(
                         measure.lower().replace(' ', '_')
                     )
                     try:
@@ -10079,26 +10782,7 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         if fig:
                             figs[fname] = fig
                     except Exception as e:
-                        print(f"  [WARNING] Cohort x Week plot (all) for {measure} failed: {e}")
-
-                    # Sex-stratified
-                    fname_sex = "cohort_week_{}_by_sex.svg".format(
-                        measure.lower().replace(' ', '_')
-                    )
-                    try:
-                        fig_sex = plot_weekly_means_by_cohort(
-                            combined_wk,
-                            measure=measure,
-                            cohort_metadata=None,
-                            by_sex=True,
-                            title="{} by Cohort and Sex Across Weeks (0% vs Ramp)".format(measure),
-                            save_path=plot_dir / fname_sex,
-                            show=False,
-                        )
-                        if fig_sex:
-                            figs[fname_sex] = fig_sex
-                    except Exception as e:
-                        print(f"  [WARNING] Cohort x Week plot (by sex) for {measure} failed: {e}")
+                        print(f"  [WARNING] Cohort x Week plot for {measure} failed: {e}")
 
                 print(f"\n[OK] {len(figs)} Cohort x Week plot(s) saved -> {plot_dir}")
                 show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
@@ -10192,8 +10876,6 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
         print("  Within each cohort: variability of slopes + Levene's test.")
         print("  Between cohorts   : Welch's t-test, Mann-Whitney U, Cohen's d.")
 
-        # Build the same properly aligned week-level dataframe that Option 3 uses,
-        # so the ramp day-offset is applied before week numbers are assigned.
         try:
             combined_wk = combine_cohorts_for_analysis(cohorts)
             combined_wk = clean_cohort(combined_wk)
@@ -10239,10 +10921,11 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
 def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     """
     Interactive analysis menu for the 2% nonramp vs ramp comparison.
+    Sex-based analyses removed; OLS assumption diagnostics added.
     Ramp data is treated identically to the 0vramp menu:
       - Ramp Day column shifted +1 so Day 0 = first real measurement.
       - Day 0 included in by-ID and by-cohort plots (raw weight valid).
-      - Day 0 excluded from by-sex, weekly-mean, and slope analyses
+      - Day 0 excluded from weekly-mean and slope analyses
         (Daily/Total Change undefined on Day 0 for the ramp).
     """
     from datetime import datetime
@@ -10291,8 +10974,8 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     if ramp_label and ramp_schedule:
         print(f"Ramp CA schedule   : {ramp_schedule}")
     print()
-    print("  1. Weight plots by ID     -- Total/Daily Change per animal across time")
-    print("  2. Weight plots by Sex    -- Total/Daily Change averaged by sex across time")
+    print("  1. OLS assumption diagnostics -- 2-way model: Value ~ C(Week) + C(Cohort) + C(ID)")
+    print("  2. Weight plots by ID     -- Total/Daily Change per animal across time")
     print("  3. Cohort x Week plots    -- Weekly group means (+/- SEM) per cohort")
     print("  4. Behavioral plots       -- Nesting, Lethargy, Anxiety prevalence across weeks")
     print("  5. Cohort-avg plots       -- Total/Daily Change averaged by cohort (CA%-agnostic)")
@@ -10312,9 +10995,26 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     plot_dir = Path(f"2vramp_plots_{timestamp}")
 
     # ------------------------------------------------------------------ #
-    # Option 1: Weight plots by ID
+    # Option 1: OLS assumption diagnostics
     # ------------------------------------------------------------------ #
     if user_input == '1' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: OLS assumption diagnostics -- Cohort x Week model")
+        print("=" * 80)
+        diag_dir = Path(f"2vramp_ols_diagnostics_{timestamp}")
+        for measure in available_measures:
+            try:
+                check_ols_assumptions_cross_cohort(
+                    cohorts, measure=measure,
+                    save_dir=diag_dir, show=True, save_report=True,
+                )
+            except Exception as e:
+                print(f"  [WARNING] OLS diagnostics failed for {measure}: {e}")
+
+    # ------------------------------------------------------------------ #
+    # Option 2: Weight plots by ID
+    # ------------------------------------------------------------------ #
+    if user_input == '2' or run_all:
         if not HAS_MATPLOTLIB:
             print("\n[WARNING] matplotlib not available -- cannot generate plots")
         else:
@@ -10338,51 +11038,6 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             for fname, fn in [
                 ("total_change_by_id", plot_total_change_by_id),
                 ("daily_change_by_id", plot_daily_change_by_id),
-            ]:
-                try:
-                    fig = fn(combined, save_path=plot_dir / f"{fname}.svg", show=False)
-                    if fig:
-                        figs[fname] = fig
-                except Exception as e:
-                    print(f"  [WARNING] Plot {fname} failed: {e}")
-
-            print(f"\n[OK] {len(figs)} plot(s) saved -> {plot_dir}")
-            show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
-            if show_now == 'y':
-                plt.show()
-            else:
-                plt.close('all')
-
-    # ------------------------------------------------------------------ #
-    # Option 2: Weight plots by Sex
-    # ------------------------------------------------------------------ #
-    if user_input == '2' or run_all:
-        if not HAS_MATPLOTLIB:
-            print("\n[WARNING] matplotlib not available -- cannot generate plots")
-        else:
-            print("\n" + "=" * 80)
-            print("GENERATING: Weight plots by Sex (Total Change and Daily Change)")
-            print("=" * 80)
-
-            combined = combine_cohorts_for_analysis(cohorts)
-            combined = clean_cohort(combined)
-            if 'Day' not in combined.columns:
-                combined = add_day_column_across_cohorts(combined)
-            if ramp_label and 'Cohort' in combined.columns:
-                ramp_mask = combined['Cohort'] == ramp_label
-                combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
-            combined = combined[combined['Day'] >= 0].copy()
-            # Ramp Day 0 excluded from sex-averaged plots (no valid change baseline).
-            if ramp_label and 'Cohort' in combined.columns:
-                combined = combined[
-                    ~((combined['Cohort'] == ramp_label) & (combined['Day'] == 0))
-                ].copy()
-
-            plot_dir.mkdir(exist_ok=True)
-            figs = {}
-            for fname, fn in [
-                ("total_change_by_sex", plot_total_change_by_sex),
-                ("daily_change_by_sex", plot_daily_change_by_sex),
             ]:
                 try:
                     fig = fn(combined, save_path=plot_dir / f"{fname}.svg", show=False)
@@ -10432,7 +11087,7 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 plot_dir.mkdir(exist_ok=True)
                 figs = {}
                 for measure in available_measures:
-                    fname = "cohort_week_{}_all.svg".format(
+                    fname = "cohort_week_{}.svg".format(
                         measure.lower().replace(' ', '_')
                     )
                     try:
@@ -10448,25 +11103,7 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         if fig:
                             figs[fname] = fig
                     except Exception as e:
-                        print(f"  [WARNING] Cohort x Week plot (all) for {measure} failed: {e}")
-
-                    fname_sex = "cohort_week_{}_by_sex.svg".format(
-                        measure.lower().replace(' ', '_')
-                    )
-                    try:
-                        fig_sex = plot_weekly_means_by_cohort(
-                            combined_wk,
-                            measure=measure,
-                            cohort_metadata=None,
-                            by_sex=True,
-                            title="{} by Cohort and Sex Across Weeks (2% vs Ramp)".format(measure),
-                            save_path=plot_dir / fname_sex,
-                            show=False,
-                        )
-                        if fig_sex:
-                            figs[fname_sex] = fig_sex
-                    except Exception as e:
-                        print(f"  [WARNING] Cohort x Week plot (by sex) for {measure} failed: {e}")
+                        print(f"  [WARNING] Cohort x Week plot for {measure} failed: {e}")
 
                 print(f"\n[OK] {len(figs)} Cohort x Week plot(s) saved -> {plot_dir}")
                 show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
@@ -10635,10 +11272,10 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     cohort_labels_w3 = sorted(week3_df['Cohort'].dropna().unique()) if 'Cohort' in week3_df.columns else list(cohorts.keys())
 
                     _BAR_COLORS = [
-                        {'face': 'steelblue',    'edge': 'navy'},
-                        {'face': 'darkorange',   'edge': 'saddlebrown'},
-                        {'face': 'seagreen',     'edge': 'darkgreen'},
-                        {'face': 'mediumpurple', 'edge': 'indigo'},
+                        {'face': '#1f77b4', 'edge': '#0d3d5c'},
+                        {'face': '#f79520', 'edge': '#8a5200'},
+                        {'face': '#2da048', 'edge': '#155224'},
+                        {'face': '#9467bd', 'edge': '#4a3560'},
                     ]
 
                     # Compute per-animal weekly means first, then take group average
@@ -10667,14 +11304,14 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         ax_w3.bar(
                             x_positions[i], mean_val,
                             width=bar_width,
-                            color=c['face'], edgecolor=c['edge'], linewidth=1.2,
+                            color=c['face'], edgecolor=c['edge'], linewidth=0.9,
                             zorder=2, label=cohort_lbl,
                         )
                         ax_w3.errorbar(
                             x_positions[i], mean_val,
                             yerr=sem_val,
                             fmt='none', color='black',
-                            capsize=6, capthick=1.5, linewidth=1.5,
+                            capsize=6, capthick=0.8, linewidth=1.0,
                             zorder=3,
                         )
                         jitter = rng_w3.uniform(-0.12, 0.12, size=len(vals))
@@ -10686,9 +11323,9 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
 
                     ax_w3.axhline(0, color='black', linewidth=0.8, linestyle='--', zorder=1)
                     ax_w3.set_xticks(x_positions)
-                    ax_w3.set_xticklabels(cohort_labels_w3, fontsize=11)
-                    ax_w3.set_ylabel('Total Weight Change (g) (mean \u00b1 SEM)', fontsize=12, weight='bold')
-                    ax_w3.set_title('Total Weight Change at Week 3 by Cohort', fontsize=13, weight='bold')
+                    ax_w3.set_xticklabels(cohort_labels_w3)
+                    ax_w3.set_ylabel('Total Weight Change (g) (mean \u00b1 SEM)', weight='bold')
+                    ax_w3.set_title('Total Weight Change at Week 3 by Cohort', weight='bold')
                     ax_w3.spines['top'].set_visible(False)
                     ax_w3.spines['right'].set_visible(False)
                     ax_w3.tick_params(direction='in', which='both', length=5)
@@ -10743,10 +11380,10 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
 
                 WEEK3_B = 3  # 1-indexed
                 _BAR_COLORS_B = [
-                    {'face': 'steelblue',    'edge': 'navy'},
-                    {'face': 'darkorange',   'edge': 'saddlebrown'},
-                    {'face': 'seagreen',     'edge': 'darkgreen'},
-                    {'face': 'mediumpurple', 'edge': 'indigo'},
+                    {'face': '#1f77b4', 'edge': '#0d3d5c'},
+                    {'face': '#f79520', 'edge': '#8a5200'},
+                    {'face': '#2da048', 'edge': '#155224'},
+                    {'face': '#9467bd', 'edge': '#4a3560'},
                 ]
 
                 # Build per-cohort per-animal % for each behavioral metric at Week 3
@@ -10776,7 +11413,7 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                                 )
 
                 fig_b, axes_b = plt.subplots(1, 3, figsize=(12, 5), sharey=False)
-                fig_b.suptitle('Behavioral Metrics at Week 3 by Cohort', fontsize=14, weight='bold', y=1.01)
+                fig_b.suptitle('Behavioral Metrics at Week 3 by Cohort', weight='bold', y=1.01)
 
                 rng_b = _np.random.default_rng(42)
                 x_positions_b = _np.arange(len(cohort_labels_b))
@@ -10792,14 +11429,14 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         ax_b.bar(
                             x_positions_b[i], mean_val,
                             width=bar_width_b,
-                            color=c['face'], edgecolor=c['edge'], linewidth=1.2,
+                            color=c['face'], edgecolor=c['edge'], linewidth=0.9,
                             zorder=2,
                         )
                         ax_b.errorbar(
                             x_positions_b[i], mean_val,
                             yerr=sem_val,
                             fmt='none', color='black',
-                            capsize=6, capthick=1.5, linewidth=1.5,
+                            capsize=6, capthick=0.8, linewidth=1.0,
                             zorder=3,
                         )
                         jitter = rng_b.uniform(-0.12, 0.12, size=len(vals))
@@ -10810,10 +11447,10 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         )
 
                     ax_b.set_xticks(x_positions_b)
-                    ax_b.set_xticklabels(cohort_labels_b, fontsize=10, rotation=15, ha='right')
+                    ax_b.set_xticklabels(cohort_labels_b, rotation=15, ha='right')
                     ax_b.set_ylim(0, 110)
-                    ax_b.set_ylabel('% of Observations (mean \u00b1 SEM)', fontsize=11, weight='bold')
-                    ax_b.set_title(panel_title, fontsize=12, weight='bold')
+                    ax_b.set_ylabel('% of Observations (mean \u00b1 SEM)', weight='bold')
+                    ax_b.set_title(panel_title, weight='bold')
                     ax_b.spines['top'].set_visible(False)
                     ax_b.spines['right'].set_visible(False)
                     ax_b.tick_params(direction='in', which='both', length=5)
