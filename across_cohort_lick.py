@@ -79,7 +79,7 @@ try:
         "figure.titlesize": 10,
         "lines.linewidth": 0.9,
         "lines.markersize": 3,
-        "figure.figsize": (4, 2.5),
+        "figure.figsize": (2.5, 3),
     })
 except ImportError:
     HAS_MATPLOTLIB = False
@@ -3828,6 +3828,103 @@ def _format_stratified_omnibus_report(
 # =============================================================================
 
 
+def _add_mwu_brackets(
+    ax,
+    group_values: list,
+    x_positions,
+    y_tops,
+    alpha: float = 0.05,
+) -> None:
+    """Draw Mann-Whitney U significance brackets for all bar group pairs.
+
+    Parameters
+    ----------
+    ax            : matplotlib Axes
+    group_values  : list of 1-D arrays, one per bar group (in x_positions order)
+    x_positions   : sequence of x coordinates for each bar
+    y_tops        : sequence of bar top heights (mean + SEM) for bracket placement
+    alpha         : family-wise significance threshold (Bonferroni-corrected)
+    """
+    from itertools import combinations as _comb
+    from scipy.stats import mannwhitneyu as _mwu
+
+    pairs = list(_comb(range(len(group_values)), 2))
+    if not pairs:
+        return
+
+    n_pairs = len(pairs)
+    pair_results = []
+    for i, j in pairs:
+        vi = group_values[i]
+        vj = group_values[j]
+        if len(vi) < 2 or len(vj) < 2:
+            continue
+        try:
+            _, p = _mwu(vi, vj, alternative='two-sided')
+        except Exception:
+            p = 1.0
+        pair_results.append((i, j, p))
+
+    if not pair_results:
+        return
+
+    def _stars(p_corr):
+        if p_corr < 0.001:
+            return '***'
+        if p_corr < 0.01:
+            return '**'
+        if p_corr < alpha:
+            return '*'
+        return 'ns'
+
+    # Use full data range for proportional sizing so negative values work correctly
+    _all_flat = [float(v) for arr in group_values for v in arr]
+    _data_min = min(_all_flat) if _all_flat else 0.0
+    _data_max = max(_all_flat) if _all_flat else 1.0
+    _data_range = max(abs(_data_max - _data_min), 1e-6)
+
+    ref_h = _data_range
+    y_pad = ref_h * 0.06
+    tick_h = ref_h * 0.03
+    step = ref_h * 0.14
+
+    current_tops = list(y_tops)
+    # For all-negative data (e.g. weight loss), brackets must sit above zero line
+    _all_negative = all(t <= 0 for t in y_tops)
+    # Sort so adjacent (short-span) pairs are drawn lower, wide spans higher
+    pair_results_sorted = sorted(pair_results, key=lambda r: abs(r[1] - r[0]))
+
+    for (i, j, p_raw) in pair_results_sorted:
+        p_corr = min(p_raw * n_pairs, 1.0)
+        label = _stars(p_corr)
+        x_i = x_positions[i]
+        x_j = x_positions[j]
+        raw_bracket_y = max(current_tops[k] for k in range(i, j + 1)) + y_pad
+        # Snap to above zero for downward (all-negative) bars
+        bracket_y = max(raw_bracket_y, 0.0) if _all_negative else raw_bracket_y
+
+        ax.plot(
+            [x_i, x_i, x_j, x_j],
+            [bracket_y, bracket_y + tick_h, bracket_y + tick_h, bracket_y],
+            color='black', linewidth=0.8, clip_on=False,
+        )
+        ax.text(
+            (x_i + x_j) / 2, bracket_y + tick_h,
+            label, ha='center', va='bottom', fontsize=7,
+        )
+        new_top = bracket_y + tick_h + step * 0.4
+        for k in range(i, j + 1):
+            current_tops[k] = max(current_tops[k], new_top)
+
+    # Preserve existing bottom (handles negative data); expand top for brackets
+    existing_bottom = ax.get_ylim()[0]
+    new_bottom = min(existing_bottom, _data_min - _data_range * 0.08)
+    raw_new_top = max(current_tops) + _data_range * 0.20
+    # For all-negative data the top should be at least 0 + bracket headroom
+    new_top = max(raw_new_top, _data_range * 0.20) if _all_negative else raw_new_top
+    ax.set_ylim(bottom=new_bottom, top=new_top)
+
+
 def plot_fecal_qq(
     cohort_dfs: Dict[str, pd.DataFrame],
     save_dir: Optional[Path] = None,
@@ -3980,7 +4077,7 @@ def plot_fecal_counts_by_week(
         group_labels = sorted(combined['CA%'].dropna().unique())
         group_col = 'CA%'
 
-    fig, ax = plt.subplots(figsize=(5, 3))
+    fig, ax = plt.subplots()
 
     for idx, grp_val in enumerate(group_labels):
         grp = combined[combined[group_col] == grp_val]
@@ -4075,7 +4172,7 @@ def plot_lick_measure_by_cohort(
         {'line': '#9467bd', 'marker': 'plum', 'edge': '#9467bd'}
     ]
     
-    fig, ax = plt.subplots(figsize=(5, 3))
+    fig, ax = plt.subplots()
     
     if group_by_sex:
         # Plot separate lines for each cohort × sex combination
@@ -4212,7 +4309,7 @@ def plot_omnibus_interaction(
     else:  # Sex
         palette = ['purple', 'green', '#9467bd', '#d62728']
 
-    fig, ax = plt.subplots(figsize=(5, 3))
+    fig, ax = plt.subplots()
     weeks = sorted(adf['Week'].unique())
 
     for idx, grp_val in enumerate(groups):
@@ -5121,7 +5218,7 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     print(f"  [WARNING] Column '{col_name}' not found — skipping plot.")
                     continue
                 try:
-                    fig_fl, ax_fl = plt.subplots(figsize=(5, 3))
+                    fig_fl, ax_fl = plt.subplots()
 
                     ca_levels_fl = sorted(combined_fl['CA%'].dropna().unique())
                     weeks_fl = sorted(combined_fl['Week'].dropna().unique())
@@ -5436,7 +5533,7 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     print(f"  [WARNING] Column '{col_name}' not found -- skipping plot.")
                     continue
                 try:
-                    fig_fl, ax_fl = plt.subplots(figsize=(5, 3))
+                    fig_fl, ax_fl = plt.subplots()
                     weeks_fl = sorted(combined_fl['Week'].dropna().unique())
 
                     for idx, cohort_lbl in enumerate(cohort_labels_fl):
@@ -5566,13 +5663,15 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     {'face': '#d62728', 'edge': '#8b0000'},
                 ]
 
-                fig_fec4, ax_fec4 = _plt.subplots(figsize=(6, 6))
+                fig_fec4, ax_fec4 = _plt.subplots()
                 x_positions = _np.arange(len(cohort_labels_fec))
                 bar_width = 0.5
                 rng_fec = _np.random.default_rng(42)
 
                 week4_df = combined_fec[combined_fec['Week'] == WEEK4_IDX]
 
+                _bar_vals = []
+                _bar_ytops = []
                 for i, cohort_lbl in enumerate(cohort_labels_fec):
                     if 'Cohort' in week4_df.columns:
                         grp = week4_df[week4_df['Cohort'] == cohort_lbl]
@@ -5582,6 +5681,8 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
 
                     mean_val = _np.mean(vals) if len(vals) > 0 else 0.0
                     sem_val  = (_np.std(vals, ddof=1) / _np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+                    _bar_vals.append(vals)
+                    _bar_ytops.append(mean_val + sem_val)
                     c = _BAR_COLORS[i % len(_BAR_COLORS)]
 
                     ax_fec4.bar(
@@ -5609,10 +5710,11 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ax_fec4.set_xticklabels(cohort_labels_fec)
                 ax_fec4.set_ylabel('Fecal Count (mean \u00b1 SEM)', weight='bold')
                 ax_fec4.set_title('Fecal Count at Week 4 by Cohort', weight='bold')
-                ax_fec4.set_ylim(bottom=0)
                 ax_fec4.spines['top'].set_visible(False)
                 ax_fec4.spines['right'].set_visible(False)
                 ax_fec4.tick_params(direction='in', which='both', length=5)
+                _add_mwu_brackets(ax_fec4, _bar_vals, x_positions, _bar_ytops)
+                ax_fec4.set_ylim(bottom=0)
                 fig_fec4.tight_layout()
 
                 fec4_plot_dir = Path(f"0vramp_lick_plots_{timestamp}")
@@ -5669,15 +5771,16 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  4. Fecal count plot     -- Mean fecal count across weeks, one line per cohort (mean \u00b1 SEM)")
     print("  5. Week 4 fecal bar     -- Bar plot of average fecal count at Week 4 per cohort (mean \u00b1 SEM + individual points)")
     print("  6. Week 3 lick bar      -- Bar plot of average Total Licks at Week 3 per cohort (mean \u00b1 SEM + individual points)")
-    print("  7. Run all (1-6)")
+    print("  7. Week 3 weight bar    -- Bar plot of average total weight change at Week 3 per cohort (mean \u00b1 SEM + individual points)")
+    print("  8. Run all (1-7)")
     print()
 
-    user_input = input("Select option (1-7) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-8) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '7')
+    run_all = (user_input == '8')
 
     # ------------------------------------------------------------------ #
     # Option 1: Lick plots by cohort (collapsed across sex)
@@ -5803,7 +5906,7 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     print(f"  [WARNING] Column '{col_name}' not found -- skipping plot.")
                     continue
                 try:
-                    fig_fl, ax_fl = plt.subplots(figsize=(5, 3))
+                    fig_fl, ax_fl = plt.subplots()
                     weeks_fl = sorted(combined_fl['Week'].dropna().unique())
 
                     for idx, cohort_lbl in enumerate(cohort_labels_fl):
@@ -5932,13 +6035,15 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     {'face': '#d62728', 'edge': '#8b0000'},
                 ]
 
-                fig_fec4, ax_fec4 = _plt.subplots(figsize=(6, 6))
+                fig_fec4, ax_fec4 = _plt.subplots()
                 x_positions = _np.arange(len(cohort_labels_fec))
                 bar_width = 0.5
                 rng_fec = _np.random.default_rng(42)
 
                 week4_df = combined_fec[combined_fec['Week'] == WEEK4_IDX]
 
+                _bar_vals = []
+                _bar_ytops = []
                 for i, cohort_lbl in enumerate(cohort_labels_fec):
                     if 'Cohort' in week4_df.columns:
                         grp = week4_df[week4_df['Cohort'] == cohort_lbl]
@@ -5948,6 +6053,8 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
 
                     mean_val = _np.mean(vals) if len(vals) > 0 else 0.0
                     sem_val  = (_np.std(vals, ddof=1) / _np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+                    _bar_vals.append(vals)
+                    _bar_ytops.append(mean_val + sem_val)
                     c = _BAR_COLORS[i % len(_BAR_COLORS)]
 
                     ax_fec4.bar(
@@ -5974,10 +6081,11 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ax_fec4.set_xticklabels(cohort_labels_fec)
                 ax_fec4.set_ylabel('Fecal Count (mean \u00b1 SEM)', weight='bold')
                 ax_fec4.set_title('Fecal Count at Week 4 by Cohort', weight='bold')
-                ax_fec4.set_ylim(bottom=0)
                 ax_fec4.spines['top'].set_visible(False)
                 ax_fec4.spines['right'].set_visible(False)
                 ax_fec4.tick_params(direction='in', which='both', length=5)
+                _add_mwu_brackets(ax_fec4, _bar_vals, x_positions, _bar_ytops)
+                ax_fec4.set_ylim(bottom=0)
                 fig_fec4.tight_layout()
 
                 fec4_plot_dir = Path(f"2vramp_lick_plots_{timestamp}")
@@ -6032,13 +6140,15 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     {'face': '#d62728', 'edge': '#8b0000'},
                 ]
 
-                fig_lk3, ax_lk3 = _plt.subplots(figsize=(6, 6))
+                fig_lk3, ax_lk3 = _plt.subplots()
                 x_positions = _np.arange(len(cohort_labels_lk3))
                 bar_width = 0.5
                 rng_lk3 = _np.random.default_rng(42)
 
                 week3_df = combined_lk3[combined_lk3['Week'] == WEEK3_IDX]
 
+                _bar_vals = []
+                _bar_ytops = []
                 for i, cohort_lbl in enumerate(cohort_labels_lk3):
                     if 'Cohort' in week3_df.columns:
                         grp = week3_df[week3_df['Cohort'] == cohort_lbl]
@@ -6048,6 +6158,8 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
 
                     mean_val = _np.mean(vals) if len(vals) > 0 else 0.0
                     sem_val  = (_np.std(vals, ddof=1) / _np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+                    _bar_vals.append(vals)
+                    _bar_ytops.append(mean_val + sem_val)
                     c = _BAR_COLORS[i % len(_BAR_COLORS)]
 
                     ax_lk3.bar(
@@ -6074,10 +6186,11 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ax_lk3.set_xticklabels(cohort_labels_lk3)
                 ax_lk3.set_ylabel('Total Licks (mean \u00b1 SEM)', weight='bold')
                 ax_lk3.set_title('Total Licks at Week 3 by Cohort', weight='bold')
-                ax_lk3.set_ylim(bottom=0)
                 ax_lk3.spines['top'].set_visible(False)
                 ax_lk3.spines['right'].set_visible(False)
                 ax_lk3.tick_params(direction='in', which='both', length=5)
+                _add_mwu_brackets(ax_lk3, _bar_vals, x_positions, _bar_ytops)
+                ax_lk3.set_ylim(bottom=0)
                 fig_lk3.tight_layout()
 
                 lk3_plot_dir = Path(f"2vramp_lick_plots_{timestamp}")
@@ -6088,6 +6201,118 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 print(f"[OK] Saved -> {lk3_save}")
             except Exception as e:
                 print(f"  [WARNING] Week 3 lick bar plot failed: {e}")
+                import traceback; traceback.print_exc()
+
+            show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                import matplotlib.pyplot as _plt
+                _plt.show()
+            else:
+                try:
+                    import matplotlib.pyplot as _plt
+                    _plt.close('all')
+                except Exception:
+                    pass
+
+    # ------------------------------------------------------------------ #
+    # Option 7: Week 3 Total Weight Change bar plot
+    # ------------------------------------------------------------------ #
+    if user_input == '7' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Week 3 Total Weight Change bar plot (mean \u00b1 SEM + individual points)")
+            print("="  * 80)
+            try:
+                import matplotlib.pyplot as _plt
+                import numpy as _np
+
+                combined_wt = combine_lick_cohorts(cohorts)
+                if 'Week' not in combined_wt.columns:
+                    combined_wt = add_week_column(combined_wt)
+
+                WEEK3_IDX = 2
+                if 'Cohort' in combined_wt.columns:
+                    cohort_labels_wt = sorted(combined_wt['Cohort'].dropna().unique())
+                else:
+                    cohort_labels_wt = list(cohorts.keys())
+
+                _wt_col = None
+                for _candidate in ['Total_Weight_Change', 'total_weight_change', 'Weight_Change', 'weight_change']:
+                    if _candidate in combined_wt.columns:
+                        _wt_col = _candidate
+                        break
+                if _wt_col is None:
+                    raise ValueError("No weight change column found (expected 'Total_Weight_Change' or 'total_weight_change')")
+
+                _BAR_COLORS = [
+                    {'face': 'steelblue',  'edge': 'navy'},
+                    {'face': 'darkorange', 'edge': 'saddlebrown'},
+                    {'face': '#9467bd',    'edge': '#4a3560'},
+                    {'face': '#d62728',    'edge': '#8b0000'},
+                ]
+
+                fig_wt, ax_wt = _plt.subplots()
+                x_positions = _np.arange(len(cohort_labels_wt))
+                bar_width = 0.5
+                rng_wt = _np.random.default_rng(42)
+
+                week3_wt = combined_wt[combined_wt['Week'] == WEEK3_IDX]
+
+                _bar_vals = []
+                _bar_ytops = []
+                for i, cohort_lbl in enumerate(cohort_labels_wt):
+                    if 'Cohort' in week3_wt.columns:
+                        grp = week3_wt[week3_wt['Cohort'] == cohort_lbl]
+                    else:
+                        grp = week3_wt
+                    vals = grp[_wt_col].dropna().values
+
+                    mean_val = _np.mean(vals) if len(vals) > 0 else 0.0
+                    sem_val  = (_np.std(vals, ddof=1) / _np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+                    _bar_vals.append(vals)
+                    _bar_ytops.append(mean_val + sem_val)
+                    c = _BAR_COLORS[i % len(_BAR_COLORS)]
+
+                    ax_wt.bar(
+                        x_positions[i], mean_val,
+                        width=bar_width,
+                        color=c['face'], edgecolor=c['edge'], linewidth=0.9,
+                        zorder=2, label=cohort_lbl,
+                    )
+                    ax_wt.errorbar(
+                        x_positions[i], mean_val,
+                        yerr=sem_val,
+                        fmt='none', color='black',
+                        capsize=6, capthick=0.8, linewidth=1.0,
+                        zorder=3,
+                    )
+                    jitter = rng_wt.uniform(-0.12, 0.12, size=len(vals))
+                    ax_wt.scatter(
+                        x_positions[i] + jitter, vals,
+                        color='black', s=30, alpha=0.7,
+                        zorder=4, linewidths=0,
+                    )
+
+                ax_wt.set_xticks(x_positions)
+                ax_wt.set_xticklabels(cohort_labels_wt)
+                ax_wt.set_ylabel('Total Weight Change on Lick Day (g, mean \u00b1 SEM)', weight='bold')
+                ax_wt.set_title('Week 3 Total Weight Change on Lick Detection Day', weight='bold')
+                ax_wt.spines['top'].set_visible(False)
+                ax_wt.spines['right'].set_visible(False)
+                ax_wt.tick_params(direction='in', which='both', length=5)
+                _add_mwu_brackets(ax_wt, _bar_vals, x_positions, _bar_ytops)
+                fig_wt.tight_layout()
+
+                wt_plot_dir = Path(f"2vramp_lick_plots_{timestamp}")
+                wt_plot_dir.mkdir(exist_ok=True)
+                wt_save = wt_plot_dir / "total_weight_change_week3_bar.svg"
+                fig_wt.savefig(wt_save, format='svg', dpi=200, bbox_inches='tight')
+                _plt.close(fig_wt)
+                print(f"[OK] Saved -> {wt_save}")
+            except Exception as e:
+                print(f"  [WARNING] Week 3 weight bar plot failed: {e}")
                 import traceback; traceback.print_exc()
 
             show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
@@ -6267,7 +6492,7 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     print(f"  [WARNING] Column '{col_name}' not found -- skipping plot.")
                     continue
                 try:
-                    fig_fl, ax_fl = plt.subplots(figsize=(5, 3))
+                    fig_fl, ax_fl = plt.subplots()
                     weeks_fl = sorted(combined_fl['Week'].dropna().unique())
 
                     for idx, cohort_lbl in enumerate(cohort_labels_fl):
@@ -6396,13 +6621,15 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     {'face': '#9467bd', 'edge': '#4a3560'},
                 ]
 
-                fig_fec4, ax_fec4 = _plt.subplots(figsize=(7, 6))
+                fig_fec4, ax_fec4 = _plt.subplots()
                 x_positions = _np.arange(len(cohort_labels_fec))
                 bar_width = 0.5
                 rng_fec = _np.random.default_rng(42)
 
                 week4_df = combined_fec[combined_fec['Week'] == WEEK4_IDX]
 
+                _bar_vals = []
+                _bar_ytops = []
                 for i, cohort_lbl in enumerate(cohort_labels_fec):
                     if 'Cohort' in week4_df.columns:
                         grp = week4_df[week4_df['Cohort'] == cohort_lbl]
@@ -6412,6 +6639,8 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
 
                     mean_val = _np.mean(vals) if len(vals) > 0 else 0.0
                     sem_val  = (_np.std(vals, ddof=1) / _np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+                    _bar_vals.append(vals)
+                    _bar_ytops.append(mean_val + sem_val)
                     c = _BAR_COLORS[i % len(_BAR_COLORS)]
 
                     ax_fec4.bar(
@@ -6438,10 +6667,11 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ax_fec4.set_xticklabels(cohort_labels_fec)
                 ax_fec4.set_ylabel('Fecal Count (mean \u00b1 SEM)', weight='bold')
                 ax_fec4.set_title('Fecal Count at Week 4 by Cohort', weight='bold')
-                ax_fec4.set_ylim(bottom=0)
                 ax_fec4.spines['top'].set_visible(False)
                 ax_fec4.spines['right'].set_visible(False)
                 ax_fec4.tick_params(direction='in', which='both', length=5)
+                _add_mwu_brackets(ax_fec4, _bar_vals, x_positions, _bar_ytops)
+                ax_fec4.set_ylim(bottom=0)
                 fig_fec4.tight_layout()
 
                 fec4_plot_dir = Path(f"all3_lick_plots_{timestamp}")
