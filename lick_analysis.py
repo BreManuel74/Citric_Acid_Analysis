@@ -39,7 +39,7 @@ except ImportError:
 #   'ramp'    → CA% increases each week; within-subjects factor = CA_Percent
 #   'nonramp' → CA% is constant across weeks; within-subjects factor = Week
 # ─────────────────────────────────────────────────────────────────────────────
-EXPERIMENT_MODE = 'ramp'  # << CHANGE THIS: 'ramp' or 'nonramp'
+EXPERIMENT_MODE = 'nonramp'  # << CHANGE THIS: 'ramp' or 'nonramp'
 # ─────────────────────────────────────────────────────────────────────────────
 
 _MODE_LABELS: dict = {
@@ -94,18 +94,60 @@ _MODE_LABELS: dict = {
 }
 _MLB = _MODE_LABELS[EXPERIMENT_MODE]  # active mode labels shorthand
 
+# Canonical cohort colours (match across_cohort.py)
+_COLOR_0PCT  = "#1f77b4"   # 0% CA
+_COLOR_2PCT  = "#f79520"   # 2% CA
+_COLOR_RAMP  = "#2da048"   # Ramp
+_COLOR_OTHER = "#7f3f98"   # fallback
+
+# Active cohort colour — change alongside EXPERIMENT_MODE if needed.
+# Default: ramp design → green; nonramp → blue (0% CA).
+# If running on 2% CA nonramp data, set to _COLOR_2PCT.
+COHORT_COLOR = _COLOR_RAMP if EXPERIMENT_MODE == 'ramp' else _COLOR_0PCT
+
+
+def _detect_cohort_color(path=None, df=None) -> str:
+    """Infer cohort color from the CSV file path, then from CA% values in the data."""
+    if path is not None:
+        p = str(path).lower()
+        if 'ramp' in p:
+            return _COLOR_RAMP
+        if '2%' in p or '2pct' in p:
+            return _COLOR_2PCT
+        if '0%' in p or '0pct' in p:
+            return _COLOR_0PCT
+    if df is not None:
+        for col in ('CA (%)', 'CA_Percent', 'ca_percent', 'CA%'):
+            if col in df.columns:
+                ca_vals = pd.to_numeric(df[col], errors='coerce').dropna().unique()
+                if len(ca_vals) > 2:
+                    return _COLOR_RAMP
+                if len(ca_vals) == 1:
+                    v = float(ca_vals[0])
+                    if v == 0:
+                        return _COLOR_0PCT
+                    if v == 2:
+                        return _COLOR_2PCT
+                    return _COLOR_OTHER
+                break
+    return COHORT_COLOR  # unchanged if nothing detected
+
 plt.rcParams["font.family"] = "sans-serif"
 plt.rcParams["font.sans-serif"] = ["Arial"]
 plt.rcParams["svg.fonttype"] = "none"
 
 plt.rcParams.update({
-    "font.size": 11,
-    "axes.titlesize": 13,
-    "axes.labelsize": 12,
-    "xtick.labelsize": 10,
-    "ytick.labelsize": 10,
-    "legend.fontsize": 10,
-    "figure.titlesize": 14,
+    "font.size": 8,
+    "axes.titlesize": 10,
+    "axes.labelsize": 8,
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 8,
+    "legend.fontsize": 7.5,
+    "figure.titlesize": 10,
+    "lines.linewidth": 0.9,
+    "lines.markersize": 3,
+    "figure.figsize": (5, 3),
+    "axes.xmargin": 0,
 })
 
 
@@ -1943,16 +1985,16 @@ def plot_weekly_averages(weekly_averages: Dict, save_path: Optional[Path] = None
     std_total_weight = np.array(std_total_weight)
     
     # ===== FIGURE 1: BEHAVIORAL METRICS =====
-    fig1, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+    fig1, (ax1, ax2) = plt.subplots(2, 1, figsize=(5, 6))
     x_pos = np.arange(len(dates))
     
     # Plot 1: Average Licks
     ax1.errorbar(x_pos, avg_licks, yerr=std_licks, 
-                marker='o', markersize=8, linewidth=2, capsize=5, 
+                marker='o', capsize=5, 
                 color='steelblue', markerfacecolor='lightblue', markeredgecolor='steelblue')
-    ax1.set_xlabel('Week', fontsize=12, weight='bold')
-    ax1.set_ylabel('Average Licks per Animal', fontsize=12, weight='bold')
-    ax1.set_title('Average Licks Across Weeks (±SEM)', fontsize=13, weight='bold')
+    ax1.set_xlabel('Week', weight='bold')
+    ax1.set_ylabel('Average Licks per Animal', weight='bold')
+    ax1.set_title('Average Licks Across Weeks (±SEM)', weight='bold')
     ax1.set_xticks(x_pos)
     ax1.set_xticklabels([f"{i+1}" for i in range(len(dates))])
     ax1.set_ylim(bottom=0)
@@ -1963,11 +2005,11 @@ def plot_weekly_averages(weekly_averages: Dict, save_path: Optional[Path] = None
     
     # Plot 2: Average Bouts
     ax2.errorbar(x_pos, avg_bouts, yerr=std_bouts,
-                marker='s', markersize=8, linewidth=2, capsize=5,
+                marker='s', capsize=5,
                 color='darkgreen', markerfacecolor='lightgreen', markeredgecolor='darkgreen')
-    ax2.set_xlabel('Week', fontsize=12, weight='bold')
-    ax2.set_ylabel('Average Bouts per Animal', fontsize=12, weight='bold')
-    ax2.set_title('Average Lick Bouts Across Weeks (±SEM)', fontsize=13, weight='bold')
+    ax2.set_xlabel('Week', weight='bold')
+    ax2.set_ylabel('Average Bouts per Animal', weight='bold')
+    ax2.set_title('Average Lick Bouts Across Weeks (±SEM)', weight='bold')
     ax2.set_xticks(x_pos)
     ax2.set_xticklabels([f"{i+1}" for i in range(len(dates))])
     ax2.set_ylim(bottom=0)
@@ -1976,20 +2018,20 @@ def plot_weekly_averages(weekly_averages: Dict, save_path: Optional[Path] = None
     ax2.grid(False)
     ax2.tick_params(direction='in', which='both', length=5)
     
-    fig1.suptitle('Behavioral Metrics Across Weeks', fontsize=16, weight='bold', y=0.96)
+    fig1.suptitle('Behavioral Metrics Across Weeks', weight='bold', y=0.96)
     fig1.tight_layout(rect=[0, 0.03, 1, 0.93])
     fig1.subplots_adjust(hspace=0.4)
     
     # ===== FIGURE 2: PHYSIOLOGICAL METRICS =====
-    fig2, (ax3, ax4, ax5) = plt.subplots(3, 1, figsize=(12, 14))
+    fig2, (ax3, ax4, ax5) = plt.subplots(3, 1, figsize=(5, 9))
     
     # Plot 3: Average Fecal Count
     ax3.errorbar(x_pos, avg_fecal, yerr=std_fecal,
-                marker='^', markersize=8, linewidth=2, capsize=5,
+                marker='^', capsize=5,
                 color='saddlebrown', markerfacecolor='tan', markeredgecolor='saddlebrown')
-    ax3.set_xlabel('Week', fontsize=12, weight='bold')
-    ax3.set_ylabel('Average Fecal Count per Animal', fontsize=12, weight='bold')
-    ax3.set_title('Average Fecal Count Across Weeks (±SEM)', fontsize=13, weight='bold')
+    ax3.set_xlabel('Week', weight='bold')
+    ax3.set_ylabel('Average Fecal Count per Animal', weight='bold')
+    ax3.set_title('Average Fecal Count Across Weeks (±SEM)', weight='bold')
     ax3.set_xticks(x_pos)
     ax3.set_xticklabels([f"{i+1}" for i in range(len(dates))])
     ax3.set_ylim(bottom=0)
@@ -2000,11 +2042,11 @@ def plot_weekly_averages(weekly_averages: Dict, save_path: Optional[Path] = None
     
     # Plot 4: Average Bottle Weight Loss
     ax4.errorbar(x_pos, avg_bottle_weight, yerr=std_bottle_weight,
-                marker='D', markersize=8, linewidth=2, capsize=5,
+                marker='D', capsize=5,
                 color='purple', markerfacecolor='plum', markeredgecolor='purple')
-    ax4.set_xlabel('Week', fontsize=12, weight='bold')
-    ax4.set_ylabel('Average Bottle Weight Loss per Animal (g)', fontsize=12, weight='bold')
-    ax4.set_title('Average Bottle Weight Loss Across Weeks (±SEM)', fontsize=13, weight='bold')
+    ax4.set_xlabel('Week', weight='bold')
+    ax4.set_ylabel('Average Bottle Weight Loss per Animal (g)', weight='bold')
+    ax4.set_title('Average Bottle Weight Loss Across Weeks (±SEM)', weight='bold')
     ax4.set_xticks(x_pos)
     ax4.set_xticklabels([f"{i+1}" for i in range(len(dates))])
     ax4.set_ylim(bottom=0)
@@ -2015,11 +2057,11 @@ def plot_weekly_averages(weekly_averages: Dict, save_path: Optional[Path] = None
     
     # Plot 5: Average Total Weight Loss
     ax5.errorbar(x_pos, avg_total_weight, yerr=std_total_weight,
-                marker='v', markersize=8, linewidth=2, capsize=5,
+                marker='v', capsize=5,
                 color='darkorange', markerfacecolor='orange', markeredgecolor='darkorange')
-    ax5.set_xlabel('Week', fontsize=12, weight='bold')
-    ax5.set_ylabel('Average Total Weight Loss per Animal (g)', fontsize=12, weight='bold')
-    ax5.set_title('Average Total Weight Loss Across Weeks (±SEM)', fontsize=13, weight='bold')
+    ax5.set_xlabel('Week', weight='bold')
+    ax5.set_ylabel('Average Total Weight Loss per Animal (g)', weight='bold')
+    ax5.set_title('Average Total Weight Loss Across Weeks (±SEM)', weight='bold')
     ax5.set_xticks(x_pos)
     ax5.set_xticklabels([f"{i+1}" for i in range(len(dates))])
     ax5.spines['top'].set_visible(False)
@@ -2027,7 +2069,7 @@ def plot_weekly_averages(weekly_averages: Dict, save_path: Optional[Path] = None
     ax5.grid(False)
     ax5.tick_params(direction='in', which='both', length=5)
     
-    fig2.suptitle('Physiological Metrics Across Weeks', fontsize=16, weight='bold', y=0.97)
+    fig2.suptitle('Physiological Metrics Across Weeks', weight='bold', y=0.97)
     fig2.tight_layout(rect=[0, 0.03, 1, 0.94])
     fig2.subplots_adjust(hspace=0.45)
     
@@ -3437,16 +3479,16 @@ def generate_lick_normality_qq_plots(
         residuals = _rm_residuals_qq(df_long, col)
         n = len(residuals)
 
-        fig, ax = plt.subplots(figsize=(5, 4.5))
+        fig, ax = plt.subplots()
         fig.suptitle(
             f'Q-Q Plot (residuals) \u2014 {lbl}',
-            fontsize=13, fontweight='bold',
+            fontweight='bold',
         )
-        ax.set_xlabel('Theoretical quantiles', fontsize=10)
-        ax.set_ylabel('Model residuals', fontsize=10)
+        ax.set_xlabel('Theoretical quantiles')
+        ax.set_ylabel('Model residuals')
         ax.set_title(
             f'Pooled within-subject residuals  (n={n})',
-            fontsize=10,
+            
         )
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
@@ -3454,7 +3496,7 @@ def generate_lick_normality_qq_plots(
         if n < 3:
             ax.text(0.5, 0.5, 'n < 3\ninsufficient data',
                     ha='center', va='center', transform=ax.transAxes,
-                    fontsize=9, color='gray')
+                    color='gray')
         else:
             (osm, osr), (slope, intercept, _r) = stats.probplot(residuals, dist='norm')
 
@@ -3477,7 +3519,7 @@ def generate_lick_normality_qq_plots(
                 ax.annotate(
                     f'SW W={sw_stat:.3f}, p={sw_p:.4f} [{sig}]',
                     xy=(0.03, 0.96), xycoords='axes fraction',
-                    fontsize=8, va='top',
+                    va='top',
                     bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.7),
                 )
 
@@ -3825,7 +3867,7 @@ def plot_lick_rate_histogram(
     Returns:
         Figure object
     """
-    fig, ax = plt.subplots(figsize=(14, 6))
+    fig, ax = plt.subplots()
     
     # X-axis: bin centers (for positioning bars)
     num_bins = len(mean_licks)
@@ -3834,14 +3876,14 @@ def plot_lick_rate_histogram(
     
     # Create bar plot with error bars - width equals bin size for continuous bars
     ax.bar(bin_centers, mean_licks, width=bin_size_min, color='steelblue', alpha=0.7, 
-           edgecolor='black', linewidth=1.2, yerr=sem_licks, capsize=3,
+           edgecolor='black', yerr=sem_licks, capsize=3,
            error_kw={'elinewidth': 1.5, 'capthick': 1.5}, align='center')
     
     # Labels and title
-    ax.set_xlabel('Time (minutes)', fontsize=12, weight='bold')
-    ax.set_ylabel(f'Licks per {bin_size_min}-Minute Bin (Mean ± SEM)', fontsize=12, weight='bold')
+    ax.set_xlabel('Time (minutes)', weight='bold')
+    ax.set_ylabel(f'Licks per {bin_size_min}-Minute Bin (Mean ± SEM)', weight='bold')
     ax.set_title(f'Lick Rate - Week: {date} (CA {ca_percent}%, n={n_animals})', 
-                fontsize=14, weight='bold')
+                weight='bold')
     
     # Format x-axis to show bin edges
     ax.set_xlim(0, num_bins * bin_size_min)
@@ -3924,7 +3966,7 @@ def plot_comprehensive_lick_rate(
     print(f"Total licks in 30 min: {mean_licks.sum():.1f}")
     
     # Create plot
-    fig, ax = plt.subplots(figsize=(14, 6))
+    fig, ax = plt.subplots()
     
     # X-axis: bin centers (for positioning bars)
     num_bins = len(mean_licks)
@@ -3933,14 +3975,14 @@ def plot_comprehensive_lick_rate(
     
     # Create bar plot with error bars - width equals bin size for continuous bars
     ax.bar(bin_centers, mean_licks, width=bin_size_min, color='darkgreen', alpha=0.7,
-           edgecolor='black', linewidth=1.2, yerr=sem_licks, capsize=3,
+           edgecolor='black', yerr=sem_licks, capsize=3,
            error_kw={'elinewidth': 1.5, 'capthick': 1.5}, align='center')
     
     # Labels and title
-    ax.set_xlabel('Time (minutes)', fontsize=12, weight='bold')
-    ax.set_ylabel(f'Licks per {bin_size_min}-Minute Bin (Mean ± SEM)', fontsize=12, weight='bold')
+    ax.set_xlabel('Time (minutes)', weight='bold')
+    ax.set_ylabel(f'Licks per {bin_size_min}-Minute Bin (Mean ± SEM)', weight='bold')
     ax.set_title(f'Comprehensive Lick Rate - All Weeks Combined (n={n_unique_animals} mice, {len(sorted_dates)} weeks)',
-                fontsize=14, weight='bold')
+                weight='bold')
     
     # Format x-axis to show bin edges
     ax.set_xlim(0, num_bins * bin_size_min)
@@ -4030,21 +4072,21 @@ def plot_comprehensive_lick_rate_by_ca(
     mean_licks = np.mean(all_animals_all_ca, axis=0)
     sem_licks  = np.std(all_animals_all_ca, axis=0, ddof=1) / np.sqrt(all_animals_all_ca.shape[0])
 
-    fig, ax = plt.subplots(figsize=(14, 6))
+    fig, ax = plt.subplots()
     num_bins   = len(mean_licks)
     bin_edges  = np.arange(0, num_bins * bin_size_min + bin_size_min, bin_size_min)
     bin_centers = bin_edges[:-1] + bin_size_min / 2
 
     ax.bar(bin_centers, mean_licks, width=bin_size_min, color='darkgreen', alpha=0.7,
-           edgecolor='black', linewidth=1.2, yerr=sem_licks, capsize=3,
+           edgecolor='black', yerr=sem_licks, capsize=3,
            error_kw={'elinewidth': 1.5, 'capthick': 1.5}, align='center')
 
-    ax.set_xlabel('Time (minutes)', fontsize=12, weight='bold')
-    ax.set_ylabel(f'Licks per {bin_size_min}-Minute Bin (Mean \u00b1 SEM)', fontsize=12, weight='bold')
+    ax.set_xlabel('Time (minutes)', weight='bold')
+    ax.set_ylabel(f'Licks per {bin_size_min}-Minute Bin (Mean \u00b1 SEM)', weight='bold')
     ax.set_title(
         f'Comprehensive Lick Rate - All CA% Combined '
         f'(n={n_unique} unique mice, {len(ca_groups)} CA% concentrations)',
-        fontsize=14, weight='bold')
+        weight='bold')
 
     ax.set_xlim(0, num_bins * bin_size_min)
     ax.set_xticks(bin_edges)
@@ -4128,7 +4170,7 @@ def plot_first_5min_by_week(
         print(f"  Week {i+1} ({data['ca_percent']}% CA): avg={avg_pcts[-1]:.2f}%, SEM={sem:.2f}%, n={n}")
     
     # Create figure
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots()
 
     # Mode-aware color selection
     if EXPERIMENT_MODE == 'ramp':
@@ -4156,13 +4198,13 @@ def plot_first_5min_by_week(
 
     # Add error bars
     ax.errorbar(x_positions, avg_pcts, yerr=sem_pcts,
-               fmt='none', ecolor='black', capsize=5, linewidth=2, capthick=2)
+               fmt='none', ecolor='black', capsize=5, capthick=2)
 
     # Ramp: add CA% labels above each bar
     if EXPERIMENT_MODE == 'ramp':
         for i, (bar, ca_pct_i) in enumerate(zip(bars, ca_percents)):
             ax.text(bar.get_x() + bar.get_width()/2., bar.get_height() + sem_pcts[i] + 1,
-                    f'{ca_pct_i}% CA', ha='center', va='bottom', fontsize=9, weight='bold')
+                    f'{ca_pct_i}% CA', ha='center', va='bottom', weight='bold')
 
     # Overlay individual mouse data points
     jitter_amount = 0.15
@@ -4174,10 +4216,10 @@ def plot_first_5min_by_week(
                   color='black', s=40, alpha=0.5, edgecolors='black', linewidths=0.5, zorder=10)
 
     # Formatting
-    ax.set_xlabel('Week', fontsize=12, weight='bold')
-    ax.set_ylabel('% of Licks in First 5 Minutes', fontsize=12, weight='bold')
+    ax.set_xlabel('Week', weight='bold')
+    ax.set_ylabel('% of Licks in First 5 Minutes', weight='bold')
     ax.set_title(f'Percentage of Licks in First 5 Minutes Across Weeks\n({_MLB["plot_suffix"]})',
-                fontsize=14, weight='bold')
+                weight='bold')
     ax.set_xticks(x_positions)
     ax.set_xticklabels(week_labels)
     ax.set_ylim(bottom=0)
@@ -4189,7 +4231,7 @@ def plot_first_5min_by_week(
     # Add sample size annotation
     n_animals = len(individual_data[0]) if individual_data else 0
     ax.text(0.98, 0.02, f'n={n_animals} mice per week', transform=ax.transAxes,
-           ha='right', va='bottom', fontsize=10, style='italic',
+           ha='right', va='bottom', style='italic',
            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
     
     plt.tight_layout()
@@ -4270,7 +4312,7 @@ def plot_first_5min_bouts_by_week(
         print(f"  Week {i+1} ({data['ca_percent']}% CA): avg={avg_bout_pcts[-1]:.2f}%, SEM={sem:.2f}%, n={n}")
     
     # Create figure
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots()
 
     # Mode-aware color selection (bout colors: green spectrum)
     if EXPERIMENT_MODE == 'ramp':
@@ -4298,13 +4340,13 @@ def plot_first_5min_bouts_by_week(
 
     # Add error bars
     ax.errorbar(x_positions, avg_bout_pcts, yerr=sem_bout_pcts,
-               fmt='none', ecolor='black', capsize=5, linewidth=2, capthick=2)
+               fmt='none', ecolor='black', capsize=5, capthick=2)
 
     # Ramp: add CA% labels above each bar
     if EXPERIMENT_MODE == 'ramp':
         for i, (bar, ca_pct_i) in enumerate(zip(bars, ca_percents)):
             ax.text(bar.get_x() + bar.get_width()/2., bar.get_height() + sem_bout_pcts[i] + 1,
-                    f'{ca_pct_i}% CA', ha='center', va='bottom', fontsize=9, weight='bold')
+                    f'{ca_pct_i}% CA', ha='center', va='bottom', weight='bold')
 
     # Overlay individual mouse data points
     jitter_amount = 0.15
@@ -4316,10 +4358,10 @@ def plot_first_5min_bouts_by_week(
                   color='black', s=40, alpha=0.5, edgecolors='black', linewidths=0.5, zorder=10)
 
     # Formatting
-    ax.set_xlabel('Week', fontsize=12, weight='bold')
-    ax.set_ylabel('% of Bouts in First 5 Minutes', fontsize=12, weight='bold')
+    ax.set_xlabel('Week', weight='bold')
+    ax.set_ylabel('% of Bouts in First 5 Minutes', weight='bold')
     ax.set_title(f'Percentage of Bouts in First 5 Minutes Across Weeks\n({_MLB["plot_suffix"]})',
-                fontsize=14, weight='bold')
+                weight='bold')
     ax.set_xticks(x_positions)
     ax.set_xticklabels(week_labels)
     ax.set_ylim(bottom=0)
@@ -4331,7 +4373,7 @@ def plot_first_5min_bouts_by_week(
     # Add sample size annotation
     n_animals = len(individual_data[0]) if individual_data else 0
     ax.text(0.98, 0.02, f'n={n_animals} mice per week', transform=ax.transAxes,
-           ha='right', va='bottom', fontsize=10, style='italic',
+           ha='right', va='bottom', style='italic',
            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
     
     plt.tight_layout()
@@ -4428,7 +4470,7 @@ def plot_first_5min_bouts_by_week_with_lines(
     print(f"\nTracking {len(animal_trajectories)} individual animals across {n_weeks} weeks")
     
     # Create figure
-    fig, ax = plt.subplots(figsize=(12, 7))
+    fig, ax = plt.subplots()
 
     # Mode-aware color selection (bout colors: green spectrum)
     if EXPERIMENT_MODE == 'ramp':
@@ -4458,13 +4500,13 @@ def plot_first_5min_bouts_by_week_with_lines(
 
     # Add error bars
     ax.errorbar(x_positions, avg_bout_pcts, yerr=sem_bout_pcts,
-               fmt='none', ecolor='black', capsize=5, linewidth=2, capthick=2, zorder=6)
+               fmt='none', ecolor='black', capsize=5, capthick=2, zorder=6)
 
     # Ramp: add CA% labels above each bar
     if EXPERIMENT_MODE == 'ramp':
         for i, (bar, ca_pct_i) in enumerate(zip(bars, ca_percents)):
             ax.text(bar.get_x() + bar.get_width()/2., bar.get_height() + sem_bout_pcts[i] + 1,
-                    f'{ca_pct_i}% CA', ha='center', va='bottom', fontsize=9, weight='bold')
+                    f'{ca_pct_i}% CA', ha='center', va='bottom', weight='bold')
     
     # Plot individual animal trajectories with lines
     cmap = plt.cm.tab20  # Colormap with 20 distinct colors
@@ -4486,10 +4528,10 @@ def plot_first_5min_bouts_by_week_with_lines(
                       edgecolors='black', linewidths=0.8, zorder=9)
     
     # Formatting
-    ax.set_xlabel('Week', fontsize=12, weight='bold')
-    ax.set_ylabel('% of Bouts in First 5 Minutes', fontsize=12, weight='bold')
+    ax.set_xlabel('Week', weight='bold')
+    ax.set_ylabel('% of Bouts in First 5 Minutes', weight='bold')
     ax.set_title(f'Individual Mouse Trajectories of Bout Percentage Across Weeks\n({_MLB["plot_suffix"]})',
-                fontsize=14, weight='bold')
+                weight='bold')
     ax.set_xticks(x_positions)
     ax.set_xticklabels(week_labels)
     ax.set_ylim(bottom=0)
@@ -4501,7 +4543,7 @@ def plot_first_5min_bouts_by_week_with_lines(
     # Add sample size annotation
     n_animals = len(animal_trajectories)
     ax.text(0.98, 0.02, f'n={n_animals} mice tracked across weeks', transform=ax.transAxes,
-           ha='right', va='bottom', fontsize=10, style='italic',
+           ha='right', va='bottom', style='italic',
            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
     
     plt.tight_layout()
@@ -4582,7 +4624,7 @@ def plot_time_to_50pct_by_week(
         print(f"  Week {i+1} ({data['ca_percent']}% CA): avg={avg_times[-1]:.2f} min, SEM={sem:.2f} min, n={n}")
     
     # Create figure
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots()
 
     # Mode-aware color selection
     if EXPERIMENT_MODE == 'ramp':
@@ -4610,13 +4652,13 @@ def plot_time_to_50pct_by_week(
 
     # Add error bars
     ax.errorbar(x_positions, avg_times, yerr=sem_times,
-               fmt='none', ecolor='black', capsize=5, linewidth=2, capthick=2)
+               fmt='none', ecolor='black', capsize=5, capthick=2)
 
     # Ramp: add CA% labels above each bar
     if EXPERIMENT_MODE == 'ramp':
         for i, (bar, ca_pct_i) in enumerate(zip(bars, ca_percents)):
             ax.text(bar.get_x() + bar.get_width()/2., bar.get_height() + sem_times[i] + 0.5,
-                    f'{ca_pct_i}% CA', ha='center', va='bottom', fontsize=9, weight='bold')
+                    f'{ca_pct_i}% CA', ha='center', va='bottom', weight='bold')
 
     # Overlay individual mouse data points
     jitter_amount = 0.15
@@ -4628,10 +4670,10 @@ def plot_time_to_50pct_by_week(
                   color='black', s=40, alpha=0.5, edgecolors='black', linewidths=0.5, zorder=10)
 
     # Formatting
-    ax.set_xlabel('Week', fontsize=12, weight='bold')
-    ax.set_ylabel('Time to 50% of Total Licks (minutes)', fontsize=12, weight='bold')
+    ax.set_xlabel('Week', weight='bold')
+    ax.set_ylabel('Time to 50% of Total Licks (minutes)', weight='bold')
     ax.set_title(f'Time to 50% of Total Licks Across Weeks\n({_MLB["plot_suffix"]})',
-                fontsize=14, weight='bold')
+                weight='bold')
     ax.set_xticks(x_positions)
     ax.set_xticklabels(week_labels)
     ax.set_ylim(bottom=0)
@@ -4643,7 +4685,7 @@ def plot_time_to_50pct_by_week(
     # Add sample size annotation
     n_animals = len(individual_data[0]) if individual_data else 0
     ax.text(0.98, 0.02, f'n={n_animals} mice per week', transform=ax.transAxes,
-           ha='right', va='bottom', fontsize=10, style='italic',
+           ha='right', va='bottom', style='italic',
            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
     
     plt.tight_layout()
@@ -4740,7 +4782,7 @@ def plot_time_to_50pct_by_week_with_lines(
     print(f"\nTracking {len(animal_trajectories)} individual animals across {n_weeks} weeks")
     
     # Create figure
-    fig, ax = plt.subplots(figsize=(12, 7))
+    fig, ax = plt.subplots()
 
     # Mode-aware color selection
     if EXPERIMENT_MODE == 'ramp':
@@ -4770,13 +4812,13 @@ def plot_time_to_50pct_by_week_with_lines(
 
     # Add error bars
     ax.errorbar(x_positions, avg_times, yerr=sem_times,
-               fmt='none', ecolor='black', capsize=5, linewidth=2, capthick=2, zorder=6)
+               fmt='none', ecolor='black', capsize=5, capthick=2, zorder=6)
 
     # Ramp: add CA% labels above each bar
     if EXPERIMENT_MODE == 'ramp':
         for i, (bar, ca_pct_i) in enumerate(zip(bars, ca_percents)):
             ax.text(bar.get_x() + bar.get_width()/2., bar.get_height() + sem_times[i] + 0.5,
-                    f'{ca_pct_i}% CA', ha='center', va='bottom', fontsize=9, weight='bold')
+                    f'{ca_pct_i}% CA', ha='center', va='bottom', weight='bold')
     
     # Plot individual animal trajectories with lines
     cmap = plt.cm.tab20  # Colormap with 20 distinct colors
@@ -4798,10 +4840,10 @@ def plot_time_to_50pct_by_week_with_lines(
                       edgecolors='black', linewidths=0.8, zorder=9)
     
     # Formatting
-    ax.set_xlabel('Week', fontsize=12, weight='bold')
-    ax.set_ylabel('Time to 50% of Total Licks (minutes)', fontsize=12, weight='bold')
+    ax.set_xlabel('Week', weight='bold')
+    ax.set_ylabel('Time to 50% of Total Licks (minutes)', weight='bold')
     ax.set_title(f'Individual Mouse Trajectories of Time to 50% Across Weeks\n({_MLB["plot_suffix"]})',
-                fontsize=14, weight='bold')
+                weight='bold')
     ax.set_xticks(x_positions)
     ax.set_xticklabels(week_labels)
     ax.set_ylim(bottom=0)
@@ -4813,7 +4855,7 @@ def plot_time_to_50pct_by_week_with_lines(
     # Add sample size annotation
     n_animals = len(animal_trajectories)
     ax.text(0.98, 0.02, f'n={n_animals} mice tracked across weeks', transform=ax.transAxes,
-           ha='right', va='bottom', fontsize=10, style='italic',
+           ha='right', va='bottom', style='italic',
            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
     
     plt.tight_layout()
@@ -4910,7 +4952,7 @@ def plot_first_5min_by_week_with_lines(
     print(f"\nTracking {len(animal_trajectories)} individual animals across {n_weeks} weeks")
     
     # Create figure
-    fig, ax = plt.subplots(figsize=(12, 7))
+    fig, ax = plt.subplots()
 
     # Mode-aware color selection
     if EXPERIMENT_MODE == 'ramp':
@@ -4940,13 +4982,13 @@ def plot_first_5min_by_week_with_lines(
 
     # Add error bars
     ax.errorbar(x_positions, avg_pcts, yerr=sem_pcts,
-               fmt='none', ecolor='black', capsize=5, linewidth=2, capthick=2, zorder=6)
+               fmt='none', ecolor='black', capsize=5, capthick=2, zorder=6)
 
     # Ramp: add CA% labels above each bar
     if EXPERIMENT_MODE == 'ramp':
         for i, (bar, ca_pct_i) in enumerate(zip(bars, ca_percents)):
             ax.text(bar.get_x() + bar.get_width()/2., bar.get_height() + sem_pcts[i] + 1,
-                    f'{ca_pct_i}% CA', ha='center', va='bottom', fontsize=9, weight='bold')
+                    f'{ca_pct_i}% CA', ha='center', va='bottom', weight='bold')
     
     # Plot individual animal trajectories with lines
     cmap = plt.cm.tab20  # Colormap with 20 distinct colors
@@ -4968,10 +5010,10 @@ def plot_first_5min_by_week_with_lines(
                       edgecolors='black', linewidths=0.8, zorder=9)
     
     # Formatting
-    ax.set_xlabel('Week', fontsize=12, weight='bold')
-    ax.set_ylabel('% of Licks in First 5 Minutes', fontsize=12, weight='bold')
+    ax.set_xlabel('Week', weight='bold')
+    ax.set_ylabel('% of Licks in First 5 Minutes', weight='bold')
     ax.set_title(f'Individual Mouse Trajectories of Lick Percentage Across Weeks\n({_MLB["plot_suffix"]})',
-                fontsize=14, weight='bold')
+                weight='bold')
     ax.set_xticks(x_positions)
     ax.set_xticklabels(week_labels)
     ax.set_ylim(bottom=0)
@@ -4983,7 +5025,7 @@ def plot_first_5min_by_week_with_lines(
     # Add sample size annotation
     n_animals = len(animal_trajectories)
     ax.text(0.98, 0.02, f'n={n_animals} mice tracked across weeks', transform=ax.transAxes,
-           ha='right', va='bottom', fontsize=10, style='italic',
+           ha='right', va='bottom', style='italic',
            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
     
     plt.tight_layout()
@@ -5118,31 +5160,31 @@ def plot_interaction_effects(
                 females_sems.append(np.nan)
         
         # Create plot
-        fig, ax = plt.subplots(figsize=(10, 6))
+        fig, ax = plt.subplots()
         
         # Plot lines for each sex
         ax.errorbar(ca_levels, males_means, yerr=males_sems,
-                   marker='o', markersize=8, linewidth=2, capsize=5,
-                   color='steelblue', markerfacecolor='lightblue', markeredgecolor='steelblue',
+                   marker='s', capsize=5,
+                   color=COHORT_COLOR, markerfacecolor=COHORT_COLOR, markeredgecolor=COHORT_COLOR,
                    label='Male', linestyle='-')
         
         ax.errorbar(ca_levels, females_means, yerr=females_sems,
-                   marker='s', markersize=8, linewidth=2, capsize=5,
-                   color='coral', markerfacecolor='lightcoral', markeredgecolor='coral',
+                   marker='o', capsize=5,
+                   color=COHORT_COLOR, markerfacecolor=COHORT_COLOR, markeredgecolor=COHORT_COLOR,
                    label='Female', linestyle='--')
         
         # Labels and title
-        ax.set_xlabel('Citric Acid Concentration (%)', fontsize=12, weight='bold')
-        ax.set_ylabel(measure_to_ylabel[measure], fontsize=12, weight='bold')
+        ax.set_xlabel('Citric Acid Concentration (%)', weight='bold')
+        ax.set_ylabel(measure_to_ylabel[measure], weight='bold')
         ax.set_title(f'Sex × CA% Interaction: {measure_name}\n(p = {results["p_value_interaction"]:.4f})',
-                    fontsize=14, weight='bold')
+                    weight='bold')
         
         # Format x-axis
         ax.set_xticks(ca_levels)
         ax.set_xticklabels([f'{int(ca)}%' for ca in ca_levels])
         
         # Add legend
-        ax.legend(loc='best', fontsize=11, frameon=True, shadow=True)
+        ax.legend(loc='best', frameon=True, shadow=True)
         
         # Remove top and right spines
         ax.spines['top'].set_visible(False)
@@ -5170,6 +5212,7 @@ def plot_interaction_effects(
 
 def load_master_csv(csv_path: Path) -> pd.DataFrame:
     """Load the master metadata CSV with all weeks of data."""
+    global COHORT_COLOR
     if not csv_path.exists():
         raise FileNotFoundError(f"Master CSV not found: {csv_path}")
     
@@ -5180,6 +5223,7 @@ def load_master_csv(csv_path: Path) -> pd.DataFrame:
     if 'date' in df.columns:
         df['date'] = df['date'].astype(str).str.strip()
     
+    COHORT_COLOR = _detect_cohort_color(csv_path, df)
     return df
 
 
@@ -5535,6 +5579,161 @@ def process_single_week(
     }
 
 
+def plot_licks_vs_weight_correlation(
+    weekly_averages: Dict,
+    save_path: Optional[Path] = None,
+    show: bool = True,
+) -> Optional[plt.Figure]:
+    """Scatter plot of total lick count vs total weight change (%) per animal per session.
+
+    Each animal is assigned a unique colour. All points use circle markers.
+    A Spearman rank correlation and linear trend line are overlaid.
+
+    Parameters:
+        weekly_averages: Dictionary from compute_weekly_averages
+        save_path: Optional path to save the figure (SVG)
+        show: Whether to display the plot interactively
+
+    Returns:
+        The matplotlib Figure object, or None if no data.
+    """
+    print("\n" + "=" * 80)
+    print("PLOTTING: Total Licks vs Total Weight Change (%) – per-animal correlation")
+    print("=" * 80)
+
+    # ── Collect per-animal, per-week observations ──────────────────────────
+    records = []
+
+    if EXPERIMENT_MODE == 'ramp':
+        sorted_dates = sorted(weekly_averages.keys(),
+                              key=lambda d: weekly_averages[d]['ca_percent'])
+    else:
+        sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+
+    for week_idx, date in enumerate(sorted_dates):
+        data = weekly_averages[date]
+        lick_arr = np.asarray(data['avg_licks_per_animal'], dtype=float)
+        wt_arr   = np.asarray(data['avg_total_weight_per_animal'], dtype=float)
+        ids      = data.get('animal_ids', [f"Animal_{j+1}" for j in range(len(lick_arr))])
+        ca_pct   = data['ca_percent']
+        wk_label = f"Week {week_idx + 1}"
+
+        for animal_id, licks, wt in zip(ids, lick_arr, wt_arr):
+            records.append({
+                'animal_id':  str(animal_id),
+                'licks':      licks,
+                'weight_pct': wt,
+                'week_idx':   week_idx,
+                'week_label': wk_label,
+                'ca_percent': ca_pct,
+            })
+
+    if not records:
+        print("ERROR: No per-animal data found in weekly_averages.")
+        return None
+
+    # ── Build per-animal colour map ────────────────────────────────────────
+    unique_animals = list(dict.fromkeys(r['animal_id'] for r in records))  # preserve order
+    n_animals = len(unique_animals)
+
+    cmap = plt.cm.tab20
+    animal_color = {aid: cmap(i % 20) for i, aid in enumerate(unique_animals)}
+
+    print(f"Found {n_animals} unique animals across {len(sorted_dates)} weeks "
+          f"({len(records)} total observations)")
+
+    # ── Spearman rank correlation across all observations ──────────────────
+    all_licks = np.array([r['licks']      for r in records])
+    all_wt    = np.array([r['weight_pct'] for r in records])
+
+    valid_mask = np.isfinite(all_licks) & np.isfinite(all_wt)
+    all_licks_v = all_licks[valid_mask]
+    all_wt_v    = all_wt[valid_mask]
+
+    if len(all_licks_v) >= 3:
+        rho, p_val = stats.spearmanr(all_wt_v, all_licks_v)
+        # Linear regression for visual trend line (on raw values)
+        slope, intercept, *_ = stats.linregress(all_wt_v, all_licks_v)
+        x_line = np.linspace(all_wt_v.min(), all_wt_v.max(), 200)
+        y_line = slope * x_line + intercept
+        has_corr = True
+        print(f"Spearman rho = {rho:.3f}, p = {p_val:.4f} (n={len(all_licks_v)} obs)")
+    else:
+        has_corr = False
+        print("Not enough valid observations for correlation.")
+
+    # ── Plot ───────────────────────────────────────────────────────────────
+    fig, ax = plt.subplots()
+
+    # Trend line (behind points)
+    if has_corr:
+        ax.plot(x_line, y_line, color='dimgray', linewidth=1.5,
+                linestyle='--', zorder=2, label='Linear fit (all obs.)')
+
+    # Per-animal scatter – circles only, colour-coded by animal
+    for animal_id in unique_animals:
+        animal_recs = [r for r in records if r['animal_id'] == animal_id]
+        xs = [r['weight_pct'] for r in animal_recs]
+        ys = [r['licks']      for r in animal_recs]
+        color = animal_color[animal_id]
+
+        ax.scatter(xs, ys, color=color, marker='o', s=70,
+                   edgecolors='black', linewidths=0.6, zorder=4,
+                   label=animal_id)
+
+    # Correlation annotation box
+    if has_corr:
+        p_str = f"p = {p_val:.4f}" if p_val >= 0.0001 else "p < 0.0001"
+        ax.text(0.03, 0.97,
+                f"Spearman \u03c1 = {rho:.3f}\n{p_str}\nn = {len(all_licks_v)} obs.",
+                transform=ax.transAxes, va='top', ha='left',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.7, edgecolor='gray'))
+
+    # Axes labels & formatting
+    ax.set_xlabel('Total Weight Change (%)', weight='bold')
+    ax.set_ylabel('Total Lick Count', weight='bold')
+    design_label = _MLB['plot_suffix']
+    ax.set_title(f'Total Lick Count vs Total Weight Change (%) – Per Animal\n({design_label})',
+                 weight='bold')
+
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(direction='in', which='both', length=5)
+
+    # Legend: trend line first, then one entry per animal
+    handles, labels = ax.get_legend_handles_labels()
+    trend_handles = [h for h, l in zip(handles, labels) if l == 'Linear fit (all obs.)']
+    animal_handles = [h for h, l in zip(handles, labels) if l != 'Linear fit (all obs.)']
+    animal_labels  = [l for l in labels if l != 'Linear fit (all obs.)']
+
+    legend_kwargs = dict(framealpha=0.7, ncol=max(1, n_animals // 12 + 1))
+    if trend_handles:
+        ax.legend(trend_handles + animal_handles,
+                  ['Linear fit (all obs.)'] + animal_labels,
+                  loc='upper right' if n_animals <= 10 else 'lower left',
+                  **legend_kwargs)
+    else:
+        ax.legend(animal_handles, animal_labels,
+                  loc='upper right' if n_animals <= 10 else 'lower left',
+                  **legend_kwargs)
+
+    plt.tight_layout()
+
+    print(f"Plot created: {n_animals} animals, {len(records)} observations.")
+    print("=" * 80 + "\n")
+
+    if save_path:
+        fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+        print(f"Figure saved to: {save_path}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig
+
+
 def main():
     """Main function for weekly comparison analysis."""
     print("=" * 80)
@@ -5858,6 +6057,15 @@ def main():
         if fig_50pct_lines:
             plt.close(fig_50pct_lines)
             print(f"Saved time to 50% plot with trajectories to: {save_path_50pct_lines}")
+
+    # Optional: Save lick vs weight correlation plot
+    save_corr = input("\nSave licks vs total weight change (%) correlation plot as SVG? (y/n): ").strip().lower()
+    if save_corr in ['y', 'yes']:
+        corr_save_path = master_csv.parent / "licks_vs_weight_correlation.svg"
+        fig_corr = plot_licks_vs_weight_correlation(weekly_averages, save_path=corr_save_path, show=False)
+        if fig_corr:
+            plt.close(fig_corr)
+            print(f"Saved licks vs weight correlation plot to: {corr_save_path}")
 
     # Optional: Run normality tests on lick measures
     run_normality = input("\nRun Shapiro-Wilk & Levene's normality tests on lick measures? (y/n): ").strip().lower()

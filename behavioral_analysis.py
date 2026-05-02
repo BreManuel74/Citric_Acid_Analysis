@@ -125,6 +125,44 @@ _MODE_LABELS = {
 }
 _MLB = _MODE_LABELS[EXPERIMENT_MODE]
 
+# Canonical cohort colours (match across_cohort.py)
+_COLOR_0PCT  = "#1f77b4"   # 0% CA
+_COLOR_2PCT  = "#f79520"   # 2% CA
+_COLOR_RAMP  = "#2da048"   # Ramp
+_COLOR_OTHER = "#7f3f98"   # fallback
+
+# Active cohort colour — change alongside EXPERIMENT_MODE if needed.
+# Default: ramp design → green; nonramp → blue (0% CA).
+# If running on 2% CA nonramp data, set to _COLOR_2PCT.
+COHORT_COLOR = _COLOR_RAMP if EXPERIMENT_MODE == 'ramp' else _COLOR_0PCT
+
+
+def _detect_cohort_color(path=None, df=None) -> str:
+	"""Infer cohort color from the CSV file path, then from CA% values in the data."""
+	if path is not None:
+		p = str(path).lower()
+		if 'ramp' in p:
+			return _COLOR_RAMP
+		if '2%' in p or '2pct' in p:
+			return _COLOR_2PCT
+		if '0%' in p or '0pct' in p:
+			return _COLOR_0PCT
+	if df is not None:
+		for col in ('CA (%)', 'CA_Percent', 'ca_percent', 'CA%'):
+			if col in df.columns:
+				ca_vals = pd.to_numeric(df[col], errors='coerce').dropna().unique()
+				if len(ca_vals) > 2:
+					return _COLOR_RAMP
+				if len(ca_vals) == 1:
+					v = float(ca_vals[0])
+					if v == 0:
+						return _COLOR_0PCT
+					if v == 2:
+						return _COLOR_2PCT
+					return _COLOR_OTHER
+				break
+	return COHORT_COLOR  # unchanged if nothing detected
+
 
 def _group_label(g):
 	"""Format a within-subjects group value for display."""
@@ -133,14 +171,22 @@ def _group_label(g):
 	return f"Week {int(g)}"
 
 
+plt.rcParams["font.family"] = "sans-serif"
+plt.rcParams["font.sans-serif"] = ["Arial"]
+plt.rcParams["svg.fonttype"] = "none"
+
 plt.rcParams.update({
-    "font.size": 11,          # base text
-    "axes.titlesize": 13,     # ax.set_title / suptitle
-    "axes.labelsize": 12,     # x/y labels
-    "xtick.labelsize": 10,
-    "ytick.labelsize": 10,
-    "legend.fontsize": 10,
-    "figure.titlesize": 14,   # plt.suptitle
+    "font.size": 8,
+    "axes.titlesize": 10,
+    "axes.labelsize": 8,
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 8,
+    "legend.fontsize": 7.5,
+    "figure.titlesize": 10,
+    "lines.linewidth": 0.5,
+    "lines.markersize": 3,
+    "figure.figsize": (4.5, 2.5),
+    "axes.xmargin": 0,
 })
 
 # GUI file picker (standard library)
@@ -210,7 +256,7 @@ def load_master_dataframe(csv_path: Path, *, encoding: Optional[str] = None) -> 
 	Returns:
 		pd.DataFrame loaded from the CSV
 	"""
-	global _MASTER_DF, _MASTER_PATH
+	global _MASTER_DF, _MASTER_PATH, COHORT_COLOR
 
 	if not csv_path.exists() or not csv_path.is_file():
 		raise FileNotFoundError(f"CSV path does not exist or is not a file: {csv_path}")
@@ -218,6 +264,7 @@ def load_master_dataframe(csv_path: Path, *, encoding: Optional[str] = None) -> 
 	df = pd.read_csv(csv_path, encoding=encoding)
 	_MASTER_DF = df
 	_MASTER_PATH = csv_path
+	COHORT_COLOR = _detect_cohort_color(csv_path, df)
 	return df
 
 
@@ -375,12 +422,12 @@ def _get_id_sex_map(df: pd.DataFrame) -> dict:
 
 
 def _sex_to_style(sex: Optional[str]) -> tuple[str, str]:
-	"""Return (color, marker) based on sex: M=green/square, F=purple/circle, unknown=gray/triangle."""
+	"""Return (color, marker): cohort color for both sexes, square=male, circle=female."""
 	if sex == "M":
-		return ("green", "s")
+		return (COHORT_COLOR, "s")
 	if sex == "F":
-		return ("purple", "o")
-	return ("gray", "^")
+		return (COHORT_COLOR, "o")
+	return (COHORT_COLOR, "^")
 
 
 def _add_day_number_column(df: pd.DataFrame) -> pd.DataFrame:
@@ -545,7 +592,7 @@ def _add_ca_block_labels(ax: plt.Axes, ca_by_day: pd.Series) -> None:
 			ha="center",
 			va="top",
 			color="black",
-			fontsize=10,
+			
 			fontweight="bold",
 			zorder=10,
 		)
@@ -647,7 +694,7 @@ def _add_week_block_labels(ax: plt.Axes, week_by_day: pd.Series) -> None:
 			ha="center",
 			va="top",
 			color="black",
-			fontsize=10,
+			
 			fontweight="bold",
 			zorder=10,
 		)
@@ -944,12 +991,12 @@ def plot_average_weight_change_by_ca(
 		total_sems.append(np.std(total_vals, ddof=1) / np.sqrt(len(total_vals)) if len(total_vals) > 1 else 0)
 	
 	# Create figure with two subplots side by side
-	fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+	fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 3))
 	
 	if title:
-		fig.suptitle(title, fontsize=16, weight='bold', y=0.98)
+		fig.suptitle(title, weight='bold', y=0.98)
 	else:
-		fig.suptitle("Average Weight Change by CA% Concentration", fontsize=16, weight='bold', y=0.98)
+		fig.suptitle("Average Weight Change by CA% Concentration", weight='bold', y=0.98)
 	
 	x_pos = np.arange(len(ca_labels))
 	bar_width = 0.6
@@ -961,12 +1008,12 @@ def plot_average_weight_change_by_ca(
 					edgecolor='black', linewidth=1.2,
 					error_kw={'elinewidth': 2, 'capthick': 2})
 	
-	ax1.set_xlabel('CA (%)', fontsize=12, weight='bold')
-	ax1.set_ylabel('Daily Change (Mean ± SEM)', fontsize=12, weight='bold')
-	ax1.set_title('Daily Weight Change', fontsize=13, weight='bold', pad=10)
+	ax1.set_xlabel('CA (%)', weight='bold')
+	ax1.set_ylabel('Daily Change (Mean ± SEM)', weight='bold')
+	ax1.set_title('Daily Weight Change', weight='bold', pad=10)
 	ax1.set_xticks(x_pos)
 	ax1.set_xticklabels(ca_labels)
-	ax1.axhline(0, color='black', linewidth=1.5, linestyle='-', alpha=0.8)
+	ax1.axhline(0, color='black', linewidth=1.0, linestyle='-', alpha=0.8)
 	ax1.grid(False)
 	ax1.spines['top'].set_visible(False)
 	ax1.spines['right'].set_visible(False)
@@ -999,12 +1046,12 @@ def plot_average_weight_change_by_ca(
 					edgecolor='black', linewidth=1.2,
 					error_kw={'elinewidth': 2, 'capthick': 2})
 	
-	ax2.set_xlabel('CA (%)', fontsize=12, weight='bold')
-	ax2.set_ylabel('Total Change (Mean ± SEM)', fontsize=12, weight='bold')
-	ax2.set_title('Total Weight Change', fontsize=13, weight='bold', pad=10)
+	ax2.set_xlabel('CA (%)', weight='bold')
+	ax2.set_ylabel('Total Change (Mean ± SEM)', weight='bold')
+	ax2.set_title('Total Weight Change', weight='bold', pad=10)
 	ax2.set_xticks(x_pos)
 	ax2.set_xticklabels(ca_labels)
-	ax2.axhline(0, color='black', linewidth=1.5, linestyle='-', alpha=0.8)
+	ax2.axhline(0, color='black', linewidth=1.0, linestyle='-', alpha=0.8)
 	ax2.grid(False)
 	ax2.spines['top'].set_visible(False)
 	ax2.spines['right'].set_visible(False)
@@ -1134,8 +1181,8 @@ def plot_average_weight_change_by_week(
 		total_means.append(np.mean(tv))
 		total_sems.append(np.std(tv, ddof=1) / np.sqrt(len(tv)) if len(tv) > 1 else 0)
 
-	fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-	fig.suptitle(title or "Average Weight Change by Week", fontsize=16, weight='bold', y=0.98)
+	fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 3))
+	fig.suptitle(title or "Average Weight Change by Week", weight='bold', y=0.98)
 
 	x_pos = np.arange(len(week_labels))
 	bar_width = 0.6
@@ -1144,11 +1191,11 @@ def plot_average_weight_change_by_week(
 	ax1.bar(x_pos, daily_means, bar_width, yerr=daily_sems, capsize=5,
 			color='steelblue', alpha=0.8, edgecolor='black', linewidth=1.2,
 			error_kw={'elinewidth': 2, 'capthick': 2})
-	ax1.set_xlabel('Week', fontsize=12, weight='bold')
-	ax1.set_ylabel('Daily Change (Mean ± SEM)', fontsize=12, weight='bold')
-	ax1.set_title('Daily Weight Change', fontsize=13, weight='bold', pad=10)
+	ax1.set_xlabel('Week', weight='bold')
+	ax1.set_ylabel('Daily Change (Mean ± SEM)', weight='bold')
+	ax1.set_title('Daily Weight Change', weight='bold', pad=10)
 	ax1.set_xticks(x_pos); ax1.set_xticklabels(week_labels)
-	ax1.axhline(0, color='black', linewidth=1.5, linestyle='-', alpha=0.8)
+	ax1.axhline(0, color='black', linewidth=1.0, linestyle='-', alpha=0.8)
 	ax1.grid(False); ax1.spines['top'].set_visible(False); ax1.spines['right'].set_visible(False)
 	ax1.tick_params(direction='in', which='both', length=5)
 	ax1.set_xlim(-bar_width/2, len(week_labels) - 1 + bar_width/2)
@@ -1163,11 +1210,11 @@ def plot_average_weight_change_by_week(
 	ax2.bar(x_pos, total_means, bar_width, yerr=total_sems, capsize=5,
 			color='coral', alpha=0.8, edgecolor='black', linewidth=1.2,
 			error_kw={'elinewidth': 2, 'capthick': 2})
-	ax2.set_xlabel('Week', fontsize=12, weight='bold')
-	ax2.set_ylabel('Total Change (Mean ± SEM)', fontsize=12, weight='bold')
-	ax2.set_title('Total Weight Change', fontsize=13, weight='bold', pad=10)
+	ax2.set_xlabel('Week', weight='bold')
+	ax2.set_ylabel('Total Change (Mean ± SEM)', weight='bold')
+	ax2.set_title('Total Weight Change', weight='bold', pad=10)
 	ax2.set_xticks(x_pos); ax2.set_xticklabels(week_labels)
-	ax2.axhline(0, color='black', linewidth=1.5, linestyle='-', alpha=0.8)
+	ax2.axhline(0, color='black', linewidth=1.0, linestyle='-', alpha=0.8)
 	ax2.grid(False); ax2.spines['top'].set_visible(False); ax2.spines['right'].set_visible(False)
 	ax2.tick_params(direction='in', which='both', length=5)
 	ax2.set_xlim(-bar_width/2, len(week_labels) - 1 + bar_width/2)
@@ -1238,7 +1285,7 @@ def plot_nest_made_pie_chart(
 	values = [mean_yes, mean_no]
 	
 	# Create pie chart
-	fig, ax = plt.subplots(figsize=(8, 8))
+	fig, ax = plt.subplots()
 	
 	# Use green for Yes and purple for No to match sex color scheme
 	colors = []
@@ -1267,7 +1314,7 @@ def plot_nest_made_pie_chart(
 	
 	if title is None:
 		title = f"Nest Made? Distribution (n={n_animals} animals)"
-	ax.set_title(title, fontsize=14, weight='bold', pad=20)
+	ax.set_title(title, weight='bold', pad=20)
 	
 	fig.tight_layout()
 	
@@ -1335,7 +1382,7 @@ def plot_lethargy_pie_chart(
 	values = [mean_yes, mean_no]
 	
 	# Create pie chart
-	fig, ax = plt.subplots(figsize=(8, 8))
+	fig, ax = plt.subplots()
 	
 	# Use green for Yes and red for No
 	colors = []
@@ -1364,7 +1411,7 @@ def plot_lethargy_pie_chart(
 	
 	if title is None:
 		title = f"Lethargy? Distribution (n={n_animals} animals)"
-	ax.set_title(title, fontsize=14, weight='bold', pad=20)
+	ax.set_title(title, weight='bold', pad=20)
 	
 	fig.tight_layout()
 	
@@ -1436,7 +1483,7 @@ def plot_ca_spot_digging_pie_chart(
 	percentages = [v / total * 100 for v in values]
 	
 	# Create pie chart
-	fig, ax = plt.subplots(figsize=(8, 8))
+	fig, ax = plt.subplots()
 	
 	# Use blue for Yes and orange for No
 	colors = []
@@ -1465,7 +1512,7 @@ def plot_ca_spot_digging_pie_chart(
 	
 	if title is None:
 		title = f"CA Spot Digging? Distribution (n={total})"
-	ax.set_title(title, fontsize=14, weight='bold', pad=20)
+	ax.set_title(title, weight='bold', pad=20)
 	
 	fig.tight_layout()
 	
@@ -1533,7 +1580,7 @@ def plot_anxious_behaviors_pie_chart(
 	values = [mean_yes, mean_no]
 	
 	# Create pie chart
-	fig, ax = plt.subplots(figsize=(8, 8))
+	fig, ax = plt.subplots()
 	
 	# Use blue for Yes and orange for No
 	colors = []
@@ -1562,7 +1609,7 @@ def plot_anxious_behaviors_pie_chart(
 	
 	if title is None:
 		title = f"Anxious Behaviors? Distribution (n={n_animals} animals)"	
-	ax.set_title(title, fontsize=14, weight='bold', pad=20)
+	ax.set_title(title, weight='bold', pad=20)
 	
 	fig.tight_layout()
 	
@@ -1610,8 +1657,8 @@ def plot_all_pie_charts(
 	cdf = clean_master_dataframe(df)
 	
 	# Create 2x2 subplot with extra space for legend
-	fig, axes = plt.subplots(2, 2, figsize=(14, 12))
-	fig.suptitle("Behavioral Observations Distribution", fontsize=16, weight='bold', y=0.995)
+	fig, axes = plt.subplots(2, 2, figsize=(10, 6))
+	fig.suptitle("Behavioral Observations Distribution", weight='bold', y=0.995)
 	
 	# Define the columns and their positions
 	columns = [
@@ -1673,7 +1720,7 @@ def plot_all_pie_charts(
 		ax.axis('equal')
 		
 		# Set title for each subplot (removed n from individual titles)
-		ax.set_title(f"{col_name}", fontsize=13, weight='bold', pad=10)
+		ax.set_title(f"{col_name}", weight='bold', pad=10)
 	
 	# Create a single common legend at the bottom center
 	legend_labels = ['Yes', 'No']
@@ -1686,10 +1733,9 @@ def plot_all_pie_charts(
 		legend_labels,
 		loc='lower center',
 		ncol=2,
-		fontsize=12,
+		
 		frameon=True,
 		title=f'n = {n_animals} animals',
-		title_fontsize=12
 	)
 	
 	# Adjust layout to make room for legend
@@ -1773,8 +1819,8 @@ def plot_pie_charts_by_ca_percent(
 		ca_data = cdf[cdf["CA (%)"] == ca_level]
 		
 		# Create 2x2 subplot for this CA% level
-		fig, axes = plt.subplots(2, 2, figsize=(14, 12))
-		fig.suptitle(f"Behavioral Observations at {int(ca_level)}% CA", fontsize=16, weight='bold', y=0.995)
+		fig, axes = plt.subplots(2, 2, figsize=(10, 6))
+		fig.suptitle(f"Behavioral Observations at {int(ca_level)}% CA", weight='bold', y=0.995)
 		
 		# n animals for legend
 		total_n = ca_data['ID'].nunique()
@@ -1833,7 +1879,7 @@ def plot_pie_charts_by_ca_percent(
 			ax.axis('equal')
 			
 			# Set title for each subplot
-			ax.set_title(f"{col_name}", fontsize=13, weight='bold', pad=10)
+			ax.set_title(f"{col_name}", weight='bold', pad=10)
 		
 		# Create a single common legend at the bottom center
 		legend_labels = ['Yes', 'No']
@@ -1846,10 +1892,9 @@ def plot_pie_charts_by_ca_percent(
 			legend_labels,
 			loc='lower center',
 			ncol=2,
-			fontsize=12,
+			
 			frameon=True,
 			title=f'n = {total_n} animals',
-			title_fontsize=12
 		)
 		
 		# Adjust layout to make room for legend
@@ -1920,8 +1965,8 @@ def plot_pie_charts_by_week(
 	
 	for week in weeks:
 		week_data = cdf[cdf["Week"] == week]
-		fig, axes = plt.subplots(2, 2, figsize=(14, 12))
-		fig.suptitle(f"Behavioral Observations at Week {int(week)}", fontsize=16, weight='bold', y=0.995)
+		fig, axes = plt.subplots(2, 2, figsize=(10, 6))
+		fig.suptitle(f"Behavioral Observations at Week {int(week)}", weight='bold', y=0.995)
 		total_n = week_data['ID'].nunique()
 		positions = [(0, 0), (0, 1), (1, 0), (1, 1)]
 		
@@ -1966,7 +2011,7 @@ def plot_pie_charts_by_week(
 				autotext.set_fontsize(13)
 			
 			ax.axis('equal')
-			ax.set_title(f"{col_name}", fontsize=13, weight='bold', pad=10)
+			ax.set_title(f"{col_name}", weight='bold', pad=10)
 		
 		legend_labels = ['Yes', 'No']
 		legend_colors = ['blue', 'orange']
@@ -1976,10 +2021,9 @@ def plot_pie_charts_by_week(
 			legend_labels,
 			loc='lower center',
 			ncol=2,
-			fontsize=12,
+			
 			frameon=True,
 			title=f'n = {total_n} animals',
-			title_fontsize=12
 		)
 		plt.tight_layout(rect=[0, 0.03, 1, 0.96])
 		figures.append(fig)
@@ -2056,10 +2100,10 @@ def plot_aberrant_behaviors_lines(
 		('Lethargy?',          True,  'Lethargy', '#6DBF67'),
 	]
 
-	fig, axes = plt.subplots(1, 3, figsize=(14, 5), sharey=True)
+	fig, axes = plt.subplots(1, 3, figsize=(15, 3), sharey=True)
 	fig.suptitle(
 		'Aberrant Behavioral Observations — ' + _MLB.get('plot_suffix', ''),
-		fontsize=16, weight='bold', y=0.98
+		weight='bold', y=0.98
 	)
 
 	for ax, (col, pos_val, title, color) in zip(axes, behaviors):
@@ -2077,20 +2121,20 @@ def plot_aberrant_behaviors_lines(
 						animal_pcts.append(100.0 * (valid == pos_val).sum() / len(valid))
 				pcts.append(float(np.mean(animal_pcts)) if animal_pcts else float('nan'))
 
-		ax.plot(x, pcts, color=color, linewidth=2.2, marker='o',
-		        markersize=7, markerfacecolor='white',
+		ax.plot(x, pcts, color=color, marker='o',
+		        markerfacecolor='white',
 		        markeredgecolor=color, markeredgewidth=2)
 		ax.set_xticks(x)
-		ax.set_xticklabels(x_labels_display, fontsize=10)
-		ax.set_xlabel(x_label, fontsize=12, weight='bold')
+		ax.set_xticklabels(x_labels_display)
+		ax.set_xlabel(x_label, weight='bold')
 		ax.set_ylim(0, 100)
-		ax.set_title(title, fontsize=13, weight='bold', pad=10)
+		ax.set_title(title, weight='bold', pad=10)
 		ax.grid(False)
 		ax.spines['top'].set_visible(False)
 		ax.spines['right'].set_visible(False)
 		ax.tick_params(direction='in', which='both', length=5)
 
-	axes[0].set_ylabel('Mean % per Animal', fontsize=12, weight='bold')
+	axes[0].set_ylabel('Mean % per Animal', weight='bold')
 	fig.tight_layout()
 
 	if save_path is not None:
@@ -2185,7 +2229,7 @@ def plot_aberrant_behaviors_load_bar(
 	x = np.arange(len(groups))
 	bar_width = 0.55
 
-	fig, ax = plt.subplots(figsize=(max(8, len(groups) * 1.5), 6))
+	fig, ax = plt.subplots()
 	bottoms = np.zeros(len(groups))
 
 	for lbl, color in zip(load_labels, load_colors):
@@ -2195,14 +2239,14 @@ def plot_aberrant_behaviors_load_bar(
 		bottoms += vals
 
 	ax.set_xticks(x)
-	ax.set_xticklabels(x_labels_display, fontsize=10)
-	ax.set_xlabel(x_label, fontsize=12, weight='bold')
-	ax.set_ylabel('Mean % per Animal', fontsize=12, weight='bold')
+	ax.set_xticklabels(x_labels_display)
+	ax.set_xlabel(x_label, weight='bold')
+	ax.set_ylabel('Mean % per Animal', weight='bold')
 	ax.set_ylim(0, 100)
 	ax.set_xlim(-bar_width / 2, len(groups) - 1 + bar_width / 2)
 	ax.set_title('Aberrant Behavior Load per Observation — ' + _MLB.get('plot_suffix', ''),
-	             fontsize=13, weight='bold', pad=10)
-	ax.legend(title='# Aberrant Behaviors', fontsize=10, title_fontsize=10,
+	             weight='bold', pad=10)
+	ax.legend(title='# Aberrant Behaviors',
 	          loc='upper right')
 	ax.grid(False)
 	ax.spines['top'].set_visible(False)
@@ -2722,13 +2766,13 @@ def check_ols_assumptions_total_change(
 		stud_mask_arr, inf_mask_arr,
 		cooks_thresh_val, infl_ok,
 	):
-		_fig, _axes = plt.subplots(3, 3, figsize=(18, 12))
-		_fig.suptitle(fig_title, fontsize=12, fontweight='bold')
+		_fig, _axes = plt.subplots(3, 3, figsize=(15, 9))
+		_fig.suptitle(fig_title, fontweight='bold')
 
 		# 1. Residuals vs Fitted
 		_ax = _axes[0, 0]
 		_ax.scatter(fitted_arr, resid_arr, alpha=0.6, edgecolors='k', linewidths=0.5)
-		_ax.axhline(0, color='red', linestyle='--', linewidth=1.5)
+		_ax.axhline(0, color='red', linestyle='--', linewidth=1.0)
 		_ax.set_xlabel("Fitted Values")
 		_ax.set_ylabel("Residuals")
 		_ax.set_title("Residuals vs Fitted\n(should scatter around 0 uniformly)")
@@ -2756,26 +2800,26 @@ def check_ols_assumptions_total_change(
 		_iqr_flagged = np.where(iqr_mask_arr)[0]
 		_ax.scatter(range(n_obs), resid_arr, c=_iqr_cols, alpha=0.7,
 		            edgecolors='k', linewidths=0.4, zorder=3)
-		_ax.axhline(iqr_hi_val, color='orange', linestyle='--', linewidth=1.5,
+		_ax.axhline(iqr_hi_val, color='orange', linestyle='--', linewidth=1.0,
 		            label=f'Upper fence ({iqr_hi_val:.2f})')
-		_ax.axhline(iqr_lo_val, color='orange', linestyle='--', linewidth=1.5,
+		_ax.axhline(iqr_lo_val, color='orange', linestyle='--', linewidth=1.0,
 		            label=f'Lower fence ({iqr_lo_val:.2f})')
 		_ax.axhline(0, color='black', linestyle='-', linewidth=0.8)
 		for _i in _iqr_flagged:
 			_ax.annotate(f"{agg_df['ID'].iloc[_i]}\n{fl}={agg_df['Within'].iloc[_i]}",
 			             xy=(_i, resid_arr[_i]), xytext=(4, 4),
-			             textcoords='offset points', fontsize=7, color='red')
+			             textcoords='offset points', color='red')
 		_ax.set_xlabel("Observation Index")
 		_ax.set_ylabel("Residuals")
 		_ax.set_title(f"IQR Outlier Detection (1.5\u00d7IQR fence)\n"
 		              f"{iqr_mask_arr.sum()} outlier(s) \u2014 red=flagged, blue=normal")
-		_ax.legend(fontsize=7)
+		_ax.legend()
 
 		# 5. Residuals by level
 		_ax = _axes[1, 1]
 		_lvl_data = [resid_arr[agg_df['Within'].values == _lv] for _lv in wlevels]
 		_ax.boxplot(_lvl_data, tick_labels=[str(_l) for _l in wlevels], patch_artist=True)
-		_ax.axhline(0, color='red', linestyle='--', linewidth=1.5)
+		_ax.axhline(0, color='red', linestyle='--', linewidth=1.0)
 		_ax.set_xlabel(fl)
 		_ax.set_ylabel("Residuals")
 		_ax.set_title("Residuals by Level\n(boxes should be centered near 0 with similar spread)")
@@ -2790,7 +2834,7 @@ def check_ols_assumptions_total_change(
 		_ax.set_xlabel("Residuals")
 		_ax.set_ylabel("Count")
 		_ax.set_title(f"Residual Histogram\nmean = {_mu:.3f}")
-		_ax.legend(fontsize=8)
+		_ax.legend()
 
 		# 7. Per-subject residuals (cross-subject independence)
 		_ax = _axes[2, 0]
@@ -2800,28 +2844,28 @@ def check_ols_assumptions_total_change(
 		for _ci, (_sid, _sv) in enumerate(_ps.items()):
 			_col = _prop_cycle[_ci % len(_prop_cycle)]
 			_ax.plot(range(len(_sv)), _sv, 'o-', alpha=0.7,
-			         markersize=4, color=_col, label=str(_sid))
-		_ax.axhline(0, color='red', linestyle='--', linewidth=1.5)
+			         color=_col, label=str(_sid))
+		_ax.axhline(0, color='red', linestyle='--', linewidth=1.0)
 		_ax.set_xlabel(f"Time point ({fl} order within subject)")
 		_ax.set_ylabel("Residuals")
 		_cr_str = f"mean |r| = {_cr:.4f}" if not np.isnan(_cr) else "unbalanced"
 		_ax.set_title(f"Residuals per Subject\n({_cr_str}; parallel lines \u2192 concern)")
-		_ax.legend(fontsize=7, ncol=max(1, len(_ps) // 4))
+		_ax.legend(ncol=max(1, len(_ps) // 4))
 
 		# 8. Cook's Distance
 		_ax = _axes[2, 1]
 		if infl_ok:
 			_stems = _ax.stem(range(n_obs), cooks_arr, markerfmt='o', linefmt='grey', basefmt=' ')
-			plt.setp(_stems.markerline, markersize=4)
-			_ax.axhline(cooks_thresh_val, color='red', linestyle='--', linewidth=1.5,
+			plt.setp(_stems.markerline)
+			_ax.axhline(cooks_thresh_val, color='red', linestyle='--', linewidth=1.0,
 			            label=f"Threshold 4/n={cooks_thresh_val:.3f}")
 			for _i in np.where(inf_mask_arr)[0]:
 				_ax.annotate(f"{agg_df['ID'].iloc[_i]}\n{fl}={agg_df['Within'].iloc[_i]}",
 				             xy=(_i, cooks_arr[_i]), xytext=(4, 4),
-				             textcoords='offset points', fontsize=7, color='red')
+				             textcoords='offset points', color='red')
 			_ax.set_title(f"Cook's Distance\n({inf_mask_arr.sum()} influential, "
 			              f"threshold={cooks_thresh_val:.3f})")
-			_ax.legend(fontsize=8)
+			_ax.legend()
 		else:
 			_ax.text(0.5, 0.5, "Unavailable", ha='center', va='center',
 			         transform=_ax.transAxes)
@@ -2835,14 +2879,14 @@ def check_ols_assumptions_total_change(
 			_stud_flag = np.where(stud_mask_arr)[0]
 			_ax.scatter(range(n_obs), stud_arr, alpha=0.6, edgecolors='k', linewidths=0.5)
 			_ax.axhline(0, color='black', linestyle='-', linewidth=0.8)
-			_ax.axhline( 3, color='red', linestyle='--', linewidth=1.5, label='|t*| = 3')
-			_ax.axhline(-3, color='red', linestyle='--', linewidth=1.5)
+			_ax.axhline( 3, color='red', linestyle='--', linewidth=1.0, label='|t*| = 3')
+			_ax.axhline(-3, color='red', linestyle='--', linewidth=1.0)
 			for _i in _stud_flag:
 				_ax.annotate(f"{agg_df['ID'].iloc[_i]}",
 				             xy=(_i, stud_arr[_i]), xytext=(4, 4),
-				             textcoords='offset points', fontsize=7, color='red')
+				             textcoords='offset points', color='red')
 			_ax.set_title(f"Studentized Residuals\n({stud_mask_arr.sum()} outliers, |t*| > 3)")
-			_ax.legend(fontsize=8)
+			_ax.legend()
 		else:
 			_ax.text(0.5, 0.5, "Unavailable", ha='center', va='center',
 			         transform=_ax.transAxes)
@@ -4713,33 +4757,33 @@ def plot_interaction_effects(
 				_lv_label = f'Week {int(lv)}' if EXPERIMENT_MODE == 'nonramp' else f'{int(lv)}%'
 				print(f"  Females at {_lv_label}: no data")
 		
-		# Create plot with larger size for better readability
-		fig, ax = plt.subplots(figsize=(12, 8))
+		# Create plot
+		fig, ax = plt.subplots()
 		
 		ax.errorbar(within_levels, males_means, yerr=males_sems,
-				   marker='s', markersize=10, linewidth=2.5, capsize=6, capthick=2,
-				   color='green', markerfacecolor='green', markeredgecolor='green',
-				   label='Male', linestyle='-', markeredgewidth=2)
+				   marker='s', capsize=4,
+				   color=COHORT_COLOR,
+				   label='Male', linestyle='-')
 		
 		ax.errorbar(within_levels, females_means, yerr=females_sems,
-				   marker='o', markersize=10, linewidth=2.5, capsize=6, capthick=2,
-				   color='purple', markerfacecolor='purple', markeredgecolor='purple',
-				   label='Female', linestyle='--', markeredgewidth=2)
+				   marker='o', capsize=4,
+				   color=COHORT_COLOR,
+				   label='Female', linestyle='-')
 		
 		_x_label = 'Week' if EXPERIMENT_MODE == 'nonramp' else 'Citric Acid Concentration (%)'
-		ax.set_xlabel(_x_label, fontsize=14, weight='bold')
-		ax.set_ylabel(f'{measure_name} (g)', fontsize=14, weight='bold')
+		ax.set_xlabel(_x_label, weight='bold')
+		ax.set_ylabel(f'{measure_name} (g)', weight='bold')
 		_inter_p = results.get('interaction', {}).get('p', float('nan'))
 		_p_str = f'p = {_inter_p:.4f}' if not np.isnan(_inter_p) else 'p = N/A'
 		ax.set_title(f'Sex × {_MLB["within_factor"]} Interaction: {measure_name}\n({_p_str})',
-					fontsize=16, weight='bold', pad=20)
+					weight='bold', pad=20)
 		
 		ax.set_xticks(within_levels)
 		_x_tick_labels = ([f'Week {int(lv)}' for lv in within_levels] if EXPERIMENT_MODE == 'nonramp'
 						  else [f'{int(lv)}%' for lv in within_levels])
-		ax.set_xticklabels(_x_tick_labels, fontsize=12)
+		ax.set_xticklabels(_x_tick_labels)
 		ax.tick_params(direction='in', which='both', length=5, labelsize=12)
-		ax.legend(loc='best', fontsize=13, frameon=True, shadow=True, fancybox=True)
+		ax.legend(loc='best', frameon=True, shadow=True, fancybox=True)
 		ax.spines['top'].set_visible(False)
 		ax.spines['right'].set_visible(False)
 		ax.spines['left'].set_linewidth(1.5)
@@ -4842,29 +4886,29 @@ def plot_interaction_effects(
 				_lv_label = f'Week {int(lv)}' if EXPERIMENT_MODE == 'nonramp' else f'{int(lv)}%'
 				print(f"  Females at {_lv_label}: no data")
 		
-		# Create plot with larger size for better readability
-		fig, ax = plt.subplots(figsize=(12, 8))
+		# Create plot
+		fig, ax = plt.subplots()
 		
 		ax.errorbar(within_levels, males_props, yerr=males_sems,
-				   marker='s', markersize=10, linewidth=2.5, capsize=6, capthick=2,
-				   color='green', markerfacecolor='green', markeredgecolor='green',
-				   label='Male', linestyle='-', markeredgewidth=2)
+				   marker='s', capsize=4,
+				   color=COHORT_COLOR,
+				   label='Male', linestyle='-')
 		
 		ax.errorbar(within_levels, females_props, yerr=females_sems,
-				   marker='o', markersize=10, linewidth=2.5, capsize=6, capthick=2,
-				   color='purple', markerfacecolor='purple', markeredgecolor='purple',
-				   label='Female', linestyle='--', markeredgewidth=2)
+				   marker='o', capsize=4,
+				   color=COHORT_COLOR,
+				   label='Female', linestyle='-')
 		
 		_x_label = 'Week' if EXPERIMENT_MODE == 'nonramp' else 'Citric Acid Concentration (%)'
-		ax.set_xlabel(_x_label, fontsize=14, weight='bold')
-		ax.set_ylabel(f'{measure_name} (% Yes)', fontsize=14, weight='bold')
+		ax.set_xlabel(_x_label, weight='bold')
+		ax.set_ylabel(f'{measure_name} (% Yes)', weight='bold')
 		ax.set_title(f'Sex × {_MLB["within_factor"]} Interaction: {measure_name}\n(Sex-Stratified Analysis)',
-					fontsize=16, weight='bold', pad=20)
+					weight='bold', pad=20)
 		
 		ax.set_xticks(within_levels)
 		_x_tick_labels = ([f'Week {int(lv)}' for lv in within_levels] if EXPERIMENT_MODE == 'nonramp'
 						  else [f'{int(lv)}%' for lv in within_levels])
-		ax.set_xticklabels(_x_tick_labels, fontsize=12)
+		ax.set_xticklabels(_x_tick_labels)
 		
 		# Set y-axis limits based on actual data range
 		all_values = [v for v in males_props + females_props if not np.isnan(v)]
@@ -4875,7 +4919,7 @@ def plot_interaction_effects(
 			ax.set_ylim(0, y_max)
 		
 		ax.tick_params(direction='in', which='both', length=5, labelsize=12)
-		ax.legend(loc='best', fontsize=13, frameon=True, shadow=True, fancybox=True)
+		ax.legend(loc='best', frameon=True, shadow=True, fancybox=True)
 		ax.spines['top'].set_visible(False)
 		ax.spines['right'].set_visible(False)
 		ax.spines['left'].set_linewidth(1.5)
@@ -5566,7 +5610,7 @@ def plot_total_change_by_id(
 	if not series_by_id:
 		raise ValueError("No series available to plot. Check input DataFrame and 'ids' filter.")
 
-	fig, ax = plt.subplots(figsize=(11, 6))
+	fig, ax = plt.subplots()
 
 	# Plot each ID as a separate line
 	for mid, s in series_by_id.items():
@@ -5576,10 +5620,8 @@ def plot_total_change_by_id(
 		ax.plot(
 			s.index,
 			s.values,
-			label=str(mid),
+			label=None,
 			marker=marker,
-			markersize=3,
-			linewidth=1.5,
 			alpha=0.9,
 			color=color,
 		)
@@ -5661,13 +5703,13 @@ def plot_total_change_by_id(
 			_add_week_block_boundaries(ax, block_by_day)
 			_add_week_block_labels(ax, block_by_day)
 
-	# Legend placement
-	if len(series_by_id) > 6:
-		ax.legend(title="ID", bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0.)
-		fig.tight_layout(rect=[0, 0, 0.85, 1])
-	else:
-		ax.legend(title="ID", loc="best")
-		fig.tight_layout()
+	# Legend: sex indicators only
+	_leg_handles = [
+		ax.plot([], [], color=COHORT_COLOR, marker='s', linestyle='-', label='Male')[0],
+		ax.plot([], [], color=COHORT_COLOR, marker='o', linestyle='-', label='Female')[0],
+	]
+	ax.legend(handles=_leg_handles, loc="best")
+	fig.tight_layout()
 
 	if save_path is not None:
 		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
@@ -5738,7 +5780,7 @@ def plot_daily_change_by_id(
 	if not series_by_id:
 		raise ValueError("No series available to plot. Check input DataFrame and 'ids' filter.")
 
-	fig, ax = plt.subplots(figsize=(11, 6))
+	fig, ax = plt.subplots()
 
 	# Draw background after plotting and before legend, once axes are scaled
 
@@ -5750,10 +5792,8 @@ def plot_daily_change_by_id(
 		ax.plot(
 			s.index,
 			s.values,
-			label=str(mid),
+			label=None,
 			marker=marker,
-			markersize=3,
-			linewidth=1.5,
 			alpha=0.9,
 			color=color,
 		)
@@ -5837,13 +5877,13 @@ def plot_daily_change_by_id(
 			_add_week_block_boundaries(ax, block_by_day)
 			_add_week_block_labels(ax, block_by_day)
 
-	# Place legend outside if many IDs, else in best location
-	if len(series_by_id) > 6:
-		ax.legend(title="ID", bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0.)
-		fig.tight_layout(rect=[0, 0, 0.85, 1])
-	else:
-		ax.legend(title="ID", loc="best")
-		fig.tight_layout()
+	# Legend: sex indicators only
+	_leg_handles = [
+		ax.plot([], [], color=COHORT_COLOR, marker='s', linestyle='-', label='Male')[0],
+		ax.plot([], [], color=COHORT_COLOR, marker='o', linestyle='-', label='Female')[0],
+	]
+	ax.legend(handles=_leg_handles, loc="best")
+	fig.tight_layout()
 
 	if save_path is not None:
 		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
@@ -5914,25 +5954,25 @@ def plot_total_change_by_sex(
 		except Exception:
 			block_by_day = pd.Series(dtype=float)
 	
-	fig, ax = plt.subplots(figsize=(11, 6))
+	fig, ax = plt.subplots()
 	
 	# Plot male data
 	if not male_mean.empty:
-		ax.plot(male_mean.index, male_mean.values, label="Male", color="green", marker="s", 
-				markersize=4, linewidth=2, alpha=0.9)
-		ax.fill_between(male_mean.index, 
-						male_mean - male_sem, 
+		ax.plot(male_mean.index, male_mean.values, label="Male", color=COHORT_COLOR, marker="s",
+				alpha=0.9)
+		ax.fill_between(male_mean.index,
+						male_mean - male_sem,
 						male_mean + male_sem,
-						color="green", alpha=0.2)
+						color=COHORT_COLOR, alpha=0.2)
 	
 	# Plot female data
 	if not female_mean.empty:
-		ax.plot(female_mean.index, female_mean.values, label="Female", color="purple", marker="o",
-				markersize=4, linewidth=2, alpha=0.9)
+		ax.plot(female_mean.index, female_mean.values, label="Female", color=COHORT_COLOR, marker="o",
+				alpha=0.9)
 		ax.fill_between(female_mean.index,
 						female_mean - female_sem,
 						female_mean + female_sem,
-						color="purple", alpha=0.2)
+						color=COHORT_COLOR, alpha=0.2)
 	
 	ax.set_xlabel("Day" if use_day_number else "Date")
 	ax.set_ylabel("Total Change (Mean ± SEM)")
@@ -6058,25 +6098,25 @@ def plot_daily_change_by_sex(
 		except Exception:
 			block_by_day = pd.Series(dtype=float)
 	
-	fig, ax = plt.subplots(figsize=(11, 6))
+	fig, ax = plt.subplots()
 	
 	# Plot male data
 	if not male_mean.empty:
-		ax.plot(male_mean.index, male_mean.values, label="Male", color="green", marker="s",
-				markersize=4, linewidth=2, alpha=0.9)
+		ax.plot(male_mean.index, male_mean.values, label="Male", color=COHORT_COLOR, marker="s",
+				alpha=0.9)
 		ax.fill_between(male_mean.index,
 						male_mean - male_sem,
 						male_mean + male_sem,
-						color="green", alpha=0.2)
+						color=COHORT_COLOR, alpha=0.2)
 	
 	# Plot female data
 	if not female_mean.empty:
-		ax.plot(female_mean.index, female_mean.values, label="Female", color="purple", marker="o",
-				markersize=4, linewidth=2, alpha=0.9)
+		ax.plot(female_mean.index, female_mean.values, label="Female", color=COHORT_COLOR, marker="o",
+				alpha=0.9)
 		ax.fill_between(female_mean.index,
 						female_mean - female_sem,
 						female_mean + female_sem,
-						color="purple", alpha=0.2)
+						color=COHORT_COLOR, alpha=0.2)
 	
 	ax.set_xlabel("Day" if use_day_number else "Date")
 	ax.set_ylabel("Daily Change (Mean ± SEM)")

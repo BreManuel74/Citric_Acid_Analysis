@@ -88,7 +88,7 @@ except ImportError:
 _COLOR_0PCT  = "#1f77b4"   # 0% CA
 _COLOR_2PCT  = "#f79520"   # 2% CA
 _COLOR_RAMP  = "#2da048"   # Ramp
-_COLOR_OTHER = "#9467bd"   # fallback
+_COLOR_OTHER = "#7f3f98"   # fallback
 
 
 def _cohort_label_to_color(label: str) -> str:
