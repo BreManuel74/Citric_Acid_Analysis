@@ -30,13 +30,16 @@ plt.rcParams["svg.fonttype"] = "none"
 """Ramp analysis utilities: load master CSV, clean types, build per-ID series, and plot."""
 
 plt.rcParams.update({
-    "font.size": 11,          # base text
-    "axes.titlesize": 13,     # ax.set_title / suptitle
-    "axes.labelsize": 12,     # x/y labels
-    "xtick.labelsize": 10,
-    "ytick.labelsize": 10,
-    "legend.fontsize": 10,
-    "figure.titlesize": 14,   # plt.suptitle
+    "font.size": 8,
+    "axes.titlesize": 10,
+    "axes.labelsize": 8,
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 8,
+    "legend.fontsize": 7.5,
+    "figure.titlesize": 10,
+    "lines.linewidth": 0.5,
+    "lines.markersize": 1,
+    "figure.figsize": (3, 2),
 })
 
 def load_capacitive_csv(csv_path: Path) -> pd.DataFrame:
@@ -156,7 +159,16 @@ def sensors_only_mode(csv_path: Path, df: pd.DataFrame, sensor_cols: List[str], 
 	print("SENSOR GRID PLOTS")
 	print("=" * 60)
 	selected = _prompt_for_sensor_list(df, count=12)
-	
+
+	# Tracking variables for SVG saving (set inside lick detection block below)
+	show_lick_detection_done = False
+	events_df_som = None
+	thresholds_som = None
+	six_deriv_sensors_som: Optional[List[str]] = None
+	six_deriv_title_som: Optional[str] = None
+	single_deriv_col_som: Optional[str] = None
+	single_deriv_title_som: Optional[str] = None
+
 	if selected is not None:
 		# Compute common y-limits across all sensors for consistent scaling
 		all_sensor_cols = get_sensor_columns(df)
@@ -226,6 +238,9 @@ def sensors_only_mode(csv_path: Path, df: pd.DataFrame, sensor_cols: List[str], 
 			# Detect events above threshold
 			print("Detecting events above threshold for selected sensors...")
 			events_df = detect_events_above_threshold(df, selected, thresholds)
+			show_lick_detection_done = True
+			events_df_som = events_df
+			thresholds_som = thresholds
 			
 			# Count events per sensor
 			print("\n" + "=" * 60)
@@ -277,17 +292,60 @@ def sensors_only_mode(csv_path: Path, df: pd.DataFrame, sensor_cols: List[str], 
 
 			# Plot deviations with threshold and detected events for selected sensors
 			print("Plotting deviations with threshold and detected events for selected sensors...")
-			dev_event_title = f"Selected Sensors Deviations with Events and Threshold (12) — {csv_path.name}"
+			dev_event_title_som = f"Selected Sensors Deviations with Events and Threshold (12) — {csv_path.name}"
 			plot_deviations_with_events_grid(
 				df=df,
 				events_df=events_df,
 				sensor_cols=selected,
 				thresholds=thresholds,
-				title=dev_event_title,
+				title=dev_event_title_som,
 				save_path=None,
 				show=True,
 				y_limits=common_dev_y_limits,
 			)
+
+			# 6-sensor 2x3 peak detection grid
+			try:
+				print("\nEnter 6 sensors for a 2x3 peak detection grid (e.g. 1,2,3,4,5,6). Leave blank to skip:")
+				six_entry = input("  Sensors: ").strip()
+				if six_entry:
+					parts = [p.strip() for p in six_entry.replace(";", ",").split(",") if p.strip()]
+					if len(parts) != 6:
+						print(f"  Expected 6 sensors, got {len(parts)}. Skipping.")
+					else:
+						six_deriv_sensors_som = [normalize_sensor_name(p, df) for p in parts]
+						six_deriv_title_som = f"6-Sensor Peak Detection — {csv_path.name}"
+						plot_deviations_with_events_grid(
+							df=df,
+							events_df=events_df,
+							sensor_cols=six_deriv_sensors_som,
+							thresholds=thresholds,
+							nrows=2,
+							ncols=3,
+							title=six_deriv_title_som,
+							save_path=None,
+							show=True,
+						)
+			except Exception as e:
+				print(str(e))
+
+			# Single-sensor peak detection interactive prompt
+			try:
+				entry = input("\nEnter a sensor to plot its peak detection (e.g., 19 or Sensor_19). Leave blank to skip: ").strip()
+				if entry:
+					resolved = normalize_sensor_name(entry, df)
+					single_deriv_col_som = resolved
+					single_deriv_title_som = f"{resolved} Peak Detection — {csv_path.name}"
+					plot_single_sensor_deviation_with_events(
+						events_df=events_df,
+						sensor_col=resolved,
+						threshold=float(thresholds[resolved]),
+						title=single_deriv_title_som,
+						save_path=None,
+						show=True,
+					)
+			except Exception as e:
+				print(str(e))
 
 	# Optional SVG saving
 	print("\n(Optional) Save figures as SVGs. Leave blank to skip.")
@@ -313,6 +371,17 @@ def sensors_only_mode(csv_path: Path, df: pd.DataFrame, sensor_cols: List[str], 
 		dev_rem_name = input("SVG filename for remaining 12 deviations: ").strip()
 	else:
 		sel_name = rem_name = dev_sel_name = dev_rem_name = ""
+	deriv_sel_som_name = ""
+	dev_event_sel_som_name = ""
+	six_deriv_som_name = ""
+	sing_deriv_som_name = ""
+	if selected is not None and show_lick_detection_done:
+		deriv_sel_som_name = input("SVG filename for selected 12 derivatives (with events): ").strip()
+		dev_event_sel_som_name = input("SVG filename for selected 12 deviations+events+threshold: ").strip()
+		if six_deriv_sensors_som is not None:
+			six_deriv_som_name = input("SVG filename for 6-sensor 2x3 peak detection: ").strip()
+		if single_deriv_col_som is not None:
+			sing_deriv_som_name = input("SVG filename for single-sensor peak detection plot: ").strip()
 
 	# Save figures without re-displaying
 	if ov_name:
@@ -412,6 +481,65 @@ def sensors_only_mode(csv_path: Path, df: pd.DataFrame, sensor_cols: List[str], 
 			)
 			fig_dev_rem.savefig(str(_safe_svg(dev_rem_name)), format="svg", bbox_inches="tight")
 			print(f"Saved SVG: {_safe_svg(dev_rem_name)}")
+
+	if selected is not None and show_lick_detection_done:
+		all_sensor_cols_sv = get_sensor_columns(df)
+		all_deviation_cols_sv = [f"{col}_deviation" for col in all_sensor_cols_sv]
+		common_dev_y_limits_sv = compute_y_limits(df, all_deviation_cols_sv)
+
+		if deriv_sel_som_name:
+			_, fig_deriv_sel_som = plot_derivatives_with_events_grid(
+				df=df,
+				events_df=events_df_som,
+				sensor_cols=selected,
+				title=f"Selected Sensors Derivatives with Detected Events (12) — {csv_path.name}",
+				save_path=None,
+				show=False,
+			)
+			fig_deriv_sel_som.savefig(str(_safe_svg(deriv_sel_som_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(deriv_sel_som_name)}")
+
+		if dev_event_sel_som_name:
+			_, fig_dev_event_sel_som = plot_deviations_with_events_grid(
+				df=df,
+				events_df=events_df_som,
+				sensor_cols=selected,
+				thresholds=thresholds_som,
+				title=f"Selected Sensors Deviations with Events and Threshold (12) — {csv_path.name}",
+				save_path=None,
+				show=False,
+				y_limits=common_dev_y_limits_sv,
+			)
+			fig_dev_event_sel_som.savefig(str(_safe_svg(dev_event_sel_som_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(dev_event_sel_som_name)}")
+
+		if six_deriv_som_name and six_deriv_sensors_som is not None:
+			_, fig_six_deriv_som = plot_deviations_with_events_grid(
+				df=df,
+				events_df=events_df_som,
+				sensor_cols=six_deriv_sensors_som,
+				thresholds=thresholds_som,
+				nrows=2,
+				ncols=3,
+				title=six_deriv_title_som,
+				save_path=None,
+				show=False,
+			)
+			fig_six_deriv_som.savefig(str(_safe_svg(six_deriv_som_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(six_deriv_som_name)}")
+
+		if sing_deriv_som_name and single_deriv_col_som is not None:
+			_, fig_sing_deriv_som = plot_single_sensor_deviation_with_events(
+				events_df=events_df_som,
+				sensor_col=single_deriv_col_som,
+				threshold=float(thresholds_som[single_deriv_col_som]),
+				title=single_deriv_title_som,
+				save_path=None,
+				show=False,
+				return_fig=True,
+			)
+			fig_sing_deriv_som.savefig(str(_safe_svg(sing_deriv_som_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(sing_deriv_som_name)}")
 
 	print("\nSensors-only analysis comple2e!")
 
@@ -889,6 +1017,141 @@ def plot_derivatives_with_events_grid(
 		plt.close(fig)
 
 	return (save_path, fig) if True else save_path
+
+
+def plot_single_sensor_derivative_with_events(
+	events_df: pd.DataFrame,
+	sensor_col: str,
+	*,
+	title: str | None = None,
+	save_path: Path | None = None,
+	show: bool = True,
+	return_fig: bool = False,
+) -> Path | tuple[Optional[Path], "plt.Figure"]:
+	"""Plot a single sensor's derivative with detected events highlighted.
+
+	Uses rcParams for figure size so the saved SVG respects the canonical dimensions.
+
+	Parameters:
+		events_df: DataFrame from detect_events_above_threshold containing Time_sec,
+		           {sensor_col}_derivative, and {sensor_col}_event columns
+		sensor_col: Sensor column name (e.g. 'Sensor_1')
+		title: Optional plot title
+		save_path: If provided, saves a PNG to this path
+		show: If True, calls plt.show()
+		return_fig: If True, returns (save_path, figure) instead of just save_path
+	"""
+	deriv_col = f"{sensor_col}_derivative"
+	event_col = f"{sensor_col}_event"
+
+	if "Time_sec" not in events_df.columns:
+		raise ValueError("'Time_sec' column not found in events_df.")
+	if deriv_col not in events_df.columns:
+		raise ValueError(f"Derivative column '{deriv_col}' not found. Did you run detect_events_above_threshold()?")
+
+	fig, ax = plt.subplots()
+
+	ax.plot(events_df["Time_sec"], events_df[deriv_col],
+	        color="#2ca02c", linewidth=1.2, label="Derivative")
+
+	if event_col in events_df.columns:
+		event_mask = events_df[event_col]
+		event_times = events_df.loc[event_mask, "Time_sec"]
+		event_derivatives = events_df.loc[event_mask, deriv_col]
+		if len(event_times) > 0:
+			ax.scatter(event_times, event_derivatives, color="red", s=30, alpha=0.8,
+			           marker="o", edgecolors="darkred", linewidth=1, label="Detected Events")
+			for t in event_times:
+				ax.axvline(x=t, color="red", linestyle="--", alpha=0.4, linewidth=0.8)
+
+	ax.axhline(y=0, color="black", linestyle="-", alpha=0.3, linewidth=0.8)
+	ax.set_xlabel("Time (s)")
+	ax.set_ylabel("Derivative (a.u./sample)")
+	if title:
+		ax.set_title(title)
+	ax.legend(loc="best", frameon=False)
+
+	left, right = ax.get_xlim()
+	ax.set_xlim(left=0, right=right)
+	ax.margins(x=0)
+	for side in ("top", "right"):
+		ax.spines[side].set_visible(False)
+	ax.tick_params(direction="in", which="both", length=5)
+
+	fig.tight_layout()
+
+	if save_path is not None:
+		save_path.parent.mkdir(parents=True, exist_ok=True)
+		fig.savefig(save_path, dpi=150)
+
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+
+	return (save_path, fig) if return_fig else save_path
+
+
+def plot_single_sensor_deviation_with_events(
+	events_df: pd.DataFrame,
+	sensor_col: str,
+	threshold: float,
+	*,
+	title: str | None = None,
+	save_path: Path | None = None,
+	show: bool = True,
+	return_fig: bool = False,
+) -> Path | tuple[Optional[Path], "plt.Figure"]:
+	"""Plot a single sensor's deviation with detected events and threshold highlighted.
+
+	Uses rcParams for figure size so the saved SVG respects the canonical dimensions.
+	"""
+	dev_col = f"{sensor_col}_deviation"
+	event_col = f"{sensor_col}_event"
+
+	if "Time_sec" not in events_df.columns:
+		raise ValueError("DataFrame must have a 'Time_sec' column.")
+	if dev_col not in events_df.columns:
+		raise ValueError(f"Deviation column '{dev_col}' not found in events_df.")
+
+	fig, ax = plt.subplots()
+
+	ax.plot(events_df["Time_sec"], events_df[dev_col],
+	        color="#1f77b4", linewidth=0.8, label="Deviation")
+
+	if event_col in events_df.columns:
+		event_mask = events_df[event_col].astype(bool)
+		event_times = events_df.loc[event_mask, "Time_sec"]
+		event_values = events_df.loc[event_mask, dev_col]
+		ax.scatter(event_times, event_values, color="red", s=15, zorder=5, label="Detected events")
+
+	ax.axhline(y=threshold, color="orange", linestyle="--", linewidth=0.8, label=f"Threshold ({threshold:.3f})")
+
+	ax.set_xlabel("Time (s)")
+	ax.set_ylabel("Deviation (a.u.)")
+	if title:
+		ax.set_title(title)
+	ax.legend(loc="best", frameon=False)
+
+	left, right = ax.get_xlim()
+	ax.set_xlim(left=0, right=right)
+	ax.margins(x=0)
+	for side in ("top", "right"):
+		ax.spines[side].set_visible(False)
+	ax.tick_params(direction="in", which="both", length=5)
+
+	fig.tight_layout()
+
+	if save_path is not None:
+		save_path.parent.mkdir(parents=True, exist_ok=True)
+		fig.savefig(str(save_path), dpi=150)
+
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+
+	return (save_path, fig) if return_fig else save_path
 
 
 def plot_deviations_with_events_grid(
@@ -2856,6 +3119,65 @@ def main() -> None:
 			show=True,
 		)
 
+		# Plot derivatives with detected events for remaining sensors
+		if len(remaining) == 12:
+			deriv_rem_event_title = f"Remaining Sensors Derivatives with Detected Events (12) — {csv_path.name}"
+			plot_derivatives_with_events_grid(
+				df=df,
+				events_df=events_df_plotting,
+				sensor_cols=remaining,
+				title=deriv_rem_event_title,
+				save_path=None,
+				show=True,
+			)
+
+		# Single-sensor peak detection interactive prompt
+		single_deriv_col: Optional[str] = None
+		single_deriv_title: Optional[str] = None
+		try:
+			entry = input("\nEnter a sensor to plot its peak detection (e.g., 19 or Sensor_19). Leave blank to skip: ").strip()
+			if entry:
+				resolved = normalize_sensor_name(entry, df)
+				single_deriv_col = resolved
+				single_deriv_title = f"{resolved} Peak Detection — {csv_path.name}"
+				plot_single_sensor_deviation_with_events(
+					events_df=events_df_plotting,
+					sensor_col=resolved,
+					threshold=float(thresholds_plotting[resolved]),
+					title=single_deriv_title,
+					save_path=None,
+					show=True,
+				)
+		except Exception as e:
+			print(str(e))
+
+		# 6-sensor 2x3 peak detection grid
+		six_deriv_sensors: Optional[List[str]] = None
+		six_deriv_title: Optional[str] = None
+		try:
+			print("\nEnter 6 sensors for a 2x3 peak detection grid (e.g. 1,2,3,4,5,6). Leave blank to skip:")
+			six_entry = input("  Sensors: ").strip()
+			if six_entry:
+				parts = [p.strip() for p in six_entry.replace(";", ",").split(",") if p.strip()]
+				if len(parts) != 6:
+					print(f"  Expected 6 sensors, got {len(parts)}. Skipping.")
+				else:
+					six_deriv_sensors = [normalize_sensor_name(p, df) for p in parts]
+					six_deriv_title = f"6-Sensor Peak Detection — {csv_path.name}"
+					plot_deviations_with_events_grid(
+						df=df,
+						events_df=events_df_plotting,
+						sensor_cols=six_deriv_sensors,
+						thresholds=thresholds_plotting,
+						nrows=2,
+						ncols=3,
+						title=six_deriv_title,
+						save_path=None,
+						show=True,
+					)
+		except Exception as e:
+			print(str(e))
+
 		# Plot deviations with threshold and detected events for selected sensors
 		print("\nPlotting deviations with threshold and detected events for selected sensors...")
 		dev_event_title = f"Selected Sensors Deviations with Events and Threshold (12) — {csv_path.name}"
@@ -2883,15 +3205,22 @@ def main() -> None:
 		rem_name = input("SVG filename for remaining 12 grid: ").strip()
 		dev_sel_name = input("SVG filename for selected 12 deviations: ").strip()
 		dev_rem_name = input("SVG filename for remaining 12 deviations: ").strip()
+		deriv_sel_name = input("SVG filename for selected 12 derivatives (with events): ").strip()
+		deriv_rem_name = input("SVG filename for remaining 12 derivatives (with events): ").strip() if len(remaining) == 12 else ""
+		dev_event_sel_name = input("SVG filename for selected 12 deviations+events+threshold: ").strip()
+		deriv_6_name = input("SVG filename for 6-sensor 2x3 peak detection: ").strip() if six_deriv_sensors is not None else ""
 		corr_name = input("SVG filename for bout-weight correlation plot: ").strip()
 		lick_corr_name = input("SVG filename for lick-weight correlation plot: ").strip()
 		bout_wl_corr_name = input("SVG filename for bout-weightloss% correlation plot: ").strip()
 		lick_wl_corr_name = input("SVG filename for lick-weightloss% correlation plot: ").strip()
 		weight_wl_corr_name = input("SVG filename for weight-weightloss% correlation plot: ").strip()
-		# Only ask for single-sensor save name if a single sensor was plotted
+		# Only ask for single-sensor save names if those were plotted
 		sing_name = ""
 		if single_sensor_col is not None:
-			sing_name = input("SVG filename for single-sensor plot: ").strip()
+			sing_name = input("SVG filename for single-sensor raw plot: ").strip()
+		sing_deriv_name = ""
+		if single_deriv_col is not None:
+			sing_deriv_name = input("SVG filename for single-sensor peak detection plot: ").strip()
 		ts_name = input("SVG filename for timestamp deltas: ").strip()
 
 		# Re-generate figures in memory without showing, then save with provided names
@@ -2959,6 +3288,77 @@ def main() -> None:
 			)
 			fig_dev_rem.savefig(str(_safe_svg(dev_rem_name)), format="svg", bbox_inches="tight")
 			print(f"Saved SVG: {_safe_svg(dev_rem_name)}")
+
+		# Selected derivatives grid
+		if deriv_sel_name:
+			_, fig_deriv_sel = plot_derivatives_with_events_grid(
+				df=df,
+				events_df=events_df_plotting,
+				sensor_cols=selected,
+				title=deriv_event_title,
+				save_path=None,
+				show=False,
+			)
+			fig_deriv_sel.savefig(str(_safe_svg(deriv_sel_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(deriv_sel_name)}")
+
+		# Remaining derivatives grid
+		if deriv_rem_name and len(remaining) == 12:
+			_, fig_deriv_rem = plot_derivatives_with_events_grid(
+				df=df,
+				events_df=events_df_plotting,
+				sensor_cols=remaining,
+				title=deriv_rem_event_title,
+				save_path=None,
+				show=False,
+			)
+			fig_deriv_rem.savefig(str(_safe_svg(deriv_rem_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(deriv_rem_name)}")
+
+		# Selected deviations + events + threshold grid
+		if dev_event_sel_name:
+			_, fig_dev_event_sel = plot_deviations_with_events_grid(
+				df=df,
+				events_df=events_df_plotting,
+				sensor_cols=selected,
+				thresholds=thresholds_plotting,
+				title=dev_event_title,
+				save_path=None,
+				show=False,
+				y_limits=common_dev_y_limits,
+			)
+			fig_dev_event_sel.savefig(str(_safe_svg(dev_event_sel_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(dev_event_sel_name)}")
+
+		# 6-sensor 2×3 peak detection grid
+		if deriv_6_name and six_deriv_sensors is not None:
+			_, fig_deriv_6 = plot_deviations_with_events_grid(
+				df=df,
+				events_df=events_df_plotting,
+				sensor_cols=six_deriv_sensors,
+				thresholds=thresholds_plotting,
+				nrows=2,
+				ncols=3,
+				title=six_deriv_title,
+				save_path=None,
+				show=False,
+			)
+			fig_deriv_6.savefig(str(_safe_svg(deriv_6_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(deriv_6_name)}")
+
+		# Single-sensor peak detection figure
+		if sing_deriv_name and single_deriv_col is not None:
+			_, fig_sing_deriv = plot_single_sensor_deviation_with_events(
+				events_df=events_df_plotting,
+				sensor_col=single_deriv_col,
+				threshold=float(thresholds_plotting[single_deriv_col]),
+				title=single_deriv_title,
+				save_path=None,
+				show=False,
+				return_fig=True,
+			)
+			fig_sing_deriv.savefig(str(_safe_svg(sing_deriv_name)), format="svg", bbox_inches="tight")
+			print(f"Saved SVG: {_safe_svg(sing_deriv_name)}")
 
 		# Correlation plot
 		if corr_name:

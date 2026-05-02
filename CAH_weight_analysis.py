@@ -37,15 +37,17 @@ plt.rcParams["font.family"] = "sans-serif"
 plt.rcParams["font.sans-serif"] = ["Arial"]
 plt.rcParams["svg.fonttype"] = "none"
 plt.rcParams.update({
-	"font.size": 11,
-	"axes.titlesize": 13,
-	"axes.labelsize": 12,
-	"xtick.labelsize": 10,
-	"ytick.labelsize": 10,
-	"legend.fontsize": 10,
-	"figure.titlesize": 14,
-    })
-
+    "font.size": 8,
+    "axes.titlesize": 10,
+    "axes.labelsize": 8,
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 8,
+    "legend.fontsize": 7.5,
+    "figure.titlesize": 10,
+    "lines.linewidth": 0.5,
+    "lines.markersize": 3,
+    "figure.figsize": (5, 3),
+})
 # ==============================================================================
 # PLOTTING HELPER FUNCTIONS (adapted from ramp_analysis.py)
 # ==============================================================================
