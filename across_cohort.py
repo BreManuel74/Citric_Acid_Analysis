@@ -8476,170 +8476,260 @@ def compare_slopes_within_cohorts(slopes_df: pd.DataFrame) -> Dict:
 
 def compare_slopes_between_cohorts(slopes_df: pd.DataFrame) -> Dict:
     """
-    Statistically compare average slopes between cohorts.
-    
-    Performs:
-    1. Independent samples t-test (or Welch's t-test if variances unequal)    2. Mann-Whitney U test (non-parametric alternative)
-    3. Effect size calculation (Cohen's d)    
+    Statistically compare average slopes between cohorts (2 or more cohorts).
+
+    For 2 cohorts:
+      - Welch's t-test, Mann-Whitney U, Cohen's d, 95% CI for mean difference
+
+    For 3+ cohorts:
+      - Kruskal-Wallis omnibus test (non-parametric)
+      - One-way ANOVA with Welch correction (Brown-Forsythe via scipy)
+      - All pairwise MWU tests with Holm-Bonferroni correction
+      - Per-pair Cohen's d and Hodges-Lehmann shift with bootstrap 95% CI
+
     Parameters:
         slopes_df: DataFrame from calculate_animal_slopes()
-        
+
     Returns:
         Dictionary with test results and effect sizes
     """
     from scipy import stats
-    
+    from itertools import combinations as _comb
+
     print("\n" + "="*80)
     print("BETWEEN-COHORT SLOPE COMPARISON")
     print("="*80)
-    
+
     ca_groups = sorted(slopes_df['Cohort'].unique())
-    
-    if len(ca_groups) != 2:
-        print(f"Warning: Expected 2 cohorts, found {len(ca_groups)}. Returning empty results.")
+    n_groups = len(ca_groups)
+
+    if n_groups < 2:
+        print(f"Warning: Need at least 2 cohorts, found {n_groups}. Returning empty results.")
         return {}
-    
-    ca_0 = ca_groups[0]
-    ca_1 = ca_groups[1]
-    
-    slopes_0 = slopes_df[slopes_df['Cohort'] == ca_0]['Slope'].values
-    slopes_1 = slopes_df[slopes_df['Cohort'] == ca_1]['Slope'].values
-    
-    print(f"\nComparing: {ca_0} (n={len(slopes_0)}) vs {ca_1} (n={len(slopes_1)})")
-    print(f"  {ca_0}: Mean = {slopes_0.mean():.4f}, SD = {slopes_0.std():.4f}")
-    print(f"  {ca_1}: Mean = {slopes_1.mean():.4f}, SD = {slopes_1.std():.4f}")
-    print(f"  Difference in means: {slopes_1.mean() - slopes_0.mean():.4f}")
-    
+
+    group_slopes = [slopes_df[slopes_df['Cohort'] == g]['Slope'].values for g in ca_groups]
+
+    print(f"\nCohorts: {', '.join(ca_groups)}")
+    for g, s in zip(ca_groups, group_slopes):
+        print(f"  {g}: n={len(s)}, Mean={s.mean():.4f}, SD={s.std():.4f}")
+
     results = {
         'ca_groups': ca_groups,
-        'n_0': len(slopes_0),
-        'n_1': len(slopes_1),
-        'mean_0': slopes_0.mean(),
-        'mean_1': slopes_1.mean(),
-        'sd_0': slopes_0.std(),
-        'sd_1': slopes_1.std(),
-        'mean_diff': slopes_1.mean() - slopes_0.mean()
+        'group_stats': [
+            {'cohort': g, 'n': len(s), 'mean': float(s.mean()), 'sd': float(s.std())}
+            for g, s in zip(ca_groups, group_slopes)
+        ],
     }
-    
-    # 1. Welch's t-test (unequal variances assumed)
+
+    # -------------------------------------------------------------------------
+    # 1. Omnibus tests
+    # -------------------------------------------------------------------------
     print("\n" + "-"*80)
-    print("1. WELCH'S T-TEST (Independent samples, unequal variances)")
+    print("1. OMNIBUS TESTS")
     print("-"*80)
-    
-    t_stat, t_p = stats.ttest_ind(slopes_0, slopes_1, equal_var=False)
-    
-    # Calculate Welch-Satterthwaite degrees of freedom
-    s1_sq = slopes_0.var()
-    s2_sq = slopes_1.var()
-    n1 = len(slopes_0)
-    n2 = len(slopes_1)
-    df = (s1_sq/n1 + s2_sq/n2)**2 / ((s1_sq/n1)**2/(n1-1) + (s2_sq/n2)**2/(n2-1))
-    
-    print(f"t-statistic: t = {t_stat:.4f}")
-    print(f"P-value: p = {t_p:.4f}")
-    print(f"Degrees of freedom: df = {df:.2f} (Welch-Satterthwaite)")
-    
-    if t_p < 0.05:
-        print(f"Result: Slopes are significantly different between cohorts (p < 0.05)")
+
+    # Kruskal-Wallis (non-parametric)
+    kw_stat, kw_p = stats.kruskal(*group_slopes)
+    print(f"Kruskal-Wallis H = {kw_stat:.4f}, p = {kw_p:.4f}")
+    if kw_p < 0.05:
+        print("  -> At least one cohort differs significantly (KW, p < 0.05)")
     else:
-        print(f"Result: No significant difference in slopes between cohorts (p >= 0.05)")
-    
-    results['t_test'] = {
-        'statistic': t_stat,
-        'p_value': t_p,
-        'df': df
-    }
-    
-    # 2. Mann-Whitney U test (non-parametric)
+        print("  -> No significant omnibus difference (KW, p >= 0.05)")
+    results['kruskal_wallis'] = {'statistic': kw_stat, 'p_value': kw_p}
+
+    # One-way ANOVA (standard F-test via scipy f_oneway)
+    f_stat, f_p = stats.f_oneway(*group_slopes)
+    print(f"One-way ANOVA   F = {f_stat:.4f}, p = {f_p:.4f}")
+    if f_p < 0.05:
+        print("  -> At least one cohort differs significantly (ANOVA, p < 0.05)")
+    else:
+        print("  -> No significant omnibus difference (ANOVA, p >= 0.05)")
+    results['anova'] = {'statistic': f_stat, 'p_value': f_p}
+
+    # -------------------------------------------------------------------------
+    # 2. Pairwise MWU with Holm-Bonferroni correction + Cohen's d + HL CI
+    # -------------------------------------------------------------------------
     print("\n" + "-"*80)
-    print("2. MANN-WHITNEY U TEST (Non-parametric)")
+    print("2. PAIRWISE COMPARISONS (Holm-Bonferroni corrected MWU)")
     print("-"*80)
-    
-    u_stat, u_p = stats.mannwhitneyu(slopes_0, slopes_1, alternative='two-sided')
-    
-    print(f"U-statistic: U = {u_stat:.4f}")
-    print(f"P-value: p = {u_p:.4f}")
-    
-    if u_p < 0.05:
-        print(f"Result: Slopes are significantly different between cohorts (p < 0.05)")
-    else:
-        print(f"Result: No significant difference in slopes between cohorts (p >= 0.05)")
-    
-    results['mann_whitney'] = {
-        'statistic': u_stat,
-        'p_value': u_p
-    }
-    
-    # 3. Effect size (Cohen's d)
-    print("\n" + "-"*80)
-    print("3. EFFECT SIZE (Cohen's d)")
-    print("-"*80)
-    
-    # Pooled standard deviation
-    pooled_sd = np.sqrt(((len(slopes_0) - 1) * slopes_0.std()**2 + 
-                         (len(slopes_1) - 1) * slopes_1.std()**2) / 
-                        (len(slopes_0) + len(slopes_1) - 2))
-    
-    cohens_d = (slopes_1.mean() - slopes_0.mean()) / pooled_sd
-    
-    # Interpretation
-    if abs(cohens_d) < 0.2:
-        interpretation = "negligible"
-    elif abs(cohens_d) < 0.5:
-        interpretation = "small"
-    elif abs(cohens_d) < 0.8:
-        interpretation = "medium"
-    else:
-        interpretation = "large"
-    
-    print(f"Cohen's d: {cohens_d:.4f}")
-    print(f"Interpretation: {interpretation} effect size")
-    
-    results['effect_size'] = {
-        'cohens_d': cohens_d,
-        'pooled_sd': pooled_sd,
-        'interpretation': interpretation
-    }
-    
-    # 4. Confidence interval for mean difference (using Welch df)
-    print("\n" + "-"*80)
-    print("4. 95% CONFIDENCE INTERVAL FOR MEAN DIFFERENCE")
-    print("-"*80)
-    
-    # Standard error of the difference (for unequal variances)
-    se_diff = np.sqrt((slopes_0.var() / len(slopes_0)) + 
-                      (slopes_1.var() / len(slopes_1)))
-    
-    # Critical value for 95% CI using Welch df
-    t_crit = stats.t.ppf(0.975, df)
-    
-    ci_lower = results['mean_diff'] - t_crit * se_diff
-    ci_upper = results['mean_diff'] + t_crit * se_diff
-    
-    print(f"Mean difference: {results['mean_diff']:.4f}")
-    print(f"95% CI: [{ci_lower:.4f}, {ci_upper:.4f}]")
-    
-    if ci_lower * ci_upper > 0:
-        print("Result: CI does not include zero (significant difference)")
-    else:
-        print("Result: CI includes zero (no significant difference)")
-    
-    results['confidence_interval'] = {
-        'mean_diff': results['mean_diff'],
-        'se_diff': se_diff,
-        'ci_95_lower': ci_lower,
-        'ci_95_upper': ci_upper
-    }
-    
+
+    pairs = list(_comb(range(n_groups), 2))
+    _rng = np.random.default_rng(0)
+    pair_data = []
+    for seed_i, (i, j) in enumerate(pairs):
+        a, b = group_slopes[i], group_slopes[j]
+        n_a, n_b = len(a), len(b)
+        if n_a < 2 or n_b < 2:
+            continue
+        u_stat, u_p = stats.mannwhitneyu(a, b, alternative='two-sided')
+        r_rb = 1.0 - 2.0 * float(u_stat) / (n_a * n_b)
+        _diffs = (np.asarray(a)[:, None] - np.asarray(b)[None, :]).ravel()
+        hl_est = float(np.median(_diffs))
+        _rng_pair = np.random.default_rng(seed_i)
+        _boot = [
+            float(np.median(
+                (_rng_pair.choice(a, n_a, replace=True)[:, None]
+                 - _rng_pair.choice(b, n_b, replace=True)[None, :]).ravel()
+            ))
+            for _ in range(2000)
+        ]
+        hl_ci_lo = float(np.percentile(_boot, 2.5))
+        hl_ci_hi = float(np.percentile(_boot, 97.5))
+        # Cohen's d (pooled SD)
+        pooled_sd = np.sqrt(((n_a - 1) * a.std()**2 + (n_b - 1) * b.std()**2)
+                            / (n_a + n_b - 2)) if (n_a + n_b - 2) > 0 else np.nan
+        cohens_d = float((b.mean() - a.mean()) / pooled_sd) if pooled_sd and pooled_sd > 0 else float('nan')
+        if abs(cohens_d) < 0.2:
+            d_interp = "negligible"
+        elif abs(cohens_d) < 0.5:
+            d_interp = "small"
+        elif abs(cohens_d) < 0.8:
+            d_interp = "medium"
+        else:
+            d_interp = "large"
+        pair_data.append({
+            'idx_a': i, 'idx_b': j,
+            'label_a': ca_groups[i], 'label_b': ca_groups[j],
+            'n_a': n_a, 'n_b': n_b,
+            'U': float(u_stat),
+            'p_raw': float(u_p),
+            'p_corrected': 0.0,   # filled after Holm
+            'rank_biserial_r': r_rb,
+            'hodges_lehmann': hl_est,
+            'ci_95_lo': hl_ci_lo,
+            'ci_95_hi': hl_ci_hi,
+            'cohens_d': cohens_d,
+            'd_interpretation': d_interp,
+            'mean_diff': float(b.mean() - a.mean()),
+        })
+
+    # Apply Holm-Bonferroni
+    if pair_data:
+        _p_raw = [r['p_raw'] for r in pair_data]
+        _n = len(_p_raw)
+        _indexed = sorted(enumerate(_p_raw), key=lambda x: x[1])
+        _running_max = 0.0
+        _p_adj = [0.0] * _n
+        for _rank, (_orig, _p) in enumerate(_indexed):
+            _a_val = min(1.0, float(_p) * (_n - _rank))
+            _a_val = max(_a_val, _running_max)
+            _p_adj[_orig] = _a_val
+            _running_max = _a_val
+        for r, pa in zip(pair_data, _p_adj):
+            r['p_corrected'] = pa
+
+    for r in pair_data:
+        sig = '***' if r['p_corrected'] < 0.001 else ('**' if r['p_corrected'] < 0.01
+              else ('*' if r['p_corrected'] < 0.05 else 'ns'))
+        print(f"  {r['label_a']} vs {r['label_b']}: "
+              f"U={r['U']:.2f}, p_raw={r['p_raw']:.4f}, p_adj={r['p_corrected']:.4f} {sig}, "
+              f"r_rb={r['rank_biserial_r']:.3f}, d={r['cohens_d']:.3f} ({r['d_interpretation']})")
+
+    results['pairwise'] = pair_data
+
+    # For backward-compatibility: if exactly 2 cohorts, keep legacy keys
+    if n_groups == 2 and pair_data:
+        r0 = pair_data[0]
+        a, b = group_slopes[0], group_slopes[1]
+        results['n_0'] = r0['n_a']
+        results['n_1'] = r0['n_b']
+        results['mean_0'] = float(a.mean())
+        results['mean_1'] = float(b.mean())
+        results['sd_0'] = float(a.std())
+        results['sd_1'] = float(b.std())
+        results['mean_diff'] = r0['mean_diff']
+        results['mann_whitney'] = {
+            'statistic': r0['U'], 'p_value': r0['p_corrected'],
+            'rank_biserial_r': r0['rank_biserial_r'],
+            'hodges_lehmann': r0['hodges_lehmann'],
+            'ci_95_lo': r0['ci_95_lo'], 'ci_95_hi': r0['ci_95_hi'],
+        }
+        # Welch's t-test (only meaningful for 2 groups)
+        t_stat, t_p = stats.ttest_ind(a, b, equal_var=False)
+        s1_sq, s2_sq = a.var(), b.var()
+        n1, n2 = len(a), len(b)
+        _df = (s1_sq/n1 + s2_sq/n2)**2 / ((s1_sq/n1)**2/(n1-1) + (s2_sq/n2)**2/(n2-1))
+        results['t_test'] = {'statistic': t_stat, 'p_value': t_p, 'df': _df}
+        results['effect_size'] = {
+            'cohens_d': r0['cohens_d'],
+            'interpretation': r0['d_interpretation'],
+        }
+        se_diff = np.sqrt(s1_sq/n1 + s2_sq/n2)
+        t_crit = stats.t.ppf(0.975, _df)
+        results['confidence_interval'] = {
+            'mean_diff': r0['mean_diff'],
+            'se_diff': se_diff,
+            'ci_95_lower': r0['mean_diff'] - t_crit * se_diff,
+            'ci_95_upper': r0['mean_diff'] + t_crit * se_diff,
+        }
+
     return results
+
+
+def _format_mwu_slope_report(
+    pair_results: list,
+    measure: str,
+    time_unit: str,
+) -> str:
+    """Format MWU bracket-test results for slope comparison as a text report."""
+    n_pairs = len(pair_results)
+    corr_note = (
+        f"Holm-Bonferroni step-down corrected across {n_pairs} pairs"
+        if n_pairs > 1 else "no correction (single pair)"
+    )
+    lines = [
+        "=" * 90,
+        "MANN-WHITNEY U TEST RESULTS  --  Slope Comparison Brackets",
+        "=" * 90,
+        f"Generated  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Measure    : {measure}",
+        f"Time unit  : {time_unit}",
+        f"Correction : {corr_note}",
+        "",
+        "Field definitions:",
+        "  U        : Mann-Whitney U statistic",
+        "  p(raw)   : Two-sided p-value (uncorrected)",
+        "  p(adj)   : Holm-Bonferroni step-down corrected p-value",
+        "  r_rb     : Rank-biserial correlation (effect size r = 1 - 2U/(nA*nB))",
+        "             |r| < 0.3 = small, 0.3-0.5 = medium, > 0.5 = large",
+        "  HL_est   : Hodges-Lehmann location shift (median of all pairwise diffs A-B)",
+        "  95% CI   : Bootstrap CI (n=2 000 resamples) on Hodges-Lehmann estimator",
+        "",
+    ]
+    hdr = (
+        f"{'Comparison':<38} {'nA':>4} {'nB':>4}  "
+        f"{'U':>9}  {'p(raw)':>9}  {'p(adj)':>9}  "
+        f"{'r_rb':>7}  {'HL_est':>9}  {'95% CI'}"
+    )
+    lines.append(hdr)
+    lines.append("-" * 100)
+
+    def _fp(p: float) -> str:
+        return "< 0.001" if p < 0.001 else f"{p:.4f}"
+
+    for r in pair_results:
+        comp = f"{r['label_a']} vs {r['label_b']}"
+        ci_s = f"[{r['ci_95_lo']:.4f}, {r['ci_95_hi']:.4f}]"
+        lines.append(
+            f"{comp:<38} {r['n_a']:>4} {r['n_b']:>4}  "
+            f"{r['U']:>9.2f}  {_fp(r['p_raw']):>9}  {_fp(r['p_corrected']):>9}  "
+            f"{r['rank_biserial_r']:>7.4f}  {r['hodges_lehmann']:>9.4f}  {ci_s}"
+        )
+    lines += [
+        "",
+        "Significance (after correction): * p<0.05   ** p<0.01   *** p<0.001",
+        "=" * 90,
+    ]
+    return "\n".join(lines)
 
 
 def plot_slopes_comparison(
     slopes_df: pd.DataFrame,
     measure: str = "Total Change",
     time_unit: str = "Week",
-    title: Optional[str] = None,
+    title: Optional[Path] = None,
     save_path: Optional[Path] = None,
+    save_mwu_path: Optional[Path] = None,
     show: bool = True
 ) -> plt.Figure:
     """
@@ -8700,21 +8790,72 @@ def plot_slopes_comparison(
     # Pairwise Mann-Whitney U tests with significance brackets
     from itertools import combinations
     pairs = list(combinations(range(len(ca_groups)), 2))
+    n_pairs = len(pairs)
     all_vals = np.concatenate([d for d in box_data if len(d) > 0])
     y_top = np.nanmax(all_vals) if len(all_vals) > 0 else 1.0
     y_range = np.nanmax(all_vals) - np.nanmin(all_vals) if len(all_vals) > 0 else 1.0
     step = y_range * 0.12
 
+    _mwu_bracket_results = []
     for level, (i, j) in enumerate(pairs):
         a, b = box_data[i], box_data[j]
         if len(a) < 2 or len(b) < 2:
             continue
-        _, p = stats.mannwhitneyu(a, b, alternative='two-sided')
-        if p < 0.001:
+        u_stat, p_raw = stats.mannwhitneyu(a, b, alternative='two-sided')
+        n_a, n_b = len(a), len(b)
+        r_rb = 1.0 - 2.0 * float(u_stat) / (n_a * n_b)
+        _diffs = (np.asarray(a)[:, None] - np.asarray(b)[None, :]).ravel()
+        hl_est = float(np.median(_diffs))
+        _rng_br = np.random.default_rng(level)
+        _boot_br = [
+            float(np.median(
+                (_rng_br.choice(a, n_a, replace=True)[:, None]
+                 - _rng_br.choice(b, n_b, replace=True)[None, :]).ravel()
+            ))
+            for _ in range(2000)
+        ]
+        _mwu_bracket_results.append({
+            'idx_a': i, 'idx_b': j,
+            'label_a': ca_groups[i], 'label_b': ca_groups[j],
+            'n_a': n_a, 'n_b': n_b,
+            'U': float(u_stat),
+            'p_raw': float(p_raw),
+            'p_corrected': 0.0,    # filled in below after Holm
+            'rank_biserial_r': r_rb,
+            'hodges_lehmann': hl_est,
+            'ci_95_lo': float(np.percentile(_boot_br, 2.5)),
+            'ci_95_hi': float(np.percentile(_boot_br, 97.5)),
+        })
+
+    # Apply Holm-Bonferroni step-down correction across all valid pairs
+    if _mwu_bracket_results:
+        _p_raw_all = [r['p_raw'] for r in _mwu_bracket_results]
+        _n = len(_p_raw_all)
+        _indexed = sorted(enumerate(_p_raw_all), key=lambda x: x[1])
+        _running_max = 0.0
+        _p_adj = [0.0] * _n
+        for _rank, (_orig, _p) in enumerate(_indexed):
+            _a = min(1.0, float(_p) * (_n - _rank))
+            _a = max(_a, _running_max)
+            _p_adj[_orig] = _a
+            _running_max = _a
+        for _r, _pa in zip(_mwu_bracket_results, _p_adj):
+            _r['p_corrected'] = _pa
+
+    for level, (i, j) in enumerate(pairs):
+        # Find matching result (skip pairs that were filtered out)
+        _match = next(
+            (r for r in _mwu_bracket_results if r['idx_a'] == i and r['idx_b'] == j),
+            None,
+        )
+        if _match is None:
+            continue
+        p_corr = _match['p_corrected']
+        if p_corr < 0.001:
             label = '***'
-        elif p < 0.01:
+        elif p_corr < 0.01:
             label = '**'
-        elif p < 0.05:
+        elif p_corr < 0.05:
             label = '*'
         else:
             label = 'ns'
@@ -8726,6 +8867,13 @@ def plot_slopes_comparison(
                 color='black', linewidth=0.5)
         ax.text((x1 + x2) / 2, y_bracket + tick_h * 0.5, label,
                 ha='center', va='bottom', fontsize=7)
+
+    if save_mwu_path is not None and _mwu_bracket_results:
+        _mwu_lines = _format_mwu_slope_report(
+            _mwu_bracket_results, measure, time_unit
+        )
+        Path(save_mwu_path).write_text(_mwu_lines, encoding='utf-8')
+        print(f"  [OK] MWU report saved -> {save_mwu_path}")
 
     if title is None:
         title = f'Slope Analysis: {measure} vs {time_unit}'
@@ -8842,93 +8990,137 @@ def generate_slope_analysis_report(
     lines.append("\n\n" + "=" * 80)
     lines.append("SECTION 3: BETWEEN-COHORT COMPARISON")
     lines.append("=" * 80)
-    lines.append("\nThis section compares the average slopes between the two cohorts.")
-    
-    if between_results:
-        ca_0 = between_results['ca_groups'][0]
-        ca_1 = between_results['ca_groups'][1]
-        
-        lines.append(f"\nCohort Comparison: {ca_0} vs {ca_1}")
-        lines.append("-" * 80)
-        lines.append(f"  {ca_0}: Mean = {between_results['mean_0']:.4f}, SD = {between_results['sd_0']:.4f} (n={between_results['n_0']})")
-        lines.append(f"  {ca_1}: Mean = {between_results['mean_1']:.4f}, SD = {between_results['sd_1']:.4f} (n={between_results['n_1']})")
-        lines.append(f"  Difference in means: {between_results['mean_diff']:.4f}")
-        
-        # T-test results
-        lines.append("\n" + "-" * 80)
-        lines.append("Welch's T-Test (unequal variances):")
-        lines.append("-" * 80)
-        t_test = between_results['t_test']
-        lines.append(f"  t-statistic: t({t_test['df']:.2f}) = {t_test['statistic']:.4f}")
-        lines.append(f"  P-value:     p = {t_test['p_value']:.4f}")
-        
-        if t_test['p_value'] < 0.001:
-            sig_str = "p < 0.001 (highly significant)"
-        elif t_test['p_value'] < 0.01:
-            sig_str = "p < 0.01 (very significant)"
-        elif t_test['p_value'] < 0.05:
-            sig_str = "p < 0.05 (significant)"
-        else:
-            sig_str = "p >= 0.05 (not significant)"
-        
-        lines.append(f"  Result: {sig_str}")
-        
-        # Mann-Whitney U test
-        lines.append("\n" + "-" * 80)
-        lines.append("Mann-Whitney U Test (Non-parametric):")
-        lines.append("-" * 80)
-        mw = between_results['mann_whitney']
-        lines.append(f"  U-statistic: U = {mw['statistic']:.4f}")
-        lines.append(f"  P-value:     p = {mw['p_value']:.4f}")
-        
-        if mw['p_value'] < 0.05:
-            lines.append(f"  Result: Significant difference (p < 0.05)")
-        else:
-            lines.append(f"  Result: No significant difference (p >= 0.05)")
-        
-        # Effect size
-        lines.append("\n" + "-" * 80)
-        lines.append("Effect Size (Cohen's d):")
-        lines.append("-" * 80)
-        es = between_results['effect_size']
-        lines.append(f"  Cohen's d:   {es['cohens_d']:.4f}")
-        lines.append(f"  Interpretation: {es['interpretation'].capitalize()} effect size")
-        
-        # Confidence interval
-        lines.append("\n" + "-" * 80)
-        lines.append("95% Confidence Interval for Mean Difference:")
-        lines.append("-" * 80)
-        ci = between_results['confidence_interval']
-        lines.append(f"  Mean Difference: {ci['mean_diff']:.4f}")
-        lines.append(f"  95% CI: [{ci['ci_95_lower']:.4f}, {ci['ci_95_upper']:.4f}]")
-        
-        if ci['ci_95_lower'] * ci['ci_95_upper'] > 0:
-            lines.append("  Interpretation: CI does not include zero (significant difference)")
-        else:
-            lines.append("  Interpretation: CI includes zero (no significant difference)")
-    else:
-        # No between_results (less than 2 cohorts)
+
+    ca_groups = sorted(slopes_df['Cohort'].unique())
+    n_groups = len(ca_groups)
+
+    lines.append(f"\nThis section compares the average slopes across {n_groups} cohort(s).")
+
+    if not between_results:
         lines.append("\n[WARNING] Between-cohort comparison could not be performed.")
-        lines.append("Expected 2 cohorts but found a different number.")
-        lines.append("Please ensure you have loaded exactly 2 cohort CSV files.")
-    
+        lines.append("Please ensure you have loaded at least 2 cohort CSV files.")
+    else:
+        # Group summary table
+        lines.append("\nGroup Means:")
+        lines.append("-" * 80)
+        for gs in between_results.get('group_stats', []):
+            lines.append(f"  {gs['cohort']:<30} n={gs['n']:>3},  Mean={gs['mean']:>8.4f},  SD={gs['sd']:>7.4f}")
+
+        # Omnibus tests
+        lines.append("\n" + "-" * 80)
+        lines.append("Omnibus Tests:")
+        lines.append("-" * 80)
+        if 'kruskal_wallis' in between_results:
+            kw = between_results['kruskal_wallis']
+            kw_sig = "p < 0.001" if kw['p_value'] < 0.001 else (
+                     "p < 0.01" if kw['p_value'] < 0.01 else (
+                     "p < 0.05" if kw['p_value'] < 0.05 else "p >= 0.05 (ns)"))
+            lines.append(f"  Kruskal-Wallis: H = {kw['statistic']:.4f}, p = {kw['p_value']:.4f}  [{kw_sig}]")
+        if 'anova' in between_results:
+            an = between_results['anova']
+            an_sig = "p < 0.001" if an['p_value'] < 0.001 else (
+                     "p < 0.01" if an['p_value'] < 0.01 else (
+                     "p < 0.05" if an['p_value'] < 0.05 else "p >= 0.05 (ns)"))
+            lines.append(f"  One-way ANOVA:  F = {an['statistic']:.4f}, p = {an['p_value']:.4f}  [{an_sig}]")
+        # Legacy 2-cohort Welch t-test
+        if 't_test' in between_results:
+            tt = between_results['t_test']
+            tt_sig = "p < 0.001" if tt['p_value'] < 0.001 else (
+                     "p < 0.01" if tt['p_value'] < 0.01 else (
+                     "p < 0.05" if tt['p_value'] < 0.05 else "p >= 0.05 (ns)"))
+            lines.append(f"  Welch's t-test: t({tt['df']:.2f}) = {tt['statistic']:.4f}, p = {tt['p_value']:.4f}  [{tt_sig}]")
+
+        # Pairwise comparisons
+        pairwise = between_results.get('pairwise', [])
+        if pairwise:
+            lines.append("\n" + "-" * 80)
+            lines.append("Pairwise Comparisons (Holm-Bonferroni corrected MWU):")
+            lines.append("-" * 80)
+
+            def _fp(p: float) -> str:
+                return "< 0.001" if p < 0.001 else f"{p:.4f}"
+
+            hdr = (f"  {'Comparison':<38} {'nA':>4} {'nB':>4}  "
+                   f"{'U':>9}  {'p(raw)':>9}  {'p(adj)':>9}  "
+                   f"{'r_rb':>7}  {'d':>7}  {'HL_est':>9}  {'95% CI'}")
+            lines.append(hdr)
+            lines.append("  " + "-" * 98)
+            for r in pairwise:
+                sig = ('***' if r['p_corrected'] < 0.001 else
+                       ('**' if r['p_corrected'] < 0.01 else
+                        ('*' if r['p_corrected'] < 0.05 else 'ns')))
+                comp = f"{r['label_a']} vs {r['label_b']}"
+                ci_s = f"[{r['ci_95_lo']:.4f}, {r['ci_95_hi']:.4f}]"
+                lines.append(
+                    f"  {comp:<38} {r['n_a']:>4} {r['n_b']:>4}  "
+                    f"{r['U']:>9.2f}  {_fp(r['p_raw']):>9}  {_fp(r['p_corrected']):>9}  "
+                    f"{r['rank_biserial_r']:>7.4f}  {r['cohens_d']:>7.4f}  "
+                    f"{r['hodges_lehmann']:>9.4f}  {ci_s}  {sig}"
+                )
+            lines.append("")
+            lines.append("  Significance (after Holm-Bonferroni correction):")
+            lines.append("  * p<0.05   ** p<0.01   *** p<0.001   ns = not significant")
+            lines.append("  r_rb = rank-biserial r  |  d = Cohen's d  |  HL_est = Hodges-Lehmann shift (A-B)")
+            lines.append("  95% CI = bootstrap CI (n=2 000 resamples) on Hodges-Lehmann estimator")
+
+        # Legacy 2-cohort CI block
+        if 'confidence_interval' in between_results:
+            ci = between_results['confidence_interval']
+            lines.append("\n" + "-" * 80)
+            lines.append("95% Confidence Interval for Mean Difference (Welch):")
+            lines.append("-" * 80)
+            lines.append(f"  Mean Difference: {ci['mean_diff']:.4f}")
+            lines.append(f"  95% CI: [{ci['ci_95_lower']:.4f}, {ci['ci_95_upper']:.4f}]")
+            if ci['ci_95_lower'] * ci['ci_95_upper'] > 0:
+                lines.append("  Interpretation: CI does not include zero (significant difference)")
+            else:
+                lines.append("  Interpretation: CI includes zero (no significant difference)")
+
     # Interpretation and conclusion
     lines.append("\n\n" + "=" * 80)
     lines.append("SECTION 4: INTERPRETATION AND CONCLUSIONS")
     lines.append("=" * 80)
-    
-    if between_results and 't_test' in between_results and between_results['t_test']['p_value'] < 0.05:
-        lines.append(f"\nThe two cohorts show SIGNIFICANTLY DIFFERENT rates of weight change.")
-        lines.append(f"The {between_results['ca_groups'][1]} group has a mean slope that is")
-        lines.append(f"{abs(between_results['mean_diff']):.4f} {measure} per {time_unit} {'higher' if between_results['mean_diff'] > 0 else 'lower'}")
-        lines.append(f"than the {between_results['ca_groups'][0]} group (p = {between_results['t_test']['p_value']:.4f}).")
-    elif between_results and 't_test' in between_results:
-        lines.append(f"\nThe two cohorts show NO SIGNIFICANT DIFFERENCE in rates of weight change.")
-        lines.append(f"Both groups put on weight at approximately the same rate (p = {between_results['t_test']['p_value']:.4f}).")
-    else:
+
+    if not between_results:
         lines.append(f"\n[WARNING] Between-cohort comparison could not be completed.")
-        lines.append("This analysis requires exactly 2 cohorts to be loaded.")
-        lines.append("Please run the analysis again with 2 cohort CSV files selected.")
+        lines.append("Please run the analysis again with at least 2 cohort CSV files selected.")
+    else:
+        pairwise = between_results.get('pairwise', [])
+        # Pick the most relevant omnibus p-value
+        omnibus_p = between_results.get('kruskal_wallis', {}).get('p_value', 1.0)
+        sig_pairs = [r for r in pairwise if r['p_corrected'] < 0.05]
+
+        if omnibus_p < 0.05:
+            lines.append(
+                f"\nThe omnibus test detected a significant difference in slopes across cohorts "
+                f"(Kruskal-Wallis p = {omnibus_p:.4f})."
+            )
+            if sig_pairs:
+                lines.append(
+                    f"Pairwise Holm-Bonferroni-corrected MWU identified {len(sig_pairs)} "
+                    f"significant pair(s):"
+                )
+                for r in sig_pairs:
+                    direction = "higher" if r['mean_diff'] > 0 else "lower"
+                    lines.append(
+                        f"  {r['label_a']} vs {r['label_b']}: "
+                        f"{r['label_b']} slope is {abs(r['mean_diff']):.4f} {measure}/{time_unit} "
+                        f"{direction} than {r['label_a']} "
+                        f"(p_adj = {r['p_corrected']:.4f}, d = {r['cohens_d']:.3f} [{r['d_interpretation']}])"
+                    )
+            else:
+                lines.append(
+                    "No individual pairwise contrast survived Holm-Bonferroni correction "
+                    "(omnibus significance may reflect modest effect spread)."
+                )
+        else:
+            lines.append(
+                f"\nNo significant omnibus difference in slopes across cohorts "
+                f"(Kruskal-Wallis p = {omnibus_p:.4f})."
+            )
+            lines.append(
+                "All cohorts appear to change weight at a similar rate."
+            )
     
     lines.append("\n" + "=" * 80)
     lines.append("END OF REPORT")
@@ -9009,12 +9201,14 @@ def perform_complete_slope_analysis(
     # Step 6: Create visualization
     if HAS_MATPLOTLIB:
         plot_path = output_dir / f"slope_analysis_{measure.replace(' ', '_')}_{timestamp}.svg" if save_plot else None
+        mwu_path  = output_dir / f"slope_analysis_mwu_{measure.replace(' ', '_')}_{timestamp}.txt" if save_report else None
         
         fig = plot_slopes_comparison(
             slopes_df, 
             measure=measure, 
             time_unit=time_unit,
             save_path=plot_path,
+            save_mwu_path=mwu_path,
             show=True
         )
     

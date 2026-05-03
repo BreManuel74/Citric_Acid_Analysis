@@ -117,6 +117,8 @@ def _detect_cohort_color(path=None, df=None) -> str:
     """Infer cohort color from the CSV file path, then from CA% values in the data."""
     if path is not None:
         p = str(path).lower()
+        if '2wk' in p or '2_wk' in p or '2_week' in p or '2week' in p:
+            return _COLOR_OTHER
         if 'ramp' in p:
             return _COLOR_RAMP
         if '2%' in p or '2pct' in p:
@@ -3623,9 +3625,14 @@ def generate_lick_descriptive_stats_report(
             }
             print(f"  {lbl:>8}  {n:>4}  {mean_v:>8.3f}  {median_v:>8.3f}  "
                   f"{sd_v:>8.3f}  {var_v:>10.3f}  {ci_str:>22}")
-        # Collapsed "All" row
+        # Collapsed "All" row — one grand mean per animal across weeks
         if all_vals:
-            _all = np.concatenate(all_vals)
+            if len(all_vals) > 1 and all(len(a) == len(all_vals[0]) for a in all_vals):
+                # Same n animals each week: average across weeks per animal position
+                _all = np.mean(np.column_stack(all_vals), axis=1)
+            else:
+                # Unequal animal counts across weeks — fall back to concatenation
+                _all = np.concatenate(all_vals)
             _an = len(_all)
             _am     = float(np.mean(_all))
             _amed   = float(np.median(_all))

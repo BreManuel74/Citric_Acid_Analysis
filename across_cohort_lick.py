@@ -50,6 +50,13 @@ except ImportError:
     print("Warning: pingouin not installed. Mixed ANOVA will not be available.")
     print("Install with: pip install pingouin")
 
+# Try to import rpy2 for R-based polynomial contrasts (lme4 / lmerTest / emmeans)
+try:
+    import rpy2.robjects as _rpy2_ro  # noqa: F401 – import check only
+    HAS_RPY2 = True
+except ImportError:
+    HAS_RPY2 = False
+
 # Try to import tkinter for GUI file selection
 try:
     import tkinter as tk
@@ -3828,13 +3835,171 @@ def _format_stratified_omnibus_report(
 # =============================================================================
 
 
+def _holm_bonferroni(p_values: list) -> list:
+    """Return Holm-Bonferroni step-down corrected p-values (same order as input)."""
+    n = len(p_values)
+    if n == 0:
+        return []
+    indexed = sorted(enumerate(p_values), key=lambda x: x[1])
+    adjusted = [0.0] * n
+    running_max = 0.0
+    for rank, (orig_idx, p) in enumerate(indexed):
+        adj = min(1.0, float(p) * (n - rank))
+        adj = max(adj, running_max)   # enforce monotonicity
+        adjusted[orig_idx] = adj
+        running_max = adj
+    return adjusted
+
+
+def _mwu_pairs_compute(
+    group_values: list,
+    group_labels: list,
+    n_boot: int = 2000,
+    rng_seed: int = 0,
+) -> list:
+    """Run Mann-Whitney U tests for every pair of groups.
+
+    Returns a list of dicts (one per valid pair) with keys:
+        idx_a, idx_b, label_a, label_b, n_a, n_b,
+        U, p_raw, p_corrected (Holm-Bonferroni),
+        rank_biserial_r, hodges_lehmann, ci_95_lo, ci_95_hi
+    """
+    from itertools import combinations as _comb
+    from scipy.stats import mannwhitneyu as _mwu_fn
+    import numpy as _np
+
+    pairs = list(_comb(range(len(group_values)), 2))
+    rng = _np.random.default_rng(rng_seed)
+    results = []
+
+    for i, j in pairs:
+        a = _np.asarray(group_values[i], dtype=float)
+        b = _np.asarray(group_values[j], dtype=float)
+        n_a, n_b = int(len(a)), int(len(b))
+        if n_a < 2 or n_b < 2:
+            continue
+        try:
+            u_stat, p_raw = _mwu_fn(a, b, alternative='two-sided')
+        except Exception:
+            continue
+        r_rb  = 1.0 - 2.0 * float(u_stat) / (n_a * n_b)
+        diffs = (a[:, None] - b[None, :]).ravel()
+        hl    = float(_np.median(diffs))
+        boot  = [
+            float(_np.median(
+                (rng.choice(a, n_a, replace=True)[:, None]
+                 - rng.choice(b, n_b, replace=True)[None, :]).ravel()
+            ))
+            for _ in range(n_boot)
+        ]
+        ci_lo = float(_np.percentile(boot, 2.5))
+        ci_hi = float(_np.percentile(boot, 97.5))
+        results.append({
+            'idx_a':           i,
+            'idx_b':           j,
+            'label_a':         group_labels[i] if group_labels else str(i),
+            'label_b':         group_labels[j] if group_labels else str(j),
+            'n_a':             n_a,
+            'n_b':             n_b,
+            'U':               float(u_stat),
+            'p_raw':           float(p_raw),
+            'p_corrected':     0.0,     # filled in below after Holm
+            'rank_biserial_r': r_rb,
+            'hodges_lehmann':  hl,
+            'ci_95_lo':        ci_lo,
+            'ci_95_hi':        ci_hi,
+        })
+
+    # Apply Holm-Bonferroni step-down correction across all valid pairs
+    if results:
+        p_adj = _holm_bonferroni([r['p_raw'] for r in results])
+        for r, pa in zip(results, p_adj):
+            r['p_corrected'] = pa
+
+    return results
+
+
+def _format_mwu_report(
+    pair_results: list,
+    measure_label: str,
+    context_label: str,
+) -> str:
+    """Return a formatted MWU report string."""
+    from datetime import datetime as _dt
+    n_pairs = len(pair_results)
+    corr_note = (
+        f"Holm-Bonferroni step-down corrected across {n_pairs} pairs"
+        if n_pairs > 1 else "no correction (single pair)"
+    )
+    lines = [
+        "=" * 90,
+        "MANN-WHITNEY U TEST RESULTS",
+        "=" * 90,
+        f"Generated  : {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Measure    : {measure_label}",
+        f"Context    : {context_label}",
+        f"Correction : {corr_note}",
+        "",
+        "Field definitions:",
+        "  U        : Mann-Whitney U statistic",
+        "  p(raw)   : Two-sided p-value (uncorrected)",
+        "  p(adj)   : Holm-Bonferroni step-down corrected p-value",
+        "  r_rb     : Rank-biserial correlation (effect size r = 1 - 2U/(nA*nB))",
+        "             |r| < 0.3 = small, 0.3-0.5 = medium, > 0.5 = large",
+        "  HL_est   : Hodges-Lehmann location shift (median of all pairwise diffs A-B)",
+        "  95% CI   : Bootstrap CI (n=2 000 resamples) on Hodges-Lehmann estimator",
+        "",
+    ]
+    hdr = (
+        f"{'Comparison':<38} {'nA':>4} {'nB':>4}  "
+        f"{'U':>9}  {'p(raw)':>9}  {'p(adj)':>9}  "
+        f"{'r_rb':>7}  {'HL_est':>9}  {'95% CI'}"
+    )
+    lines.append(hdr)
+    lines.append("-" * 100)
+
+    def _fp(p: float) -> str:
+        return "< 0.001" if p < 0.001 else f"{p:.4f}"
+
+    for r in pair_results:
+        comp = f"{r['label_a']} vs {r['label_b']}"
+        ci_s = f"[{r['ci_95_lo']:.4f}, {r['ci_95_hi']:.4f}]"
+        lines.append(
+            f"{comp:<38} {r['n_a']:>4} {r['n_b']:>4}  "
+            f"{r['U']:>9.2f}  {_fp(r['p_raw']):>9}  {_fp(r['p_corrected']):>9}  "
+            f"{r['rank_biserial_r']:>7.4f}  {r['hodges_lehmann']:>9.4f}  {ci_s}"
+        )
+    lines += [
+        "",
+        "Significance (after correction): * p<0.05   ** p<0.01   *** p<0.001",
+        "=" * 90,
+    ]
+    return "\n".join(lines)
+
+
+def _save_mwu_report(
+    pair_results: list,
+    measure_label: str,
+    context_label: str,
+    save_path,
+) -> None:
+    """Write a formatted MWU report to *save_path*."""
+    from pathlib import Path as _Path
+    if not pair_results:
+        return
+    text = _format_mwu_report(pair_results, measure_label, context_label)
+    _Path(save_path).write_text(text, encoding='utf-8')
+    print(f"  [OK] MWU report saved -> {save_path}")
+
+
 def _add_mwu_brackets(
     ax,
     group_values: list,
     x_positions,
     y_tops,
     alpha: float = 0.05,
-) -> None:
+    group_labels: list = None,
+) -> list:
     """Draw Mann-Whitney U significance brackets for all bar group pairs.
 
     Parameters
@@ -3843,37 +4008,31 @@ def _add_mwu_brackets(
     group_values  : list of 1-D arrays, one per bar group (in x_positions order)
     x_positions   : sequence of x coordinates for each bar
     y_tops        : sequence of bar top heights (mean + SEM) for bracket placement
-    alpha         : family-wise significance threshold (Bonferroni-corrected)
+    alpha         : family-wise significance threshold (Holm-Bonferroni step-down corrected)
+    group_labels  : optional list of group name strings (used in saved report)
+
+    Returns
+    -------
+    list of pair-result dicts (from _mwu_pairs_compute); empty list if < 2 valid pairs.
     """
-    from itertools import combinations as _comb
-    from scipy.stats import mannwhitneyu as _mwu
+    _labels = group_labels or [str(k) for k in range(len(group_values))]
+    pair_data = _mwu_pairs_compute(group_values, _labels)
 
-    pairs = list(_comb(range(len(group_values)), 2))
-    if not pairs:
-        return
+    if not pair_data:
+        return []
 
-    n_pairs = len(pairs)
-    pair_results = []
-    for i, j in pairs:
-        vi = group_values[i]
-        vj = group_values[j]
-        if len(vi) < 2 or len(vj) < 2:
-            continue
-        try:
-            _, p = _mwu(vi, vj, alternative='two-sided')
-        except Exception:
-            p = 1.0
-        pair_results.append((i, j, p))
+    # Build (idx_a, idx_b, p_corrected) tuples using Holm-corrected values from pair_data
+    pair_results = [(r['idx_a'], r['idx_b'], r['p_corrected']) for r in pair_data]
 
     if not pair_results:
-        return
+        return pair_data
 
-    def _stars(p_corr):
-        if p_corr < 0.001:
+    def _stars(p_adj):
+        if p_adj < 0.001:
             return '***'
-        if p_corr < 0.01:
+        if p_adj < 0.01:
             return '**'
-        if p_corr < alpha:
+        if p_adj < alpha:
             return '*'
         return 'ns'
 
@@ -3894,8 +4053,7 @@ def _add_mwu_brackets(
     # Sort so adjacent (short-span) pairs are drawn lower, wide spans higher
     pair_results_sorted = sorted(pair_results, key=lambda r: abs(r[1] - r[0]))
 
-    for (i, j, p_raw) in pair_results_sorted:
-        p_corr = min(p_raw * n_pairs, 1.0)
+    for (i, j, p_corr) in pair_results_sorted:
         label = _stars(p_corr)
         x_i = x_positions[i]
         x_j = x_positions[j]
@@ -3923,6 +4081,7 @@ def _add_mwu_brackets(
     # For all-negative data the top should be at least 0 + bracket headroom
     new_top = max(raw_new_top, _data_range * 0.20) if _all_negative else raw_new_top
     ax.set_ylim(bottom=new_bottom, top=new_top)
+    return pair_data
 
 
 def plot_fecal_qq(
@@ -4351,6 +4510,553 @@ def plot_omnibus_interaction(
         plt.close(fig)
 
     return fig
+
+
+# =============================================================================
+# R-BASED POLYNOMIAL CONTRASTS (lme4 / lmerTest / emmeans)
+# =============================================================================
+
+def _poly_fmt_p(p) -> str:
+    """Format a p-value for the PROC MIXED-style polynomial contrasts report."""
+    try:
+        if pd.isna(p):
+            return 'n/a'
+        p = float(p)
+        if p < 0.0001:
+            return '< .0001'
+        return f'{p:.4f}'
+    except (TypeError, ValueError):
+        return 'n/a'
+
+
+def _poly_sig_stars(p) -> str:
+    """Return significance stars (* ** ***) for a p-value."""
+    try:
+        if pd.isna(p):
+            return ''
+        p = float(p)
+        if p < 0.001: return '***'
+        if p < 0.01:  return '**'
+        if p < 0.05:  return '*'
+        if p < 0.10:  return '.'
+        return ''
+    except (TypeError, ValueError):
+        return ''
+
+
+def _poly_rename_contrast(name: str) -> str:
+    """Capitalize an emmeans polynomial contrast label (linear, quadratic, …)."""
+    name = str(name).strip()
+    _map = {
+        'linear': 'Linear',
+        'quadratic': 'Quadratic',
+        'cubic': 'Cubic',
+        'quartic': 'Quartic',
+        'quintic': 'Quintic',
+    }
+    return _map.get(name.lower(), name.capitalize())
+
+
+def _poly_fmt_term(term: str) -> str:
+    """Convert an lmerTest fixed-effect term name to a readable display string."""
+    term = str(term)
+    # lmerTest names ordered-factor polynomial contrasts as .L / .Q / .C / ^4 …
+    _replacements = [
+        ('(Intercept)',  'Intercept'),
+        ('Week_f.L',     'Week_f  [linear]'),
+        ('Week_f.Q',     'Week_f  [quadratic]'),
+        ('Week_f.C',     'Week_f  [cubic]'),
+        ('Week_f^4',     'Week_f  [degree 4]'),
+        ('Week_f^5',     'Week_f  [degree 5]'),
+    ]
+    for old, new in _replacements:
+        if old in term:
+            term = term.replace(old, new)
+            break
+    return term
+
+
+def test_week_polynomial_contrasts_r(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    measures: Optional[List[str]] = None,
+    time_points: Optional[List[int]] = None,
+    max_degree: int = 3,
+    save_path: Optional[Path] = None,
+) -> Dict:
+    """Test polynomial trends for the Week (time) factor using R lme4 / lmerTest / emmeans.
+
+    Fits the mixed-effects model via R:
+
+        measure ~ CA_group * Week_f + Sex + (1|ID)   [REML, lmerTest]
+
+    where Week_f is an ordered factor so that emmeans can decompose its main
+    effect into orthogonal polynomial components (linear, quadratic, cubic, …).
+
+    Two contrast tables are produced per outcome measure:
+      1.  Overall  — polynomial trends for Week, collapsed across CA group / Sex.
+      2.  By CA group — polynomial trends for Week estimated within each cohort.
+
+    The report is formatted to mirror SAS PROC MIXED output:
+        Effect | Estimate | Std Error | DF | t Value | Pr > |t|
+
+    Parameters
+    ----------
+    cohort_dfs  : Dict[str, pd.DataFrame]
+        Loaded cohort data (from load_lick_cohorts / _LICK_COHORT_DATA).
+    measures    : list of str, optional
+        Lick outcome measures to analyse.  Defaults to Total_Licks, Total_Bouts,
+        First_5min_Lick_Pct, Time_to_50pct_Licks (any present in the data).
+    time_points : list of int, optional
+        Restrict analysis to these Week indices (0-based).  None = all weeks.
+    max_degree  : int
+        Maximum polynomial degree (default 3 → linear, quadratic, cubic).
+        Actual degree is capped at n_weeks − 1.
+    save_path   : Path, optional
+        If provided the full plain-text report is written to this path.
+
+    Returns
+    -------
+    dict
+        'report'   : str  — full formatted report
+        'measures' : dict keyed by measure name, each with sub-keys
+                     'fixed_effects', 'fit_stats', 'contrasts_overall',
+                     'contrasts_by_ca', 'formula', 'report_section'.
+    """
+    W = 80
+
+    print("\n" + "=" * W)
+    print("R-BASED LMER: POLYNOMIAL CONTRASTS FOR TIME  (PROC MIXED STYLE)")
+    print("=" * W)
+
+    if not HAS_RPY2:
+        print(
+            "[ERROR] rpy2 is not installed — cannot run R-based analysis.\n"
+            "  pip install rpy2\n"
+            "  Also requires R with:  install.packages(c('lme4','lmerTest','emmeans'))"
+        )
+        return {'error': 'rpy2 not installed'}
+
+    import rpy2.robjects as ro
+    from rpy2.robjects import pandas2ri
+    from rpy2.robjects.packages import importr
+    import tempfile
+    import os
+
+    # ── helper: robust Series-row value accessor ────────────────────────
+    def _rget(row, *names):
+        for n in names:
+            try:
+                v = row[n]
+                if not pd.isna(v):
+                    return float(v)
+            except (KeyError, TypeError, ValueError):
+                pass
+        return np.nan
+
+    # ── rpy2 pandas converter ────────────────────────────────────────────
+    try:
+        from rpy2.robjects.conversion import localconverter
+
+        def _to_r(df):
+            with localconverter(ro.default_converter + pandas2ri.converter):
+                return ro.conversion.py2rpy(df)
+    except Exception:
+        pandas2ri.activate()
+
+        def _to_r(df):
+            return pandas2ri.py2rpy(df)
+
+    # ── default measures ─────────────────────────────────────────────────
+    if measures is None:
+        _candidates = [
+            "Total_Licks", "Total_Bouts",
+            "First_5min_Lick_Pct", "Time_to_50pct_Licks",
+        ]
+        _comb_tmp = combine_lick_cohorts(cohort_dfs)
+        measures = [m for m in _candidates if m in _comb_tmp.columns]
+        if not measures:
+            measures = ["Total_Licks"]
+
+    # ── prepare combined dataset ─────────────────────────────────────────
+    print("\nStep 1: Preparing combined dataset...")
+    combined_df = combine_lick_cohorts(cohort_dfs)
+
+    if 'Week' not in combined_df.columns:
+        combined_df = add_week_column(combined_df)
+
+    if time_points is not None:
+        combined_df = combined_df[combined_df['Week'].isin(time_points)].copy()
+
+    has_sex = (
+        'Sex' in combined_df.columns and combined_df['Sex'].nunique() > 1
+    )
+
+    combined_df = combined_df.copy()
+    if 'CA%' in combined_df.columns:
+        combined_df['CA_group'] = combined_df['CA%'].apply(
+            lambda x: f"{x:.0f}% CA" if pd.notna(x) else 'Unknown'
+        )
+    elif 'Cohort' in combined_df.columns:
+        combined_df['CA_group'] = combined_df['Cohort']
+    else:
+        combined_df['CA_group'] = 'Unknown'
+
+    weeks     = sorted(combined_df['Week'].dropna().unique())
+    ca_groups = sorted(combined_df['CA_group'].dropna().unique())
+    n_weeks   = len(weeks)
+    _max_deg  = min(max_degree, n_weeks - 1)
+
+    print(f"  Weeks (display 1-based): {[int(w)+1 for w in weeks]}")
+    print(f"  CA groups               : {ca_groups}")
+    print(f"  Sex factor present      : {has_sex}")
+    print(f"  Max polynomial degree   : {_max_deg}")
+
+    # ── verify R packages ────────────────────────────────────────────────
+    print("\nStep 2: Verifying R packages (lme4, lmerTest, emmeans)...")
+    try:
+        importr('lme4')
+        importr('lmerTest')
+        importr('emmeans')
+        print("  [OK] All required R packages available.")
+    except Exception as _e:
+        print(f"[ERROR] Required R packages not found: {_e}")
+        print("  Install in R:  install.packages(c('lme4', 'lmerTest', 'emmeans'))")
+        return {'error': f'R packages unavailable: {_e}'}
+
+    results_by_measure: Dict = {}
+    report_sections: List[str] = []
+    _ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _n_animals = combined_df['ID'].nunique() if 'ID' in combined_df.columns else 'unknown'
+
+    # ── report header ────────────────────────────────────────────────────
+    report_sections += [
+        "=" * W,
+        "  LMER POLYNOMIAL CONTRASTS FOR TIME  (R: lme4 / lmerTest / emmeans)",
+        "  Output formatted to match SAS PROC MIXED",
+        "=" * W,
+        f"  Generated      : {_ts}",
+        f"  Cohorts        : {', '.join(ca_groups)}",
+        f"  Weeks (1-based): {', '.join(str(int(w)+1) for w in weeks)}",
+        f"  N animals      : {_n_animals}",
+        f"  Max poly degree: {_max_deg}",
+        "",
+        "  Fixed-effects model:",
+        "    measure ~ CA_group * Week_f + Sex + (1|ID)   [Sex omitted if single-sex]",
+        "    Week_f  = ordered factor  (Week 1, 2, …)",
+        "    (1|ID)  = random intercept per animal",
+        "    Method  = REML",
+        "    DF      = Satterthwaite approximation  (lmerTest)",
+        "    Contrasts via emmeans::contrast(…, 'poly')",
+        "=" * W,
+        "",
+        "  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10",
+        "",
+    ]
+
+    # ── per-measure loop ─────────────────────────────────────────────────
+    for measure in measures:
+        if measure not in combined_df.columns:
+            print(f"\n  [SKIP] '{measure}' not found in combined data.")
+            continue
+
+        print(f"\nStep 3 [{measure}]: Fitting lmer model in R...")
+
+        req_cols = ['ID', 'Week', 'CA_group', measure]
+        if has_sex and 'Sex' in combined_df.columns:
+            req_cols.append('Sex')
+
+        adf = combined_df[req_cols].dropna().copy()
+        adf['Week_label'] = (adf['Week'].astype(int) + 1)   # 1-based display
+        if 'Sex' not in adf.columns:
+            adf['Sex'] = 'Unknown'
+
+        if len(adf) < 10:
+            print(f"  [WARNING] Only {len(adf)} observations for '{measure}' — skipping.")
+            continue
+
+        m_has_sex    = has_sex and adf['Sex'].nunique() > 1
+        measure_label = _OMNIBUS_MEASURE_LABELS.get(measure, measure.replace('_', ' '))
+        formula_disp  = (
+            f"{measure} ~ CA_group * Week_f + Sex + (1|ID)"
+            if m_has_sex else
+            f"{measure} ~ CA_group * Week_f + (1|ID)"
+        )
+
+        # -- temp CSV paths (forward-slashes for R on Windows) ------------
+        _tmpdir = tempfile.gettempdir().replace('\\', '/')
+        _uid    = str(id(adf))[-6:]
+        _fe_p   = f"{_tmpdir}/lmer_fe_{measure}_{_uid}.csv"
+        _co_p   = f"{_tmpdir}/lmer_co_{measure}_{_uid}.csv"
+        _cb_p   = f"{_tmpdir}/lmer_cb_{measure}_{_uid}.csv"
+        _fs_p   = f"{_tmpdir}/lmer_fs_{measure}_{_uid}.csv"
+
+        try:
+            # pass data + config to R global environment
+            ro.globalenv['r_df']      = _to_r(adf)
+            ro.globalenv['r_measure'] = measure
+            ro.globalenv['r_has_sex'] = ro.BoolVector([m_has_sex])
+            ro.globalenv['r_fe_p']    = _fe_p
+            ro.globalenv['r_co_p']    = _co_p
+            ro.globalenv['r_cb_p']    = _cb_p
+            ro.globalenv['r_fs_p']    = _fs_p
+
+            ro.r("""
+                suppressPackageStartupMessages(library(lmerTest))
+                suppressPackageStartupMessages(library(emmeans))
+
+                df_r <- r_df
+                df_r$Week_f   <- factor(df_r$Week_label,
+                                        levels  = sort(unique(df_r$Week_label)),
+                                        ordered = TRUE)
+                df_r$CA_group <- factor(df_r$CA_group)
+                df_r$Sex      <- factor(df_r$Sex)
+
+                if (r_has_sex[1]) {
+                    form <- as.formula(paste0(r_measure,
+                        ' ~ CA_group * Week_f + Sex + (1|ID)'))
+                } else {
+                    form <- as.formula(paste0(r_measure,
+                        ' ~ CA_group * Week_f + (1|ID)'))
+                }
+
+                model <- lmerTest::lmer(form, data = df_r, REML = TRUE)
+
+                # ── Fixed effects (Satterthwaite p-values from lmerTest) ──
+                fe      <- as.data.frame(coef(summary(model)))
+                fe$term <- rownames(fe)
+                write.csv(fe, r_fe_p, row.names = FALSE)
+
+                # ── Fit statistics ──
+                n_grps <- tryCatch(lme4::ngrps(model)[['ID']], error = function(e) NA_integer_)
+                fit_stats <- data.frame(
+                    AIC     = AIC(model),
+                    BIC     = BIC(model),
+                    logLik  = as.numeric(logLik(model)),
+                    nobs    = nobs(model),
+                    ngroups = n_grps,
+                    formula = deparse(formula(model), width.cutoff = 120L)
+                )
+                write.csv(fit_stats, r_fs_p, row.names = FALSE)
+
+                # ── Polynomial contrasts: Week overall ──
+                em_overall    <- emmeans(model, ~ Week_f)
+                contr_overall <- as.data.frame(contrast(em_overall, 'poly'))
+                write.csv(contr_overall, r_co_p, row.names = FALSE)
+
+                # ── Polynomial contrasts: Week by CA_group ──
+                em_by_ca    <- emmeans(model, ~ Week_f | CA_group)
+                contr_by_ca <- as.data.frame(contrast(em_by_ca, 'poly'))
+                write.csv(contr_by_ca, r_cb_p, row.names = FALSE)
+            """)
+
+            # -- read results back ----------------------------------------
+            fe_df       = pd.read_csv(_fe_p)
+            fit_df      = pd.read_csv(_fs_p)
+            contr_ov_df = pd.read_csv(_co_p)
+            contr_by_df = pd.read_csv(_cb_p)
+
+            for _p in [_fe_p, _co_p, _cb_p, _fs_p]:
+                try:    os.unlink(_p)
+                except Exception: pass
+
+            # extract fit scalars
+            fit_aic    = float(fit_df['AIC'].iloc[0])
+            fit_bic    = float(fit_df['BIC'].iloc[0])
+            fit_loglik = float(fit_df['logLik'].iloc[0])
+            fit_nobs   = int(fit_df['nobs'].iloc[0])
+            fit_ngrps  = (int(fit_df['ngroups'].iloc[0])
+                          if 'ngroups' in fit_df.columns and
+                             not pd.isna(fit_df['ngroups'].iloc[0])
+                          else '?')
+            fit_formula = (str(fit_df['formula'].iloc[0])
+                           if 'formula' in fit_df.columns else formula_disp)
+
+            print(f"  [OK] AIC={fit_aic:.1f}  BIC={fit_bic:.1f}  "
+                  f"n={fit_nobs} obs  {fit_ngrps} animals")
+
+            # ── format PROC MIXED style report section ───────────────────
+            sec: List[str] = []
+
+            sec += [
+                "",
+                "═" * W,
+                f"  DEPENDENT VARIABLE:  {measure_label}  ({measure})",
+                "═" * W,
+                "",
+                "  THE MIXED PROCEDURE",
+                "",
+                "  Model Information",
+                f"    {'Dependent Variable':<32} {measure_label}",
+                f"    {'Covariance Structure':<32} Variance Components",
+                f"    {'Subject Effect':<32} ID  (random intercept)",
+                f"    {'Estimation Method':<32} REML",
+                f"    {'Degrees of Freedom Method':<32} Satterthwaite  (lmerTest)",
+                f"    {'Formula':<32} {fit_formula}",
+                "",
+                f"  Number of Observations Read    {fit_nobs}",
+                f"  Number of Observations Used    {fit_nobs}",
+                f"  Number of Subjects (ID)        {fit_ngrps}",
+                "",
+                "  Fit Statistics",
+                f"    {'AIC  (smaller is better)':<40} {fit_aic:.1f}",
+                f"    {'BIC  (smaller is better)':<40} {fit_bic:.1f}",
+                f"    {'-2 Log-Likelihood':<40} {-2 * fit_loglik:.1f}",
+                "",
+            ]
+
+            # Solution for Fixed Effects
+            _fe_w = (40, 12, 10, 8, 8, 10)
+            _fe_hdr = (
+                f"  {'Effect':<{_fe_w[0]}}  "
+                f"{'Estimate':>{_fe_w[1]}}  "
+                f"{'Std Error':>{_fe_w[2]}}  "
+                f"{'DF':>{_fe_w[3]}}  "
+                f"{'t Value':>{_fe_w[4]}}  "
+                f"{'Pr > |t|':>{_fe_w[5]}}  Sig"
+            )
+            sec += [
+                "  Solution for Fixed Effects",
+                "",
+                _fe_hdr,
+                "  " + "─" * (sum(_fe_w) + 14),
+            ]
+
+            for _, row in fe_df.iterrows():
+                term_disp = _poly_fmt_term(str(row.get('term', '')))
+                est = _rget(row, 'Estimate')
+                se  = _rget(row, 'Std. Error', 'Std.Error', 'Std..Error')
+                df_ = _rget(row, 'df', 'Df', 'DF')
+                t   = _rget(row, 't value', 't.value', 't_value')
+                p   = _rget(row, 'Pr(>|t|)', 'Pr...t..', 'p.value')
+                sec.append(
+                    f"  {term_disp:<{_fe_w[0]}}  "
+                    f"{est:>{_fe_w[1]}.4f}  "
+                    f"{se:>{_fe_w[2]}.4f}  "
+                    f"{df_:>{_fe_w[3]}.1f}  "
+                    f"{t:>{_fe_w[4]}.3f}  "
+                    f"{_poly_fmt_p(p):>{_fe_w[5]}}  "
+                    f"{_poly_sig_stars(p)}"
+                )
+
+            sec.append("")
+
+            # Polynomial contrasts — OVERALL
+            _c_w = (22, 12, 10, 8, 8, 10)
+            _c_hdr = (
+                f"  {'Contrast':<{_c_w[0]}}  "
+                f"{'Estimate':>{_c_w[1]}}  "
+                f"{'Std Error':>{_c_w[2]}}  "
+                f"{'DF':>{_c_w[3]}}  "
+                f"{'t Value':>{_c_w[4]}}  "
+                f"{'Pr > |t|':>{_c_w[5]}}  Sig"
+            )
+            sec += [
+                "  Polynomial Contrasts for Week / Time",
+                "  OVERALL  —  collapsed across CA group and Sex",
+                "",
+                _c_hdr,
+                "  " + "─" * (sum(_c_w) + 14),
+            ]
+
+            for _, row in contr_ov_df.iterrows():
+                name  = _poly_rename_contrast(str(row.get('contrast', '')))
+                est   = _rget(row, 'estimate')
+                se    = _rget(row, 'SE')
+                df_   = _rget(row, 'df')
+                t     = _rget(row, 't.ratio')
+                p     = _rget(row, 'p.value')
+                sec.append(
+                    f"  {name:<{_c_w[0]}}  "
+                    f"{est:>{_c_w[1]}.4f}  "
+                    f"{se:>{_c_w[2]}.4f}  "
+                    f"{df_:>{_c_w[3]}.1f}  "
+                    f"{t:>{_c_w[4]}.3f}  "
+                    f"{_poly_fmt_p(p):>{_c_w[5]}}  "
+                    f"{_poly_sig_stars(p)}"
+                )
+
+            sec.append("")
+
+            # Polynomial contrasts — BY CA GROUP
+            sec += [
+                "  Polynomial Contrasts for Week / Time",
+                "  BY CA GROUP  —  each cohort estimated separately",
+                "",
+            ]
+
+            _grp_col = 'CA_group' if 'CA_group' in contr_by_df.columns else None
+            _grp_order = (sorted(contr_by_df[_grp_col].unique())
+                          if _grp_col else ['(all)'])
+
+            for grp in _grp_order:
+                sec.append(f"  CA Group: {grp}")
+                sec += [
+                    _c_hdr,
+                    "  " + "─" * (sum(_c_w) + 14),
+                ]
+                _sub = (contr_by_df[contr_by_df[_grp_col] == grp]
+                        if _grp_col else contr_by_df)
+                for _, row in _sub.iterrows():
+                    name  = _poly_rename_contrast(str(row.get('contrast', '')))
+                    est   = _rget(row, 'estimate')
+                    se    = _rget(row, 'SE')
+                    df_   = _rget(row, 'df')
+                    t     = _rget(row, 't.ratio')
+                    p     = _rget(row, 'p.value')
+                    sec.append(
+                        f"  {name:<{_c_w[0]}}  "
+                        f"{est:>{_c_w[1]}.4f}  "
+                        f"{se:>{_c_w[2]}.4f}  "
+                        f"{df_:>{_c_w[3]}.1f}  "
+                        f"{t:>{_c_w[4]}.3f}  "
+                        f"{_poly_fmt_p(p):>{_c_w[5]}}  "
+                        f"{_poly_sig_stars(p)}"
+                    )
+                sec.append("")
+
+            sec += [
+                "  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10",
+                "",
+            ]
+
+            report_sections.extend(sec)
+
+            results_by_measure[measure] = {
+                'fixed_effects'     : fe_df,
+                'fit_stats'         : fit_df,
+                'contrasts_overall' : contr_ov_df,
+                'contrasts_by_ca'   : contr_by_df,
+                'formula'           : formula_disp,
+                'report_section'    : '\n'.join(sec),
+            }
+
+        except Exception as _exc:
+            import traceback
+            print(f"  [ERROR] R analysis failed for '{measure}': {_exc}")
+            traceback.print_exc()
+            report_sections.append(
+                f"\n  [ERROR] R analysis failed for '{measure}': {_exc}\n"
+            )
+
+    # ── footer ───────────────────────────────────────────────────────────
+    report_sections += [
+        "=" * W,
+        "  End of LMER Polynomial Contrasts Report",
+        "=" * W,
+    ]
+
+    full_report = "\n".join(report_sections)
+
+    print("\n" + full_report)
+
+    if save_path is not None:
+        Path(save_path).write_text(full_report, encoding='utf-8')
+        print(f"\n[OK] Report saved -> {save_path}")
+
+    return {
+        'measures': results_by_measure,
+        'report'  : full_report,
+    }
 
 
 # =============================================================================
@@ -4814,9 +5520,11 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print(" 12. Run all (1-11)")
     print(" 13. Lick normality      -- Shapiro-Wilk & Levene's tests on all lick measures (excl. fecal)")
     print(" 14. Fecal count plot     -- Mean fecal count across weeks, one line per cohort (mean \u00b1 SEM)")
+    print(" 15. Polynomial contrasts -- R lme4/lmerTest/emmeans: linear/quadratic/cubic trends for Week")
+    print("                            (requires rpy2 + R with lme4, lmerTest, emmeans)")
     print()
 
-    user_input = input("Select option (1-13) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-15) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -5367,6 +6075,30 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 except Exception:
                     pass
 
+    # ------------------------------------------------------------------ #
+    # Option 15: R-based lmer polynomial contrasts (PROC MIXED style)
+    # ------------------------------------------------------------------ #
+    if user_input == '15':
+        print("\n" + "=" * 80)
+        print("RUNNING: R lmer polynomial contrasts for Week (linear / quadratic / cubic)")
+        print("=" * 80)
+        if not HAS_RPY2:
+            print("[WARNING] rpy2 is not installed — cannot run R-based analysis.")
+            print("  pip install rpy2")
+            print("  Also requires R with:  install.packages(c('lme4','lmerTest','emmeans'))")
+        else:
+            try:
+                poly_rpt_path = Path(f"0v2_lick_poly_contrasts_{timestamp}.txt")
+                poly_results = test_week_polynomial_contrasts_r(
+                    cohorts,
+                    save_path=poly_rpt_path,
+                )
+                if 'error' not in poly_results:
+                    print(f"\n[OK] Report saved -> {poly_rpt_path}")
+            except Exception as e:
+                print(f"  [WARNING] Polynomial contrasts failed: {e}")
+                import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("0% vs 2% lick analysis complete.")
     print("=" * 80)
@@ -5713,7 +6445,9 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ax_fec4.spines['top'].set_visible(False)
                 ax_fec4.spines['right'].set_visible(False)
                 ax_fec4.tick_params(direction='in', which='both', length=5)
-                _add_mwu_brackets(ax_fec4, _bar_vals, x_positions, _bar_ytops)
+                _mwu_res_fec4 = _add_mwu_brackets(
+                    ax_fec4, _bar_vals, x_positions, _bar_ytops,
+                    group_labels=cohort_labels_fec)
                 ax_fec4.set_ylim(bottom=0)
                 fig_fec4.tight_layout()
 
@@ -5723,6 +6457,10 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 fig_fec4.savefig(fec4_save, format='svg', dpi=200, bbox_inches='tight')
                 _plt.close(fig_fec4)
                 print(f"[OK] Saved -> {fec4_save}")
+                _save_mwu_report(
+                    _mwu_res_fec4, "Fecal Count",
+                    "Week 4 -- 0% nonramp vs Ramp",
+                    fec4_plot_dir / "mwu_fecal_count_week4.txt")
             except Exception as e:
                 print(f"  [WARNING] Week 4 fecal bar plot failed: {e}")
                 import traceback; traceback.print_exc()
@@ -6084,7 +6822,9 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ax_fec4.spines['top'].set_visible(False)
                 ax_fec4.spines['right'].set_visible(False)
                 ax_fec4.tick_params(direction='in', which='both', length=5)
-                _add_mwu_brackets(ax_fec4, _bar_vals, x_positions, _bar_ytops)
+                _mwu_res_fec4 = _add_mwu_brackets(
+                    ax_fec4, _bar_vals, x_positions, _bar_ytops,
+                    group_labels=cohort_labels_fec)
                 ax_fec4.set_ylim(bottom=0)
                 fig_fec4.tight_layout()
 
@@ -6094,6 +6834,10 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 fig_fec4.savefig(fec4_save, format='svg', dpi=200, bbox_inches='tight')
                 _plt.close(fig_fec4)
                 print(f"[OK] Saved -> {fec4_save}")
+                _save_mwu_report(
+                    _mwu_res_fec4, "Fecal Count",
+                    "Week 4 -- 2% nonramp vs Ramp",
+                    fec4_plot_dir / "mwu_fecal_count_week4.txt")
             except Exception as e:
                 print(f"  [WARNING] Week 4 fecal bar plot failed: {e}")
                 import traceback; traceback.print_exc()
@@ -6189,7 +6933,9 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ax_lk3.spines['top'].set_visible(False)
                 ax_lk3.spines['right'].set_visible(False)
                 ax_lk3.tick_params(direction='in', which='both', length=5)
-                _add_mwu_brackets(ax_lk3, _bar_vals, x_positions, _bar_ytops)
+                _mwu_res_lk3 = _add_mwu_brackets(
+                    ax_lk3, _bar_vals, x_positions, _bar_ytops,
+                    group_labels=cohort_labels_lk3)
                 ax_lk3.set_ylim(bottom=0)
                 fig_lk3.tight_layout()
 
@@ -6199,6 +6945,10 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 fig_lk3.savefig(lk3_save, format='svg', dpi=200, bbox_inches='tight')
                 _plt.close(fig_lk3)
                 print(f"[OK] Saved -> {lk3_save}")
+                _save_mwu_report(
+                    _mwu_res_lk3, "Total Licks",
+                    "Week 3 -- 2% nonramp vs Ramp",
+                    lk3_plot_dir / "mwu_total_licks_week3.txt")
             except Exception as e:
                 print(f"  [WARNING] Week 3 lick bar plot failed: {e}")
                 import traceback; traceback.print_exc()
@@ -6302,7 +7052,9 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ax_wt.spines['top'].set_visible(False)
                 ax_wt.spines['right'].set_visible(False)
                 ax_wt.tick_params(direction='in', which='both', length=5)
-                _add_mwu_brackets(ax_wt, _bar_vals, x_positions, _bar_ytops)
+                _mwu_res_wt = _add_mwu_brackets(
+                    ax_wt, _bar_vals, x_positions, _bar_ytops,
+                    group_labels=cohort_labels_wt)
                 fig_wt.tight_layout()
 
                 wt_plot_dir = Path(f"2vramp_lick_plots_{timestamp}")
@@ -6311,6 +7063,10 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 fig_wt.savefig(wt_save, format='svg', dpi=200, bbox_inches='tight')
                 _plt.close(fig_wt)
                 print(f"[OK] Saved -> {wt_save}")
+                _save_mwu_report(
+                    _mwu_res_wt, "Total Weight Change on Lick Day (g)",
+                    "Week 3 -- 2% nonramp vs Ramp",
+                    wt_plot_dir / "mwu_total_weight_change_week3.txt")
             except Exception as e:
                 print(f"  [WARNING] Week 3 weight bar plot failed: {e}")
                 import traceback; traceback.print_exc()
@@ -6670,7 +7426,9 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ax_fec4.spines['top'].set_visible(False)
                 ax_fec4.spines['right'].set_visible(False)
                 ax_fec4.tick_params(direction='in', which='both', length=5)
-                _add_mwu_brackets(ax_fec4, _bar_vals, x_positions, _bar_ytops)
+                _mwu_res_fec4 = _add_mwu_brackets(
+                    ax_fec4, _bar_vals, x_positions, _bar_ytops,
+                    group_labels=cohort_labels_fec)
                 ax_fec4.set_ylim(bottom=0)
                 fig_fec4.tight_layout()
 
@@ -6680,6 +7438,10 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 fig_fec4.savefig(fec4_save, format='svg', dpi=200, bbox_inches='tight')
                 _plt.close(fig_fec4)
                 print(f"[OK] Saved -> {fec4_save}")
+                _save_mwu_report(
+                    _mwu_res_fec4, "Fecal Count",
+                    "Week 4 -- 0% nonramp vs 2% nonramp vs Ramp",
+                    fec4_plot_dir / "mwu_fecal_count_week4.txt")
             except Exception as e:
                 print(f"  [WARNING] Week 4 fecal bar plot failed: {e}")
                 import traceback; traceback.print_exc()

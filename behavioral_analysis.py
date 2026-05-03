@@ -47,7 +47,7 @@ plt.rcParams["svg.fonttype"] = "none"
 # ═══════════════════════════════════════════════════════════════════════════════
 #  EXPERIMENT MODE — change this single value to switch between designs
 # ═══════════════════════════════════════════════════════════════════════════════
-EXPERIMENT_MODE = 'ramp'   # 'ramp' or 'nonramp'
+EXPERIMENT_MODE = 'nonramp'   # 'ramp' or 'nonramp'
 
 _MODE_LABELS = {
     'ramp': {
@@ -141,6 +141,8 @@ def _detect_cohort_color(path=None, df=None) -> str:
 	"""Infer cohort color from the CSV file path, then from CA% values in the data."""
 	if path is not None:
 		p = str(path).lower()
+		if '2wk' in p or '2_wk' in p or '2_week' in p or '2week' in p:
+			return _COLOR_OTHER
 		if 'ramp' in p:
 			return _COLOR_RAMP
 		if '2%' in p or '2pct' in p:
@@ -184,9 +186,10 @@ plt.rcParams.update({
     "legend.fontsize": 7.5,
     "figure.titlesize": 10,
     "lines.linewidth": 0.5,
-    "lines.markersize": 3,
-    "figure.figsize": (3, 2),
+    "lines.markersize": 1.5,
+    "figure.figsize": (3, 2), #4.5 by 2.5 for larger plot
     "axes.xmargin": 0,
+    "savefig.dpi": 200,
 })
 
 # GUI file picker (standard library)
@@ -432,9 +435,9 @@ def _sex_to_style(sex: Optional[str]) -> tuple[str, str]:
 
 def _add_day_number_column(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add a per-ID 'Day' column.
-    - ramp mode: first date = Day 0
-    - nonramp mode: first date = Day -1 (excluded as baseline)
+    Add a per-ID 'Day' column (1-indexed: first plotted measurement = Day 1).
+    - ramp mode:    first date = Day 1 (all days included)
+    - nonramp mode: first date = Day 0 (baseline, excluded from plots); Day 1 onwards are plotted
     Requires 'ID' and 'Date' columns with Date as datetime.
     """
     if not {"ID", "Date"}.issubset(df.columns):
@@ -443,22 +446,25 @@ def _add_day_number_column(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values(["ID", "Date"]).reset_index(drop=True)
     first_dates = df.groupby("ID")["Date"].transform("min")
     if EXPERIMENT_MODE == 'nonramp':
-        df["Day"] = (df["Date"] - first_dates).dt.days - 1
-    else:
+        # Day 0 = baseline (skipped in plots); Day 1+ = measurement days
         df["Day"] = (df["Date"] - first_dates).dt.days
+    else:
+        # Day 1 = first ramp measurement day (1-indexed)
+        df["Day"] = (df["Date"] - first_dates).dt.days + 1
     return df
 
 
 def _add_week_column(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add a 'Week' column based on the 'Day' column.
-    Week 1 = Days 0-6, Week 2 = Days 7-13, etc.
+    Add a 'Week' column based on the 'Day' column (1-indexed days).
+    Week 1 = Days 1-7, Week 2 = Days 8-14, etc.
+    Day 0 (nonramp baseline) maps to Week 0 and is excluded from plots.
     Requires 'Day' column to exist (call _add_day_number_column first).
     """
     if "Day" not in df.columns:
         return df
     df = df.copy()
-    df["Week"] = (df["Day"] // 7) + 1
+    df["Week"] = ((df["Day"] - 1) // 7) + 1
     return df
 
 
@@ -613,9 +619,9 @@ def build_week_series_by_day(df: pd.DataFrame) -> pd.Series:
 	if "Week" not in cdf.columns:
 		raise ValueError("Failed to compute 'Week' column")
 
-	# Keep rows with Day >= 0 (exclude first measurement) and Week
+	# Keep rows with Day >= 1 (exclude nonramp baseline Day 0) and Week
 	tmp = cdf.dropna(subset=["Day", "Week"]).copy()
-	tmp = tmp[tmp["Day"] >= 0]
+	tmp = tmp[tmp["Day"] >= 1]
 	if tmp.empty:
 		return pd.Series(dtype=float)
 
@@ -1080,7 +1086,7 @@ def plot_average_weight_change_by_ca(
 	plt.tight_layout()
 	
 	if save_path is not None:
-		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+		fig.savefig(str(save_path))
 	
 	if save_svg:
 		base = svg_filename or "average_weight_change_by_ca"
@@ -1088,7 +1094,7 @@ def plot_average_weight_change_by_ca(
 		if not safe.lower().endswith(".svg"):
 			safe += ".svg"
 		out_path = Path.cwd() / safe
-		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		fig.savefig(str(out_path), format="svg")
 		print(f"Saved SVG to: {out_path}")
 	
 	if show:
@@ -1227,13 +1233,13 @@ def plot_average_weight_change_by_week(
 
 	plt.tight_layout()
 	if save_path is not None:
-		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+		fig.savefig(str(save_path))
 	if save_svg:
 		base = svg_filename or "average_weight_change_by_week"
 		safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
 		if not safe.lower().endswith(".svg"):
 			safe += ".svg"
-		fig.savefig(str(Path.cwd() / safe), format="svg", bbox_inches="tight")
+		fig.savefig(str(Path.cwd() / safe), format="svg")
 	if show:
 		plt.show()
 	return fig
@@ -1319,7 +1325,7 @@ def plot_nest_made_pie_chart(
 	fig.tight_layout()
 	
 	if save_path is not None:
-		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+		fig.savefig(str(save_path))
 	
 	if save_svg:
 		base = svg_filename or (title or "nest_made_pie_chart")
@@ -1327,7 +1333,7 @@ def plot_nest_made_pie_chart(
 		if not safe.lower().endswith(".svg"):
 			safe += ".svg"
 		out_path = Path.cwd() / safe
-		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		fig.savefig(str(out_path), format="svg")
 		print(f"Saved SVG to: {out_path}")
 	
 	if show:
@@ -1416,7 +1422,7 @@ def plot_lethargy_pie_chart(
 	fig.tight_layout()
 	
 	if save_path is not None:
-		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+		fig.savefig(str(save_path))
 	
 	if save_svg:
 		base = svg_filename or (title or "lethargy_pie_chart")
@@ -1424,7 +1430,7 @@ def plot_lethargy_pie_chart(
 		if not safe.lower().endswith(".svg"):
 			safe += ".svg"
 		out_path = Path.cwd() / safe
-		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		fig.savefig(str(out_path), format="svg")
 		print(f"Saved SVG to: {out_path}")
 	
 	if show:
@@ -1517,7 +1523,7 @@ def plot_ca_spot_digging_pie_chart(
 	fig.tight_layout()
 	
 	if save_path is not None:
-		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+		fig.savefig(str(save_path))
 	
 	if save_svg:
 		base = svg_filename or (title or "ca_spot_digging_pie_chart")
@@ -1525,7 +1531,7 @@ def plot_ca_spot_digging_pie_chart(
 		if not safe.lower().endswith(".svg"):
 			safe += ".svg"
 		out_path = Path.cwd() / safe
-		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		fig.savefig(str(out_path), format="svg")
 		print(f"Saved SVG to: {out_path}")
 	
 	if show:
@@ -1614,7 +1620,7 @@ def plot_anxious_behaviors_pie_chart(
 	fig.tight_layout()
 	
 	if save_path is not None:
-		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+		fig.savefig(str(save_path))
 	
 	if save_svg:
 		base = svg_filename or (title or "anxious_behaviors_pie_chart")
@@ -1622,7 +1628,7 @@ def plot_anxious_behaviors_pie_chart(
 		if not safe.lower().endswith(".svg"):
 			safe += ".svg"
 		out_path = Path.cwd() / safe
-		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		fig.savefig(str(out_path), format="svg")
 		print(f"Saved SVG to: {out_path}")
 	
 	if show:
@@ -1742,7 +1748,7 @@ def plot_all_pie_charts(
 	plt.tight_layout(rect=[0, 0.03, 1, 0.96])
 	
 	if save_path is not None:
-		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+		fig.savefig(str(save_path))
 	
 	if save_svg:
 		base = svg_filename or "all_behavioral_pie_charts"
@@ -1750,7 +1756,7 @@ def plot_all_pie_charts(
 		if not safe.lower().endswith(".svg"):
 			safe += ".svg"
 		out_path = Path.cwd() / safe
-		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		fig.savefig(str(out_path), format="svg")
 		print(f"Saved SVG to: {out_path}")
 	
 	if show:
@@ -1906,7 +1912,7 @@ def plot_pie_charts_by_ca_percent(
 	if save_path is not None:
 		for i, (fig, ca_level) in enumerate(zip(figures, ca_levels)):
 			ca_save_path = save_path.parent / f"{save_path.stem}_CA{int(ca_level)}{save_path.suffix}"
-			fig.savefig(str(ca_save_path), dpi=200, bbox_inches="tight")
+			fig.savefig(str(ca_save_path))
 			print(f"Saved figure for CA {int(ca_level)}% to: {ca_save_path}")
 	
 	if save_svg:
@@ -1916,7 +1922,7 @@ def plot_pie_charts_by_ca_percent(
 			if not safe.lower().endswith(".svg"):
 				safe += ".svg"
 			out_path = Path.cwd() / safe
-			fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+			fig.savefig(str(out_path), format="svg")
 			print(f"Saved SVG to: {out_path}")
 	
 	if show:
@@ -2031,7 +2037,7 @@ def plot_pie_charts_by_week(
 	if save_path is not None:
 		for i, (fig, week) in enumerate(zip(figures, weeks)):
 			week_save_path = save_path.parent / f"{save_path.stem}_Week{int(week)}{save_path.suffix}"
-			fig.savefig(str(week_save_path), dpi=200, bbox_inches="tight")
+			fig.savefig(str(week_save_path))
 			print(f"Saved figure for Week {int(week)} to: {week_save_path}")
 	
 	if save_svg:
@@ -2041,7 +2047,7 @@ def plot_pie_charts_by_week(
 			if not safe.lower().endswith(".svg"):
 				safe += ".svg"
 			out_path = Path.cwd() / safe
-			fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+			fig.savefig(str(out_path), format="svg")
 			print(f"Saved SVG to: {out_path}")
 	
 	if show:
@@ -2138,7 +2144,7 @@ def plot_aberrant_behaviors_lines(
 	fig.tight_layout()
 
 	if save_path is not None:
-		fig.savefig(str(save_path), dpi=200, bbox_inches='tight')
+		fig.savefig(str(save_path))
 		print(f"Saved figure to: {save_path}")
 
 	if save_svg:
@@ -2147,7 +2153,7 @@ def plot_aberrant_behaviors_lines(
 		if not safe.lower().endswith(".svg"):
 			safe += ".svg"
 		out_path = Path.cwd() / safe
-		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		fig.savefig(str(out_path), format="svg")
 		print(f"Saved SVG to: {out_path}")
 
 	if show:
@@ -2255,7 +2261,7 @@ def plot_aberrant_behaviors_load_bar(
 	fig.tight_layout()
 
 	if save_path is not None:
-		fig.savefig(str(save_path), dpi=200, bbox_inches='tight')
+		fig.savefig(str(save_path))
 		print(f"Saved figure to: {save_path}")
 
 	if save_svg:
@@ -2264,7 +2270,7 @@ def plot_aberrant_behaviors_load_bar(
 		if not safe.lower().endswith(".svg"):
 			safe += ".svg"
 		out_path = Path.cwd() / safe
-		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		fig.savefig(str(out_path), format="svg")
 		print(f"Saved SVG to: {out_path}")
 
 	if show:
@@ -2983,11 +2989,11 @@ def check_ols_assumptions_total_change(
 			if _save_fig is None:
 				continue
 			_png = save_dir / f"ols_assumptions_total_change_{_suffix}_{_fig_ts}.png"
-			_save_fig.savefig(_png, dpi=150, bbox_inches='tight')
+			_save_fig.savefig(_png)
 			print(f"\nSaved OLS diagnostics ({_suffix} model) to: {_png}")
 			if save_svg:
 				_svg = save_dir / f"ols_assumptions_total_change_{_suffix}_{_fig_ts}.svg"
-				_save_fig.savefig(_svg, format='svg', bbox_inches='tight')
+				_save_fig.savefig(_svg, format='svg')
 	elif save_report:
 		# Auto-save figures alongside the text report when no explicit save_dir given
 		for _save_fig, _suffix in _fig_pairs:
@@ -2995,7 +3001,7 @@ def check_ols_assumptions_total_change(
 				continue
 			_png = Path.cwd() / f"ols_assumptions_total_change_{_suffix}_{_fig_ts}.png"
 			try:
-				_save_fig.savefig(_png, dpi=150, bbox_inches='tight')
+				_save_fig.savefig(_png)
 				print(f"\nSaved OLS diagnostics ({_suffix} model) to: {_png}")
 			except Exception as _fe:
 				print(f"\nWarning: could not save OLS figure ({_suffix}): {_fe}")
@@ -3258,7 +3264,10 @@ def generate_descriptive_stats_report(
 		      f"{'SD':>8}  {'Var':>10}  {'95% CI':>22}")
 		print(f"  {'-'*76}")
 		for wk in weeks:
-			grp = cdf.loc[cdf[wc] == wk, col].dropna().values
+			if "ID" in cdf.columns:
+				grp = cdf.loc[cdf[wc] == wk].groupby("ID")[col].mean().dropna().values
+			else:
+				grp = cdf.loc[cdf[wc] == wk, col].dropna().values
 			n = len(grp)
 			lbl = _group_label(wk)
 			if n == 0:
@@ -3278,7 +3287,10 @@ def generate_descriptive_stats_report(
 			print(f"  {lbl:>8}  {n:>4}  {mean:>8.3f}  {median:>8.3f}  "
 			      f"{sd:>8.3f}  {var:>10.3f}  {ci_str:>22}")
 		# Collapsed row
-		_all = cdf.loc[cdf[wc].isin(weeks), col].dropna().values
+		if "ID" in cdf.columns:
+			_all = cdf.loc[cdf[wc].isin(weeks)].groupby(["ID", wc])[col].mean().dropna().values
+		else:
+			_all = cdf.loc[cdf[wc].isin(weeks), col].dropna().values
 		_an = len(_all)
 		if _an > 0:
 			_am = float(np.mean(_all))
@@ -3302,51 +3314,103 @@ def generate_descriptive_stats_report(
 
 	for col in beh_cols:
 		results_beh[col] = {}
-		print(f"\n  {col} (% True per {fl}):")
-		print(f"  {'Level':>8}  {'n':>4}  {'n True':>7}  {'%':>7}  "
-		      f"{'95% CI (Wilson)':>22}  {'Mean':>8}  {'SD':>8}  {'Var':>10}")
+		print(f"\n  {col} (mean % of days per animal, per {fl}):")
+		print(f"  {'Level':>8}  {'n':>4}  {'n≥once':>7}  {'Mean%':>7}  "
+		      f"{'95% CI (mean)':>22}  {'Median%':>8}  {'SD':>8}  {'Var':>10}")
 		print(f"  {'-'*85}")
 		for wk in weeks:
-			grp = cdf.loc[cdf[wc] == wk, col].dropna().astype(float).values
+			if "ID" in cdf.columns:
+				grp = cdf.loc[cdf[wc] == wk].groupby("ID")[col].mean().dropna().values
+			else:
+				grp = cdf.loc[cdf[wc] == wk, col].dropna().astype(float).values
 			n = len(grp)
 			lbl = _group_label(wk)
 			if n == 0:
 				results_beh[col][wk] = {'n': 0}
 				print(f"  {lbl:>8}  {n:>4}  {'\u2014':>7}  {'\u2014':>7}  {'\u2014':>22}  {'\u2014':>8}  {'\u2014':>8}  {'\u2014':>10}")
 				continue
-			n_true  = int(grp.sum())
-			pct     = 100.0 * grp.mean()
-			ci_lo, ci_hi = _wilson_ci(n_true, n)
-			ci_str  = f"[{100*ci_lo:.1f}%, {100*ci_hi:.1f}%]"
-			mean    = float(np.mean(grp))
-			sd      = float(np.std(grp, ddof=1))  if n >= 2 else float('nan')
-			var     = float(np.var(grp, ddof=1))  if n >= 2 else float('nan')
+			n_true   = int((grp > 0).sum())
+			pct      = 100.0 * float(np.mean(grp))
+			median_p = 100.0 * float(np.median(grp))
+			ci_lo_p, ci_hi_p = _ci95(grp)
+			ci_str   = (f"[{100*ci_lo_p:.1f}%, {100*ci_hi_p:.1f}%]"
+			            if not np.isnan(ci_lo_p) else "N/A")
+			sd       = float(np.std(grp, ddof=1))  if n >= 2 else float('nan')
+			var      = float(np.var(grp, ddof=1))  if n >= 2 else float('nan')
 			results_beh[col][wk] = {
-				'n': n, 'n_true': n_true, 'pct': pct,
-				'ci_lo_pct': 100 * ci_lo, 'ci_hi_pct': 100 * ci_hi,
-				'mean': mean, 'sd': sd, 'variance': var,
+				'n': n, 'n_true': n_true, 'pct': pct, 'median_pct': median_p,
+				'ci_lo_pct': 100 * ci_lo_p, 'ci_hi_pct': 100 * ci_hi_p,
+				'sd': sd, 'variance': var,
 			}
 			print(f"  {lbl:>8}  {n:>4}  {n_true:>7}  {pct:>6.1f}%  "
-			      f"{ci_str:>22}  {mean:>8.3f}  {sd:>8.3f}  {var:>10.3f}")
+			      f"{ci_str:>22}  {median_p:>7.1f}%  {sd:>8.3f}  {var:>10.3f}")
 		# Collapsed row
-		_all_b = cdf.loc[cdf[wc].isin(weeks), col].dropna().astype(float).values
+		if "ID" in cdf.columns:
+			_all_b = cdf.loc[cdf[wc].isin(weeks)].groupby(["ID", wc])[col].mean().dropna().values
+		else:
+			_all_b = cdf.loc[cdf[wc].isin(weeks), col].dropna().astype(float).values
 		_abn = len(_all_b)
 		if _abn > 0:
-			_ab_ntrue = int(_all_b.sum())
-			_ab_pct   = 100.0 * _all_b.mean()
-			_ab_ci_lo, _ab_ci_hi = _wilson_ci(_ab_ntrue, _abn)
-			_ab_ci_str = f"[{100*_ab_ci_lo:.1f}%, {100*_ab_ci_hi:.1f}%]"
-			_ab_mean = float(np.mean(_all_b))
-			_ab_sd   = float(np.std(_all_b, ddof=1)) if _abn >= 2 else float('nan')
-			_ab_var  = float(np.var(_all_b, ddof=1)) if _abn >= 2 else float('nan')
+			_ab_ntrue  = int((_all_b > 0).sum())
+			_ab_pct    = 100.0 * float(np.mean(_all_b))
+			_ab_med_p  = 100.0 * float(np.median(_all_b))
+			_ab_ci_lo, _ab_ci_hi = _ci95(_all_b)
+			_ab_ci_str = (f"[{100*_ab_ci_lo:.1f}%, {100*_ab_ci_hi:.1f}%]"
+			              if not np.isnan(_ab_ci_lo) else "N/A")
+			_ab_sd  = float(np.std(_all_b, ddof=1)) if _abn >= 2 else float('nan')
+			_ab_var = float(np.var(_all_b, ddof=1)) if _abn >= 2 else float('nan')
 			results_beh[col]['_all'] = {
-				'n': _abn, 'n_true': _ab_ntrue, 'pct': _ab_pct,
+				'n': _abn, 'n_true': _ab_ntrue, 'pct': _ab_pct, 'median_pct': _ab_med_p,
 				'ci_lo_pct': 100 * _ab_ci_lo, 'ci_hi_pct': 100 * _ab_ci_hi,
-				'mean': _ab_mean, 'sd': _ab_sd, 'variance': _ab_var,
+				'sd': _ab_sd, 'variance': _ab_var,
 			}
 			print(f"  {'-'*85}")
 			print(f"  {'All':>8}  {_abn:>4}  {_ab_ntrue:>7}  {_ab_pct:>6.1f}%  "
-			      f"{_ab_ci_str:>22}  {_ab_mean:>8.3f}  {_ab_sd:>8.3f}  {_ab_var:>10.3f}")
+			      f"{_ab_ci_str:>22}  {_ab_med_p:>7.1f}%  {_ab_sd:>8.3f}  {_ab_var:>10.3f}")
+
+	# ── Prevalence: proportion of animals showing behavior ≥ once ────────────
+	print(f"\n{'─'*90}")
+	print(f"  BEHAVIORAL PREVALENCE  (proportion of animals showing ≥1 event, per {fl})")
+	print(f"{'─'*90}")
+	results_prev: dict = {}
+	for col in beh_cols:
+		results_prev[col] = {}
+		print(f"\n  {col}:")
+		print(f"  {'Level':>8}  {'n':>4}  {'n≥once':>7}  {'Prev%':>7}  {'95% CI (Wilson)':>22}")
+		print(f"  {'-'*58}")
+		for wk in weeks:
+			if "ID" in cdf.columns:
+				grp = cdf.loc[cdf[wc] == wk].groupby("ID")[col].mean().dropna().values
+			else:
+				grp = cdf.loc[cdf[wc] == wk, col].dropna().astype(float).values
+			n = len(grp)
+			lbl = _group_label(wk)
+			if n == 0:
+				results_prev[col][wk] = {'n': 0}
+				print(f"  {lbl:>8}  {n:>4}  {'\u2014':>7}  {'\u2014':>7}  {'\u2014':>22}")
+				continue
+			n_true = int((grp > 0).sum())
+			prev   = 100.0 * n_true / n
+			ci_lo, ci_hi = _wilson_ci(n_true, n)
+			ci_str = f"[{100*ci_lo:.1f}%, {100*ci_hi:.1f}%]"
+			results_prev[col][wk] = {'n': n, 'n_true': n_true, 'prev': prev,
+			                         'ci_lo': 100*ci_lo, 'ci_hi': 100*ci_hi}
+			print(f"  {lbl:>8}  {n:>4}  {n_true:>7}  {prev:>6.1f}%  {ci_str:>22}")
+		# Collapsed All row
+		if "ID" in cdf.columns:
+			_all_p = cdf.loc[cdf[wc].isin(weeks)].groupby(["ID", wc])[col].mean().dropna().values
+		else:
+			_all_p = cdf.loc[cdf[wc].isin(weeks), col].dropna().astype(float).values
+		_apn = len(_all_p)
+		if _apn > 0:
+			_ap_nt  = int((_all_p > 0).sum())
+			_ap_pct = 100.0 * _ap_nt / _apn
+			_ap_ci_lo, _ap_ci_hi = _wilson_ci(_ap_nt, _apn)
+			_ap_ci_str = f"[{100*_ap_ci_lo:.1f}%, {100*_ap_ci_hi:.1f}%]"
+			results_prev[col]['_all'] = {'n': _apn, 'n_true': _ap_nt, 'prev': _ap_pct,
+			                             'ci_lo': 100*_ap_ci_lo, 'ci_hi': 100*_ap_ci_hi}
+			print(f"  {'-'*58}")
+			print(f"  {'All':>8}  {_apn:>4}  {_ap_nt:>7}  {_ap_pct:>6.1f}%  {_ap_ci_str:>22}")
 
 	# ── Save report ───────────────────────────────────────────────────────────
 	rpt_path = None
@@ -3396,8 +3460,8 @@ def generate_descriptive_stats_report(
 				"\u2500"*60,
 				f"  {col.upper()}",
 				"\u2500"*60,
-				f"  {'Level':>8}  {'n':>4}  {'n True':>7}  {'%':>7}  "
-				f"{'95% CI (Wilson)':>22}  {'Mean':>8}  {'SD':>8}  {'Var':>10}",
+				f"  {'Level':>8}  {'n':>4}  {'n≥once':>7}  {'Mean%':>7}  "
+				f"{'95% CI (mean)':>22}  {'Median%':>8}  {'SD':>8}  {'Var':>10}",
 				f"  {'-'*85}",
 			]
 			for wk, s in col_data.items():
@@ -3409,18 +3473,55 @@ def generate_descriptive_stats_report(
 						f"  {lbl:>8}  {0:>4}  {'N/A':>7}  {'N/A':>7}  {'N/A':>22}  {'N/A':>8}  {'N/A':>8}  {'N/A':>10}"
 					)
 					continue
-				ci_str = f"[{s['ci_lo_pct']:.1f}%, {s['ci_hi_pct']:.1f}%]"
+				ci_str = (f"[{s['ci_lo_pct']:.1f}%, {s['ci_hi_pct']:.1f}%]"
+				          if not np.isnan(s['ci_lo_pct']) else "N/A")
 				lines.append(
 					f"  {lbl:>8}  {s['n']:>4}  {s['n_true']:>7}  {s['pct']:>6.1f}%  "
-					f"{ci_str:>22}  {s['mean']:>8.3f}  {s['sd']:>8.3f}  {s['variance']:>10.3f}"
+					f"{ci_str:>22}  {s['median_pct']:>7.1f}%  {s['sd']:>8.3f}  {s['variance']:>10.3f}"
 				)
 			if '_all' in col_data:
 				s = col_data['_all']
-				ci_str = f"[{s['ci_lo_pct']:.1f}%, {s['ci_hi_pct']:.1f}%]"
+				ci_str = (f"[{s['ci_lo_pct']:.1f}%, {s['ci_hi_pct']:.1f}%]"
+				          if not np.isnan(s['ci_lo_pct']) else "N/A")
 				lines.append(f"  {'-'*85}")
 				lines.append(
 					f"  {'All':>8}  {s['n']:>4}  {s['n_true']:>7}  {s['pct']:>6.1f}%  "
-					f"{ci_str:>22}  {s['mean']:>8.3f}  {s['sd']:>8.3f}  {s['variance']:>10.3f}"
+					f"{ci_str:>22}  {s['median_pct']:>7.1f}%  {s['sd']:>8.3f}  {s['variance']:>10.3f}"
+				)
+			lines.append("")
+		lines += [
+			"",
+			"="*80,
+			f"BEHAVIORAL PREVALENCE  (proportion of animals showing \u22651 event, per {fl})",
+			"="*80,
+			"Note: prevalence = n_true / n  (binomial proportion; Wilson 95% CI)",
+			"",
+		]
+		for col, col_data in results_prev.items():
+			lines += [
+				"\u2500"*60,
+				f"  {col.upper()}",
+				"\u2500"*60,
+				f"  {'Level':>8}  {'n':>4}  {'n\u2265once':>7}  {'Prev%':>7}  {'95% CI (Wilson)':>22}",
+				f"  {'-'*58}",
+			]
+			for wk, s in col_data.items():
+				if wk == '_all':
+					continue
+				lbl = _group_label(wk)
+				if s.get('n', 0) == 0:
+					lines.append(f"  {lbl:>8}  {0:>4}  {'N/A':>7}  {'N/A':>7}  {'N/A':>22}")
+					continue
+				ci_str = f"[{s['ci_lo']:.1f}%, {s['ci_hi']:.1f}%]"
+				lines.append(
+					f"  {lbl:>8}  {s['n']:>4}  {s['n_true']:>7}  {s['prev']:>6.1f}%  {ci_str:>22}"
+				)
+			if '_all' in col_data:
+				s = col_data['_all']
+				ci_str = f"[{s['ci_lo']:.1f}%, {s['ci_hi']:.1f}%]"
+				lines.append(f"  {'-'*58}")
+				lines.append(
+					f"  {'All':>8}  {s['n']:>4}  {s['n_true']:>7}  {s['prev']:>6.1f}%  {ci_str:>22}"
 				)
 			lines.append("")
 		lines += ["="*80, "END OF REPORT", "="*80, ""]
@@ -3435,6 +3536,7 @@ def generate_descriptive_stats_report(
 	return {
 		'continuous': results_cont,
 		'behavioral': results_beh,
+		'prevalence': results_prev,
 		'weeks': weeks,
 		'report_path': rpt_path,
 	}
@@ -4794,7 +4896,7 @@ def plot_interaction_effects(
 		
 		if save_dir:
 			save_path = save_dir / f"interaction_plot_{measure_name.replace(' ', '_')}.svg"
-			fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+			fig.savefig(save_path, format='svg')
 			print(f"  Saved to: {save_path}")
 		
 		figures[measure_name] = fig
@@ -4930,7 +5032,7 @@ def plot_interaction_effects(
 		
 		if save_dir:
 			save_path = save_dir / f"interaction_plot_{measure_name.replace(' ', '_')}.svg"
-			fig.savefig(save_path, format='svg', dpi=200, bbox_inches='tight')
+			fig.savefig(save_path, format='svg')
 			print(f"  Saved to: {save_path}")
 		
 		figures[measure_name] = fig
@@ -5296,7 +5398,7 @@ def main() -> None:
 				return
 			name = ans if ans.lower() not in ('y', 'yes') else default
 			out = _safe_svg(name)
-			fig_obj.savefig(str(out), format='svg', bbox_inches='tight')
+			fig_obj.savefig(str(out), format='svg')
 			print(f"  Saved: {out}")
 		except Exception as _e:
 			print(f"  Save failed: {_e}")
@@ -5426,7 +5528,7 @@ def main() -> None:
 					pfx = input("  Filename prefix [behavioral_pies]: ").strip() or "behavioral_pies"
 					for fp, lv in zip(figs_p, lvls):
 						tag = f"Week{int(lv)}" if EXPERIMENT_MODE == 'nonramp' else f"CA{int(lv)}"
-						fp.savefig(str(_safe_svg(f"{pfx}_{tag}")), format='svg', bbox_inches='tight')
+						fp.savefig(str(_safe_svg(f"{pfx}_{tag}")), format='svg')
 						print(f"  Saved: {pfx}_{tag}.svg")
 			except Exception as _e:
 				print(f"  Save error: {_e}")
@@ -5450,7 +5552,7 @@ def main() -> None:
 					if ans in ('y', 'yes'):
 						ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 						out = Path.cwd() / f"ols_diagnostics_{ts}.svg"
-						_cache['ols']['figure'].savefig(str(out), format='svg', bbox_inches='tight')
+						_cache['ols']['figure'].savefig(str(out), format='svg')
 						print(f"  Saved: {out}")
 				except Exception:
 					pass
@@ -5674,7 +5776,7 @@ def plot_total_change_by_id(
 			data_min=x_data_min,
 			data_max=x_data_max,
 			step=x_step,
-			clamp_min=0,
+			clamp_min=1,
 			left_pad_steps=1,
 			right_pad_steps=1,
 		)
@@ -5712,7 +5814,7 @@ def plot_total_change_by_id(
 	fig.tight_layout()
 
 	if save_path is not None:
-		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+		fig.savefig(str(save_path))
 
 	if save_svg:
 		base = svg_filename or (title or "total_change_by_id")
@@ -5720,7 +5822,7 @@ def plot_total_change_by_id(
 		if not safe.lower().endswith(".svg"):
 			safe += ".svg"
 		out_path = Path.cwd() / safe
-		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		fig.savefig(str(out_path), format="svg")
 		print(f"Saved SVG to: {out_path}")
 
 	if show:
@@ -5848,7 +5950,7 @@ def plot_daily_change_by_id(
 			data_min=x_data_min,
 			data_max=x_data_max,
 			step=x_step,
-			clamp_min=0,
+			clamp_min=1,
 			left_pad_steps=1,
 			right_pad_steps=1,
 		)
@@ -5868,7 +5970,7 @@ def plot_daily_change_by_id(
 		right_pad_steps=1,
 	)
 
-	# Now that axes are finalized, draw block background and labels (clips at day 0 correctly)
+	# Now that axes are finalized, draw block background and labels (clips at day 1 correctly)
 	if use_day_number:
 		if EXPERIMENT_MODE == 'ramp':
 			_add_ca_block_boundaries(ax, block_by_day)
@@ -5886,7 +5988,7 @@ def plot_daily_change_by_id(
 	fig.tight_layout()
 
 	if save_path is not None:
-		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+		fig.savefig(str(save_path))
 
 	# Optionally save an SVG in the current working directory, using a title-derived filename
 	if save_svg:
@@ -5895,7 +5997,7 @@ def plot_daily_change_by_id(
 		if not safe.lower().endswith(".svg"):
 			safe += ".svg"
 		out_path = Path.cwd() / safe
-		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		fig.savefig(str(out_path), format="svg")
 		print(f"Saved SVG to: {out_path}")
 
 	if show:
@@ -6032,7 +6134,7 @@ def plot_total_change_by_sex(
 	fig.tight_layout()
 	
 	if save_path is not None:
-		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+		fig.savefig(str(save_path))
 	
 	if save_svg:
 		base = svg_filename or (title or "total_change_by_sex")
@@ -6040,7 +6142,7 @@ def plot_total_change_by_sex(
 		if not safe.lower().endswith(".svg"):
 			safe += ".svg"
 		out_path = Path.cwd() / safe
-		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		fig.savefig(str(out_path), format="svg")
 		print(f"Saved SVG to: {out_path}")
 	
 	if show:
@@ -6176,7 +6278,7 @@ def plot_daily_change_by_sex(
 	fig.tight_layout()
 	
 	if save_path is not None:
-		fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+		fig.savefig(str(save_path))
 	
 	if save_svg:
 		base = svg_filename or (title or "daily_change_by_sex")
@@ -6184,7 +6286,7 @@ def plot_daily_change_by_sex(
 		if not safe.lower().endswith(".svg"):
 			safe += ".svg"
 		out_path = Path.cwd() / safe
-		fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+		fig.savefig(str(out_path), format="svg")
 		print(f"Saved SVG to: {out_path}")
 	
 	if show:
