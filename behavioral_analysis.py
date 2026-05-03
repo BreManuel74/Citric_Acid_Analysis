@@ -47,7 +47,7 @@ plt.rcParams["svg.fonttype"] = "none"
 # ═══════════════════════════════════════════════════════════════════════════════
 #  EXPERIMENT MODE — change this single value to switch between designs
 # ═══════════════════════════════════════════════════════════════════════════════
-EXPERIMENT_MODE = 'nonramp'   # 'ramp' or 'nonramp'
+EXPERIMENT_MODE = 'ramp'   # 'ramp' or 'nonramp'
 
 _MODE_LABELS = {
     'ramp': {
@@ -187,7 +187,7 @@ plt.rcParams.update({
     "figure.titlesize": 10,
     "lines.linewidth": 0.5,
     "lines.markersize": 1.5,
-    "figure.figsize": (3, 2), #4.5 by 2.5 for larger plot
+    "figure.figsize": (3.5, 2.5), #4.5 by 2.5 for larger plot
     "axes.xmargin": 0,
     "savefig.dpi": 200,
 })
@@ -3542,6 +3542,372 @@ def generate_descriptive_stats_report(
 	}
 
 
+def plot_total_change_r_fit(
+	df: pd.DataFrame,
+	*,
+	by_day: bool = False,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> dict:
+	"""
+	Scatterplot of Total Change values vs the within-subjects factor (Week/CA%) or
+	vs Day number, with per-animal trajectories and linear + quadratic OLS fit lines.
+
+	The plot is drawn in matplotlib (matching all other plots' rcParams style).
+	R is called only for model statistics (F-test, AIC, BIC, adj. R²), which are
+	printed to console and returned.
+
+	Parameters
+	----------
+	by_day : bool
+		If True, use Day number on the x-axis (day granularity).
+		If False (default), use the within-subjects factor (Week or CA%).
+
+	Requires R installed with Rscript on PATH (or a standard Windows location).
+	"""
+	import subprocess
+	import shutil
+	import tempfile
+
+	wc = _MLB['within_col']    # 'CA (%)' or 'Week'
+	fl = _MLB['factor_label']  # 'CA%' or 'Week'
+
+	cdf = clean_master_dataframe(df)
+	cdf = _add_day_number_column(cdf)
+	if EXPERIMENT_MODE == 'nonramp':
+		cdf = _add_week_column(cdf)
+		cdf = cdf[cdf.get('Day', pd.Series([1])) >= 1] if 'Day' in cdf.columns else cdf
+
+	if by_day:
+		x_col   = 'Day'
+		x_label = 'Day'
+	else:
+		x_col   = wc
+		x_label = fl
+
+	needed = ['ID', x_col, 'Total Change']
+	if not by_day and wc not in cdf.columns:
+		needed_alt = ['ID', 'Total Change']
+	missing_cols = [c for c in needed if c not in cdf.columns]
+	if missing_cols:
+		print(f'[R fit] Missing columns {missing_cols}.')
+		return {}
+
+	plot_df = (
+		cdf[['ID', x_col, 'Total Change']]
+		.dropna()
+		.rename(columns={x_col: 'x_factor', 'Total Change': 'total_change'})
+	)
+	if plot_df.empty:
+		print('[R fit] No data after filtering.')
+		return {}
+
+	plot_df['x_factor'] = pd.to_numeric(plot_df['x_factor'], errors='coerce')
+	plot_df = plot_df.dropna(subset=['x_factor'])
+
+	# ── Locate Rscript ────────────────────────────────────────────────────────
+	rscript = shutil.which('Rscript') or shutil.which('Rscript.exe')
+	if rscript is None:
+		import glob as _glob
+		for _pat in [
+			r'C:\Program Files\R\R-*\bin\Rscript.exe',
+			r'C:\Program Files\R\R-*\bin\x64\Rscript.exe',
+		]:
+			_m = sorted(_glob.glob(_pat), reverse=True)
+			if _m:
+				rscript = _m[0]
+				break
+
+	# ── R statistics ──────────────────────────────────────────────────────────
+	report = ''
+	r_stats: dict = {}
+	if rscript is None:
+		print('[R fit] Rscript not found — skipping model comparison. Install R or add to PATH.')
+	else:
+		with tempfile.TemporaryDirectory() as _tmpdir:
+			_tmp     = Path(_tmpdir)
+			data_csv = _tmp / 'tc_data.csv'
+			res_txt  = _tmp / 'tc_results.txt'
+			r_scr    = _tmp / 'tc_fit.R'
+
+			plot_df.to_csv(data_csv, index=False)
+			dat_r = str(data_csv).replace('\\', '/')
+			res_r = str(res_txt).replace('\\', '/')
+
+			r_code = f"""\
+df <- read.csv("{dat_r}", stringsAsFactors=FALSE)
+df <- df[!is.na(df$x_factor) & !is.na(df$total_change), ]
+df$x_factor <- as.numeric(df$x_factor)
+m_lin  <- lm(total_change ~ x_factor,                 data=df)
+m_quad <- lm(total_change ~ x_factor + I(x_factor^2), data=df)
+s_lin  <- summary(m_lin)
+s_quad <- summary(m_quad)
+comp   <- anova(m_lin, m_quad)
+aic_l  <- AIC(m_lin);  aic_q <- AIC(m_quad)
+bic_l  <- BIC(m_lin);  bic_q <- BIC(m_quad)
+
+# Exponential decay: y = A + B * exp(-k * x)
+y_r <- range(df$total_change)
+A0  <- y_r[1]
+B0  <- y_r[2] - y_r[1]
+m_exp_ok  <- FALSE
+m_exp     <- NULL
+s_exp     <- NULL
+aic_exp   <- NA_real_
+bic_exp   <- NA_real_
+r2_exp    <- NA_real_
+for (k0 in c(0.05, 0.1, 0.2, 0.5)) {{
+  if (m_exp_ok) break
+  tryCatch({{
+    m_exp <- nls(total_change ~ A + B * exp(-k * x_factor),
+                 data=df,
+                 start=list(A=A0, B=B0, k=k0),
+                 control=nls.control(maxiter=500, warnOnly=FALSE))
+    s_exp    <- summary(m_exp)
+    aic_exp  <- AIC(m_exp)
+    bic_exp  <- BIC(m_exp)
+    tss      <- sum((df$total_change - mean(df$total_change))^2)
+    rss      <- sum(residuals(m_exp)^2)
+    r2_exp   <- 1 - rss / tss
+    m_exp_ok <- TRUE
+  }}, error=function(e) {{}})
+}}
+
+sink("{res_r}")
+cat("========================================\\n")
+cat("LINEAR MODEL  (total_change ~ {x_label})\\n")
+cat("========================================\\n")
+print(s_lin)
+cat("\\n========================================\\n")
+cat("QUADRATIC MODEL  (total_change ~ {x_label} + {x_label}^2)\\n")
+cat("========================================\\n")
+print(s_quad)
+cat("\\n========================================\\n")
+cat("EXPONENTIAL DECAY  (total_change ~ A + B*exp(-k*{x_label}))\\n")
+cat("========================================\\n")
+if (m_exp_ok) {{
+  print(s_exp)
+  cat(sprintf("Pseudo R2: %.4f\\n", r2_exp))
+}} else {{
+  cat("Exponential fit did not converge.\\n")
+}}
+cat("\\n========================================\\n")
+cat("MODEL COMPARISON (F-test: Linear vs Quadratic)\\n")
+cat("========================================\\n")
+print(comp)
+cat(sprintf("AIC  -- Linear: %.3f  |  Quadratic: %.3f  |  Exponential: %s\\n",
+            aic_l, aic_q, ifelse(m_exp_ok, sprintf("%.3f", aic_exp), "N/A")))
+cat(sprintf("BIC  -- Linear: %.3f  |  Quadratic: %.3f  |  Exponential: %s\\n",
+            bic_l, bic_q, ifelse(m_exp_ok, sprintf("%.3f", bic_exp), "N/A")))
+cat(sprintf("Adj R2 -- Linear: %.4f  |  Quadratic: %.4f  |  Exp pseudo-R2: %s\\n",
+            s_lin$adj.r.squared, s_quad$adj.r.squared,
+            ifelse(m_exp_ok, sprintf("%.4f", r2_exp), "N/A")))
+sink()
+# machine-readable summary for Python
+cat(sprintf("__STATS__:%.4f:%.4f:%.4f:%.4f:%.4f:%s:%s\\n",
+            s_lin$adj.r.squared, s_quad$adj.r.squared, aic_l, aic_q,
+            ifelse(is.na(comp[["Pr(>F)"]][2]), NA_real_, comp[["Pr(>F)"]][2]),
+            ifelse(m_exp_ok, sprintf("%.4f", aic_exp), "NA"),
+            ifelse(m_exp_ok, sprintf("%.4f", r2_exp),  "NA")))
+if (m_exp_ok) {{
+  cf <- coef(m_exp)
+  cat(sprintf("__EXP_COEF__:%.6f:%.6f:%.6f\\n", cf["A"], cf["B"], cf["k"]))
+}}
+"""
+			r_scr.write_text(r_code, encoding='utf-8')
+			proc = subprocess.run(
+				[rscript, '--vanilla', str(r_scr)],
+				capture_output=True, text=True, timeout=120,
+			)
+			if proc.returncode != 0:
+				print(f'[R fit] Rscript failed (exit {proc.returncode}):\n{proc.stderr.strip()}')
+			else:
+				if res_txt.exists():
+					report = res_txt.read_text(encoding='utf-8')
+					print('\n' + '='*60)
+					print('R MODEL COMPARISON RESULTS')
+					print('='*60)
+					print(report)
+				for line in proc.stdout.splitlines():
+					if line.startswith('__STATS__:'):
+						parts = line[len('__STATS__:'):].split(':')
+						try:
+							r_stats = {
+								'adj_r2_lin':  float(parts[0]),
+								'adj_r2_quad': float(parts[1]),
+								'aic_lin':     float(parts[2]),
+								'aic_quad':    float(parts[3]),
+								'p_ftest':     float(parts[4]) if parts[4] not in ('NA', 'NaN') else float('nan'),
+								'aic_exp':     float(parts[5]) if len(parts) > 5 and parts[5] not in ('NA', 'NaN') else float('nan'),
+								'r2_exp':      float(parts[6]) if len(parts) > 6 and parts[6] not in ('NA', 'NaN') else float('nan'),
+							}
+						except (ValueError, IndexError):
+							pass
+					elif line.startswith('__EXP_COEF__:'):
+						parts = line[len('__EXP_COEF__:'):].split(':')
+						try:
+							r_stats['exp_A'] = float(parts[0])
+							r_stats['exp_B'] = float(parts[1])
+							r_stats['exp_k'] = float(parts[2])
+						except (ValueError, IndexError):
+							pass
+
+	# ── Matplotlib plot (matches rcParams style) ──────────────────────────────
+	ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+	tag = 'day' if by_day else fl.lower().replace(' ', '_').replace('%', 'pct')
+	if save_path is None:
+		save_path = Path.cwd() / f'total_change_r_fit_{tag}_{ts}.png'
+	save_path = Path(save_path)
+	save_path.parent.mkdir(parents=True, exist_ok=True)
+
+	svg_out: Optional[Path] = None
+	if save_svg:
+		svg_out = (save_path.parent / svg_filename) if svg_filename else save_path.with_suffix('.svg')
+
+	ids   = plot_df['ID'].unique()
+	cmap  = plt.get_cmap('tab10')
+	icols = {iid: cmap(i % 10) for i, iid in enumerate(ids)}
+
+	x_vals = plot_df['x_factor'].values
+	y_vals = plot_df['total_change'].values
+	x_seq  = np.linspace(x_vals.min(), x_vals.max(), 300)
+
+	# fit curves in numpy / scipy for the plot
+	_c_lin  = np.polyfit(x_vals, y_vals, 1)
+	_c_quad = np.polyfit(x_vals, y_vals, 2)
+	y_lin   = np.polyval(_c_lin,  x_seq)
+	y_quad  = np.polyval(_c_quad, x_seq)
+
+	# exponential decay: use R coefficients if available, else scipy fallback
+	y_exp: Optional[np.ndarray] = None
+	exp_label = 'Exp decay fit'
+	if r_stats.get('exp_A') is not None:
+		_A, _B, _k = r_stats['exp_A'], r_stats['exp_B'], r_stats['exp_k']
+		y_exp = _A + _B * np.exp(-_k * x_seq)
+	else:
+		try:
+			from scipy.optimize import curve_fit as _cfit
+			def _exp_model(x, A, B, k): return A + B * np.exp(-k * x)
+			_y0 = y_vals.min()
+			_p0 = [_y0, y_vals.max() - _y0, 0.1]
+			_popt, _ = _cfit(_exp_model, x_vals, y_vals, p0=_p0, maxfev=5000)
+			y_exp = _exp_model(x_seq, *_popt)
+		except Exception:
+			exp_label = 'Exp decay (no fit)'
+
+	title_str = f"Total Change (%) by {x_label} \u2014 Linear / Quadratic / Exp Decay"
+
+	fig, ax = plt.subplots()
+	ax.set_title(title_str)
+	ax.set_xlabel(x_label)
+	ax.set_ylabel('Total Change (%)')
+
+	# per-animal trajectories
+	for iid, grp in plot_df.groupby('ID'):
+		grp_s = grp.sort_values('x_factor')
+		c = icols[iid]
+		ax.plot(grp_s['x_factor'], grp_s['total_change'],
+		        color=c, alpha=0.25, linewidth=plt.rcParams['lines.linewidth'])
+		ax.scatter(grp_s['x_factor'], grp_s['total_change'],
+		           color=c, alpha=0.55, s=plt.rcParams['lines.markersize']**2,
+		           zorder=3)
+
+	# fit lines
+	ax.plot(x_seq, y_lin,  color='royalblue', linewidth=1.2, linestyle='-',
+	        label='Linear fit', zorder=4)
+	ax.plot(x_seq, y_quad, color='firebrick', linewidth=1.2, linestyle='--',
+	        label='Quadratic fit', zorder=4)
+	if y_exp is not None:
+		ax.plot(x_seq, y_exp, color='#2ca02c', linewidth=1.2, linestyle=':',
+		        label=exp_label, zorder=4)
+
+	# annotation from R stats (if available)
+	if r_stats:
+		p_f    = r_stats.get('p_ftest', float('nan'))
+		p_str  = f"Lin vs Quad F-test p={p_f:.4f}" if not np.isnan(p_f) else "F-test N/A"
+		aic_e  = r_stats.get('aic_exp', float('nan'))
+		r2_e   = r_stats.get('r2_exp',  float('nan'))
+		exp_str = f"{aic_e:.1f}" if not np.isnan(aic_e) else 'N/A'
+		r2e_str = f"{r2_e:.3f}" if not np.isnan(r2_e)  else 'N/A'
+		ann = (
+			f"{p_str}  |  Adj R\u00b2: Lin={r_stats['adj_r2_lin']:.3f} "
+			f"Quad={r_stats['adj_r2_quad']:.3f} Exp={r2e_str}\n"
+			f"AIC: Lin={r_stats['aic_lin']:.1f} Quad={r_stats['aic_quad']:.1f} Exp={exp_str}"
+		)
+		ax.annotate(ann, xy=(0.5, -0.22), xycoords='axes fraction',
+		            ha='center', va='top', fontsize=5, color='0.4')
+
+	ax.legend(fontsize=plt.rcParams['legend.fontsize'], frameon=False)
+	ax.spines['top'].set_visible(False)
+	ax.spines['right'].set_visible(False)
+	ax.tick_params(direction='in')
+	ax.axhline(0, color='0.3', linewidth=0.8, linestyle=':', alpha=0.7)
+	fig.tight_layout()
+
+	fig.savefig(str(save_path))
+	if svg_out:
+		fig.savefig(str(svg_out), format='svg')
+		print(f'[R fit] SVG saved: {svg_out}')
+
+	# ── Save stats report ─────────────────────────────────────────────────────
+	rpt_path = save_path.with_suffix('.txt')
+	rpt_lines = [
+		'=' * 60,
+		f'R MODEL COMPARISON — {title_str}',
+		f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+		'=' * 60,
+		'',
+	]
+	if report:
+		rpt_lines.append(report)
+	else:
+		rpt_lines.append('(R was not available; statistics not computed)')
+		rpt_lines.append('')
+
+	# Python-side coefficient summary (always available)
+	rpt_lines += [
+		'-' * 60,
+		'FITTED COEFFICIENTS (Python numpy / scipy)',
+		'-' * 60,
+		f'  Linear:    slope={_c_lin[0]:.4f},  intercept={_c_lin[1]:.4f}',
+		f'  Quadratic: a={_c_quad[0]:.4f},  b={_c_quad[1]:.4f},  c={_c_quad[2]:.4f}',
+	]
+	if r_stats.get('exp_A') is not None:
+		rpt_lines.append(
+			f'  Exp decay: A={r_stats["exp_A"]:.4f},  B={r_stats["exp_B"]:.4f},  k={r_stats["exp_k"]:.4f}'
+		)
+	else:
+		rpt_lines.append('  Exp decay: coefficients not available (fit did not converge or R unavailable)')
+
+	if r_stats:
+		rpt_lines += [
+			'',
+			'-' * 60,
+			'MODEL FIT SUMMARY (from R)',
+			'-' * 60,
+			f'  Adj R²   — Linear:    {r_stats.get("adj_r2_lin",  float("nan")):.4f}',
+			f'  Adj R²   — Quadratic: {r_stats.get("adj_r2_quad", float("nan")):.4f}',
+			f'  Pseudo R²— Exp decay: {r_stats.get("r2_exp",      float("nan")):.4f}',
+			f'  AIC      — Linear:    {r_stats.get("aic_lin",  float("nan")):.3f}',
+			f'  AIC      — Quadratic: {r_stats.get("aic_quad", float("nan")):.3f}',
+			f'  AIC      — Exp decay: {r_stats.get("aic_exp",  float("nan")):.3f}',
+			f'  F-test (Lin vs Quad) p = {r_stats.get("p_ftest", float("nan")):.4f}',
+		]
+
+	rpt_path.write_text('\n'.join(rpt_lines), encoding='utf-8')
+	print(f'[R fit] Stats report saved: {rpt_path}')
+
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+
+	print(f'[R fit] Plot saved: {save_path}')
+	return {'report': report, 'r_stats': r_stats, 'png_path': save_path, 'svg_path': svg_out, 'report_path': rpt_path}
+
+
 def perform_two_way_anova_weight(df: pd.DataFrame) -> dict:
 	"""
 	Perform one-factor repeated measures ANOVA examining the effect of the
@@ -5594,6 +5960,22 @@ def main() -> None:
 			print(f"\n[Descriptive Stats] Per-{fl} summary for weight changes and behaviors...")
 			_cache['desc'] = generate_descriptive_stats_report(cdf, save_report=True)
 
+		elif task == 15:
+			print(f"\n[R Fit] Total Change \u2014 linear vs quadratic (calls Rscript)...")
+			try:
+				gran = input(f"  Granularity: [1] by {fl}  [2] by Day  (default 1): ").strip()
+			except (KeyboardInterrupt, EOFError):
+				gran = '1'
+			_by_day = gran == '2'
+			try:
+				svg_ans = input("  Also save SVG? (y/n): ").strip().lower()
+			except (KeyboardInterrupt, EOFError):
+				svg_ans = 'n'
+			_save_svg = svg_ans in ('y', 'yes')
+			_cache['r_fit'] = plot_total_change_r_fit(
+				cdf, by_day=_by_day, show=True, save_svg=_save_svg,
+			)
+
 		else:
 			print(f"  Unknown task: {task}")
 
@@ -5613,6 +5995,7 @@ def main() -> None:
 		12: "Save statistical analysis report",
 		13: "Statistical test registry",
 		14: f"Descriptive statistics (per {fl}): weight changes + behavior %",
+		15: f"R: Total Change scatterplot \u2014 linear vs quadratic fit (per {fl})",
 	}
 
 	while True:
@@ -5635,6 +6018,10 @@ def main() -> None:
 		for t in [12, 13, 14]:
 			print(f"    [{t:>2}] {_LABELS[t]}")
 		print()
+		print("  R ANALYSIS")
+		for t in [15]:
+			print(f"    [{t:>2}] {_LABELS[t]}")
+		print()
 		print("    [ A] Run all   [ Q] Quit")
 		print("-"*72)
 
@@ -5649,7 +6036,7 @@ def main() -> None:
 			break
 
 		if choice in ('a', 'all'):
-			tasks = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14]
+			tasks = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 15]
 		else:
 			try:
 				tasks = [int(x.strip()) for x in choice.split(',') if x.strip()]
