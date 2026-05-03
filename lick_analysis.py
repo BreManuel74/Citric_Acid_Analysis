@@ -34,12 +34,19 @@ except ImportError:
     print("WARNING: pingouin not installed. Repeated measures ANOVA will not be available.")
     print("Install with: pip install pingouin")
 
+# Try importing rpy2 for R-based polynomial contrasts (lme4 / lmerTest / emmeans)
+try:
+    import rpy2.robjects as _rpy2_ro  # noqa: F401 – import check only
+    HAS_RPY2 = True
+except ImportError:
+    HAS_RPY2 = False
+
 # ─────────────────────────────────────────────────────────────────────────────
 # EXPERIMENT MODE  ← Change this line to switch between designs
 #   'ramp'    → CA% increases each week; within-subjects factor = CA_Percent
 #   'nonramp' → CA% is constant across weeks; within-subjects factor = Week
 # ─────────────────────────────────────────────────────────────────────────────
-EXPERIMENT_MODE = 'ramp'  # << CHANGE THIS: 'ramp' or 'nonramp'
+EXPERIMENT_MODE = 'nonramp'  # << CHANGE THIS: 'ramp' or 'nonramp'
 # ─────────────────────────────────────────────────────────────────────────────
 
 _MODE_LABELS: dict = {
@@ -5815,26 +5822,38 @@ def plot_licks_vs_weight_correlation(
         import os as _os
         import glob as _glob
 
-        # ── Windows: locate R home and configure rpy2 before first import ──
-        if _os.name == 'nt' and 'R_HOME' not in _os.environ:
-            # Search registry-style install paths
-            _r_candidates = (
-                _glob.glob(r'C:\Program Files\R\R-*\bin\x64')
-                + _glob.glob(r'C:\Program Files\R\R-*\bin')
-                + _glob.glob(r'C:\R\R-*\bin\x64')
-            )
-            if _r_candidates:
-                # pick the most recent version (sort descending)
-                _r_candidates.sort(reverse=True)
-                _r_bin = _r_candidates[0]
-                _r_home = str(Path(_r_bin).parent.parent
-                               if _r_bin.endswith('x64') else Path(_r_bin).parent)
-                _os.environ['R_HOME'] = _r_home
-                # Prepend R bin dirs so DLLs (including stats.dll) are found
-                _r_lib = _os.path.join(_r_home, 'library')
-                for _p in [_r_bin, _os.path.join(_r_home, 'bin')]:
-                    if _p not in _os.environ.get('PATH', ''):
-                        _os.environ['PATH'] = _p + _os.pathsep + _os.environ.get('PATH', '')
+        # ── Windows: ensure R's DLLs are findable by LoadLibrary ────────────
+        # Bug fix: run regardless of whether R_HOME is already set in the env.
+        # If R_HOME was set by conda/rpy2 but bin\x64 was never added to PATH,
+        # Windows cannot resolve R.dll / Rblas.dll when loading stats.dll or
+        # nlme — even though R itself started successfully via rpy2.
+        if _os.name == 'nt':
+            # Use R_HOME already in env, or discover it by searching standard paths
+            _r_home = _os.environ.get('R_HOME', '')
+            if not _r_home:
+                _r_candidates = (
+                    _glob.glob(r'C:\Program Files\R\R-*\bin\x64')
+                    + _glob.glob(r'C:\Program Files\R\R-*\bin')
+                    + _glob.glob(r'C:\R\R-*\bin\x64')
+                )
+                if _r_candidates:
+                    _r_candidates.sort(reverse=True)
+                    _r_cand = _r_candidates[0]
+                    _r_home = str(Path(_r_cand).parent.parent
+                                   if _r_cand.endswith('x64') else Path(_r_cand).parent)
+                    _os.environ['R_HOME'] = _r_home
+            if _r_home:
+                # Always prepend both bin\x64 and bin so all R DLLs are found
+                for _p in [_os.path.join(_r_home, 'bin', 'x64'),
+                            _os.path.join(_r_home, 'bin')]:
+                    if _os.path.isdir(_p):
+                        if _p not in _os.environ.get('PATH', ''):
+                            _os.environ['PATH'] = _p + _os.pathsep + _os.environ.get('PATH', '')
+                        # Python 3.8+: add as a trusted DLL search directory
+                        try:
+                            _os.add_dll_directory(_p)
+                        except (AttributeError, OSError):
+                            pass
 
         # Suppress R's attempt to find 'sh' on Windows startup
         _os.environ.setdefault('R_PROFILE_USER', '')
@@ -5842,7 +5861,7 @@ def plot_licks_vs_weight_correlation(
 
         import rpy2.robjects as _ro
         import rpy2.robjects.packages as _rpkgs
-        _rpkgs.importr('nlme')   # will raise if R or nlme not available
+        _rpkgs.importr('lme4')   # will raise if R or lme4 not available
         _use_rpy2 = True
     except Exception as _rpy2_exc:
         print(f"NOTE: rpy2/nlme not available ({type(_rpy2_exc).__name__}: {_rpy2_exc})")
@@ -5852,153 +5871,527 @@ def plot_licks_vs_weight_correlation(
         print("      then restart your terminal and retry.")
 
     # ══════════════════════════════════════════════════════════════════════
-    # PATH A: rpy2 + nlme — random intercept + random slope + corAR1
+    # PATH A: rpy2 + lme4 glmer.nb — GLMM Negative Binomial, random intercept
     # ══════════════════════════════════════════════════════════════════════
     if _use_rpy2:
         print("\n" + "=" * 80)
-        print("MIXED EFFECTS MODEL: nlme lme()  [via rpy2]")
-        print("  licks ~ weight_pct + week_num")
-        print("  Random:      ~week_num | mouse_id  (intercept + slope per mouse)")
-        print("  Correlation: corAR1(form = ~week_num | mouse_id)")
-        print("  Method:      REML")
+        print("MIXED EFFECTS MODEL: lme4 glmer.nb()  [via rpy2]")
+        print("  licks ~ weight_pct + week_num + (1 | mouse_id)")
+        print("  Family:  Negative Binomial (log link)")
+        print("  Random:  random intercept per mouse")
+        print("  Method:  ML (Laplace approximation)")
         print("=" * 80)
 
-        # Push data into R as plain named vectors
+        # Push data into R — licks must be integer counts for NB
         _ro.globalenv['lme_mouse'] = _ro.StrVector(
             _pnl_raw['mouse_id'].astype(str).tolist())
         _ro.globalenv['lme_week']  = _ro.FloatVector(_pnl_raw['week_num'].tolist())
-        _ro.globalenv['lme_licks'] = _ro.FloatVector(_pnl_raw['licks'].tolist())
+        _ro.globalenv['lme_licks'] = _ro.IntVector(
+            _pnl_raw['licks'].round().astype(int).tolist())
         _ro.globalenv['lme_wt']    = _ro.FloatVector(_pnl_raw['weight_pct'].tolist())
 
         _ro.r('''
-library(nlme)
+suppressPackageStartupMessages(library(lme4))
+suppressPackageStartupMessages(library(MASS))
 .df_lme <- data.frame(
     mouse_id   = factor(lme_mouse),
     week_num   = lme_week,
-    licks      = lme_licks,
+    licks      = as.integer(lme_licks),
     weight_pct = lme_wt
 )
+
+# ── Strategy: glmer.nb alternates theta / PIRLS and can fail on small n.
+# ── Step 1: Estimate NB dispersion theta from a marginal glm.nb (no RE).
+# ── Step 2: Fit glmer() with theta fixed — avoids the unstable alternation.
+# ── glmer.nb() is tried first; two-stage approach is the fallback.
+.fit_nb_fixed_theta <- function(data) {
+    .marg <- tryCatch(
+        MASS::glm.nb(licks ~ weight_pct + week_num,
+                     data    = data,
+                     control = glm.control(maxit = 200)),
+        error = function(e) { message("glm.nb failed: ", conditionMessage(e)); NULL }
+    )
+    if (is.null(.marg)) return(NULL)
+    .th <- .marg$theta
+    message(sprintf("Two-stage NB: glm.nb theta = %.4f; fitting glmer with fixed theta", .th))
+    .m <- tryCatch(
+        glmer(licks ~ weight_pct + week_num + (1 | mouse_id),
+              data    = data,
+              family  = MASS::negative.binomial(theta = .th),
+              control = glmerControl(optimizer = "bobyqa",
+                                     optCtrl   = list(maxfun = 2e5))),
+        error = function(e) {
+            message("glmer fixed-theta (bobyqa) failed: ", conditionMessage(e))
+            tryCatch(
+                glmer(licks ~ weight_pct + week_num + (1 | mouse_id),
+                      data    = data,
+                      family  = MASS::negative.binomial(theta = .th),
+                      control = glmerControl(optimizer = "nloptwrap",
+                                             optCtrl   = list(maxfun = 2e5))),
+                error = function(e2) { message("glmer fixed-theta (nloptwrap) failed: ", conditionMessage(e2)); NULL }
+            )
+        }
+    )
+    if (!is.null(.m)) attr(.m, ".nb_theta_fixed") <- .th
+    .m
+}
+
 .model_lme <- tryCatch(
-    lme(licks ~ weight_pct + week_num,
-        random      = ~ week_num | mouse_id,
-        correlation = corAR1(form = ~ week_num | mouse_id),
-        data        = .df_lme,
-        method      = "REML",
-        control     = lmeControl(opt = "optim", maxIter = 200, msMaxIter = 200)),
+    glmer.nb(
+        licks ~ weight_pct + week_num + (1 | mouse_id),
+        data    = .df_lme,
+        control = glmerControl(optimizer = "bobyqa",
+                               optCtrl   = list(maxfun = 2e5))),
     error = function(e) {
-        message("nlme with AR(1) failed: ", conditionMessage(e),
-                " — retrying without AR(1) correlation structure")
-        lme(licks ~ weight_pct + week_num,
-            random  = ~ week_num | mouse_id,
-            data    = .df_lme,
-            method  = "REML",
-            control = lmeControl(opt = "optim"))
+        message("glmer.nb failed: ", conditionMessage(e),
+                " -- falling back to two-stage fixed-theta approach")
+        .fit_nb_fixed_theta(.df_lme)
     }
 )
-.lme_tt  <- summary(.model_lme)$tTable
-.lme_vc  <- VarCorr(.model_lme)
-.lme_ar1 <- tryCatch(
-    coef(.model_lme$modelStruct$corStruct, unconstrained = FALSE),
-    error = function(e) NA_real_
+if (is.null(.model_lme)) stop("All glmer.nb fitting strategies failed.")
+
+# Retrieve theta: either from glmer.nb or from the fixed-theta attribute
+.lme_theta <- tryCatch(
+    getME(.model_lme, "glmer.nb.theta"),
+    error = function(e) {
+        th <- attr(.model_lme, ".nb_theta_fixed")
+        if (is.null(th)) stop("Cannot retrieve NB theta.") else th
+    }
 )
+.lme_coef  <- coef(summary(.model_lme))
+.lme_vc_df <- as.data.frame(VarCorr(.model_lme))
 ''')
 
-        # Extract fixed effects table
-        _tt     = np.array(_ro.r('.lme_tt'))
-        _tt_row = list(_ro.r('rownames(.lme_tt)'))
-        _tt_col = list(_ro.r('colnames(.lme_tt)'))
+        # Extract fixed effects (z-test for GLMM; columns vary by lme4 version)
+        _tt     = np.array(_ro.r('.lme_coef'))
+        _tt_row = list(_ro.r('rownames(.lme_coef)'))
+        _tt_col = list(_ro.r('colnames(.lme_coef)'))
         _fe_df  = pd.DataFrame(_tt, index=_tt_row, columns=_tt_col)
-        print("\nFixed Effects:")
+        # Normalise column names
+        _col_map = {}
+        for _c in _fe_df.columns:
+            _cl = _c.lower().replace(' ', '_')
+            if 'estimate' in _cl:   _col_map[_c] = 'Estimate'
+            elif 'std' in _cl:      _col_map[_c] = 'Std.Error'
+            elif _cl in ('z_value', 'z value', 'zval', 'z'):
+                                    _col_map[_c] = 'z value'
+            elif 'pr' in _cl or 'p' == _cl:
+                                    _col_map[_c] = 'p-value'
+        _fe_df = _fe_df.rename(columns=_col_map)
+
+        print("\nFixed Effects (log-link, on log scale):")
         print(_fe_df.to_string(float_format='{:.4f}'.format))
+        print("  Incidence Rate Ratios [exp(\u03b2)]:")
+        for _idx in _fe_df.index:
+            _est = float(_fe_df.loc[_idx, 'Estimate'])
+            print(f"    {_idx:<20} exp(\u03b2) = {np.exp(_est):.4f}")
 
-        _b0   = float(_fe_df.loc['(Intercept)', 'Value'])
-        _b_wt = float(_fe_df.loc['weight_pct',  'Value'])
-        _b_wk = float(_fe_df.loc['week_num',     'Value'])
+        _b0   = float(_fe_df.loc['(Intercept)', 'Estimate'])
+        _b_wt = float(_fe_df.loc['weight_pct',  'Estimate'])
+        _b_wk = float(_fe_df.loc['week_num',     'Estimate'])
         _p_wt = float(_fe_df.loc['weight_pct',  'p-value'])
+        _theta = float(_ro.r('.lme_theta')[0])
 
-        # Extract variance components (VarCorr is a character matrix in R)
-        _var_int_r   = float(_ro.r(
-            'as.numeric(VarCorr(.model_lme)["(Intercept)","Variance"])')[0])
-        _var_slope_r = float(_ro.r(
-            'as.numeric(VarCorr(.model_lme)["week_num","Variance"])')[0])
-        _cor_is_r    = float(_ro.r(
-            'as.numeric(VarCorr(.model_lme)["week_num","Corr"])')[0])
-        _var_resid_r = float(_ro.r(
-            'as.numeric(VarCorr(.model_lme)["Residual","Variance"])')[0])
-        _phi_r_raw   = float(_ro.r('.lme_ar1')[0])
-        _phi_r       = None if np.isnan(_phi_r_raw) else _phi_r_raw
+        # Random-intercept variance from VarCorr data frame
+        _vc_grp  = list(_ro.r('.lme_vc_df$grp'))
+        _vc_vcov = list(_ro.r('.lme_vc_df$vcov'))
+        _var_int_r = float(
+            _vc_vcov[_vc_grp.index('mouse_id')]
+            if 'mouse_id' in _vc_grp else np.nan
+        )
+        _mean_wk = float(_pnl_raw['week_num'].mean())
 
-        _sd_int   = np.sqrt(max(_var_int_r, 0.0))
-        _sd_slope = np.sqrt(max(_var_slope_r, 0.0))
-        _cov_is   = _cor_is_r * _sd_int * _sd_slope
+        # ICC for NB-GLMM (Nakagawa et al. 2017)
+        _var_dist = np.log(1.0 / _theta + 1.0)   # distributional variance
+        _icc1 = (_var_int_r / (_var_int_r + _var_dist)
+                 if (_var_int_r + _var_dist) > 0 else np.nan)
 
-        print(f"\nVariance components:")
-        print(f"  Random intercept σ²:       {_var_int_r:.4f}")
-        print(f"  Random slope σ²:           {_var_slope_r:.4f}")
-        print(f"  Intercept–slope corr:      {_cor_is_r:.4f}")
-        print(f"  Residual σ²:               {_var_resid_r:.4f}")
-        if _phi_r is not None:
-            print(f"  AR(1) φ:                   {_phi_r:.4f}")
-
-        # ICC at mean week (Goldstein 2011 formula for random-slope models)
-        _mean_wk      = float(_pnl_raw['week_num'].mean())
-        _var_re_mean  = max(_var_int_r
-                            + 2 * _mean_wk * _cov_is
-                            + _mean_wk ** 2 * _var_slope_r, 0.0)
-        _icc1 = (_var_re_mean / (_var_re_mean + _var_resid_r)
-                 if (_var_re_mean + _var_resid_r) > 0 else np.nan)
-
-        # Nakagawa & Schielzeth / Johnson 2014 R² for random-slope LMM
+        # Nakagawa & Schielzeth 2013/2017 R² for GLMMs
         _b_vec    = np.array([_b0, _b_wt, _b_wk])
         _X_mat    = np.column_stack([np.ones(len(_pnl_raw)),
                                      _pnl_raw['weight_pct'].values,
                                      _pnl_raw['week_num'].values])
-        _sigma_f2 = float(np.var(_X_mat @ _b_vec))
-        _var_week = float(np.var(_pnl_raw['week_num'].values))
-        _sigma_r2 = max(_var_int_r
-                        + _var_slope_r * _var_week
-                        + 2 * _cov_is * _mean_wk, 0.0)
-        _total_var   = _sigma_f2 + _sigma_r2 + _var_resid_r
+        _sigma_f2    = float(np.var(_X_mat @ _b_vec))
+        _total_var   = _sigma_f2 + _var_int_r + _var_dist
         _r2_marginal = _sigma_f2 / _total_var if _total_var > 0 else np.nan
-        _r2_cond     = (_sigma_f2 + _sigma_r2) / _total_var if _total_var > 0 else np.nan
+        _r2_cond     = (_sigma_f2 + _var_int_r) / _total_var if _total_var > 0 else np.nan
 
-        _phi_str     = (f"φ_AR1 = {_phi_r:.3f}" if _phi_r is not None else "AR(1) n/a")
-        _model_label = f"RE int+slope/mouse, corAR1  {_phi_str}"
+        _model_label = "GLMM NB, RE intercept/mouse"
 
-        print(f"\nICC(1) at mean week  = {_icc1:.3f}  (mouse-level / total variance)")
-        print(f"Marginal  R²         = {_r2_marginal:.3f}  (fixed effects only)")
-        print(f"Conditional R²       = {_r2_cond:.3f}  (fixed + random effects)")
+        print(f"\nNB dispersion \u03b8:       {_theta:.4f}")
+        print(f"Random intercept \u03c3\u00b2:   {_var_int_r:.4f}")
+        print(f"Distributional var:     {_var_dist:.4f}  [log(1/\u03b8 + 1)]")
+        print(f"ICC(1)               = {_icc1:.3f}  (mouse-level / total variance)")
+        print(f"Marginal  R\u00b2         = {_r2_marginal:.3f}  (fixed effects only)")
+        print(f"Conditional R\u00b2       = {_r2_cond:.3f}  (fixed + random effects)")
         print("=" * 80 + "\n")
 
-        _phi_line = (f"  AR(1) \u03c6:                   {_phi_r:.4f}"
-                     if _phi_r is not None else "  AR(1) \u03c6:                   n/a")
+        _irr_lines = [
+            f"  exp(\u03b2)  {_idx:<20} = {np.exp(float(_fe_df.loc[_idx, 'Estimate'])):.4f}"
+            for _idx in _fe_df.index
+        ]
         _mm_report = "\n".join([
             "=" * 80,
-            "MIXED EFFECTS MODEL: nlme lme()  [via rpy2]",
-            "  licks ~ weight_pct + week_num",
-            "  Random:      ~week_num | mouse_id  (intercept + slope per mouse)",
-            "  Correlation: corAR1(form = ~week_num | mouse_id)",
-            "  Method:      REML",
+            "MIXED EFFECTS MODEL: lme4 glmer.nb()  [via rpy2]",
+            "  licks ~ weight_pct + week_num + (1 | mouse_id)",
+            "  Family:  Negative Binomial (log link)",
+            "  Random:  random intercept per mouse",
+            "  Method:  ML (Laplace approximation)",
             "=" * 80,
             "",
-            "Fixed Effects:",
+            "Fixed Effects  (log scale):",
             _fe_df.to_string(float_format='{:.4f}'.format),
             "",
-            "Variance components:",
-            f"  Random intercept \u03c3\u00b2:       {_var_int_r:.4f}",
-            f"  Random slope \u03c3\u00b2:           {_var_slope_r:.4f}",
-            f"  Intercept\u2013slope corr:      {_cor_is_r:.4f}",
-            f"  Residual \u03c3\u00b2:               {_var_resid_r:.4f}",
-            _phi_line,
+            "Incidence Rate Ratios  [exp(\u03b2)]:",
+        ] + _irr_lines + [
             "",
-            f"ICC(1) at mean week  = {_icc1:.3f}  (mouse-level / total variance)",
+            "Variance components:",
+            f"  NB dispersion \u03b8:       {_theta:.4f}",
+            f"  Random intercept \u03c3\u00b2:   {_var_int_r:.4f}",
+            f"  Distributional var:     {_var_dist:.4f}  [log(1/\u03b8 + 1)]",
+            "",
+            f"ICC(1)               = {_icc1:.3f}  (mouse-level / total variance)",
             f"Marginal  R\u00b2         = {_r2_marginal:.3f}  (fixed effects only)",
             f"Conditional R\u00b2       = {_r2_cond:.3f}  (fixed + random effects)",
             "=" * 80,
             "",
             f"n = {_pnl_raw.shape[0]} observations,  {n_animals} mice",
-            f"Weeks: {len(sorted_dates)}  (mean week used for ICC/R\u00b2 = {_mean_wk:.1f})",
+            f"Weeks: {len(sorted_dates)}  (mean week = {_mean_wk:.1f})",
         ])
+
+        # ── Polynomial contrasts for the Week effect (lmerTest + emmeans) ──
+        import tempfile as _tmpfile
+        import os as _os_poly
+
+        _poly_tmpdir = _tmpfile.gettempdir().replace('\\', '/')
+        _poly_uid    = str(id(_pnl_raw))[-6:]
+        _poly_data_p = f"{_poly_tmpdir}/la_poly_data_{_poly_uid}.csv"
+        _poly_fe_p   = f"{_poly_tmpdir}/la_poly_fe_{_poly_uid}.csv"
+        _poly_co_p   = f"{_poly_tmpdir}/la_poly_co_{_poly_uid}.csv"
+        _poly_fs_p   = f"{_poly_tmpdir}/la_poly_fs_{_poly_uid}.csv"
+
+        try:
+            _poly_df = (_pnl_raw[['mouse_id', 'week_num', 'licks']]
+                        .rename(columns={'mouse_id': 'ID',
+                                         'week_num': 'Week',
+                                         'licks':    'Total_Licks'})
+                        .dropna()
+                        .copy())
+            _poly_df.to_csv(_poly_data_p, index=False)
+
+            _ro.globalenv['r_poly_data_p'] = _poly_data_p
+            _ro.globalenv['r_poly_fe_p']   = _poly_fe_p
+            _ro.globalenv['r_poly_co_p']   = _poly_co_p
+            _ro.globalenv['r_poly_fs_p']   = _poly_fs_p
+
+            _ro.r("""
+                suppressPackageStartupMessages(library(lme4))
+                suppressPackageStartupMessages(library(lmerTest))
+                suppressPackageStartupMessages(library(emmeans))
+
+                df_poly   <- read.csv(r_poly_data_p)
+                df_poly$ID <- factor(df_poly$ID)
+                df_poly$Total_Licks <- as.integer(round(df_poly$Total_Licks))
+                wvals      <- sort(unique(df_poly$Week))
+                df_poly$Week_f <- factor(df_poly$Week, levels=wvals, ordered=TRUE)
+
+                model_poly <- tryCatch(
+                    glmer.nb(
+                        Total_Licks ~ Week_f + (1|ID),
+                        data    = df_poly,
+                        control = glmerControl(optimizer = "bobyqa",
+                                               optCtrl   = list(maxfun = 2e5))),
+                    error = function(e) {
+                        message("glmer.nb for poly contrasts failed: ", conditionMessage(e),
+                                " — falling back to lmerTest::lmer on log1p-transformed counts")
+                        lmerTest::lmer(
+                            log1p(Total_Licks) ~ Week_f + (1|ID),
+                            data=df_poly, REML=TRUE)
+                    }
+                )
+                .poly_used_glmm <- inherits(model_poly, "glmerMod")
+
+                fe_poly      <- as.data.frame(coef(summary(model_poly)))
+                fe_poly$term <- rownames(fe_poly)
+                write.csv(fe_poly, r_poly_fe_p, row.names=FALSE)
+
+                fit_stats_poly <- data.frame(
+                    AIC     = AIC(model_poly),
+                    BIC     = BIC(model_poly),
+                    logLik  = as.numeric(logLik(model_poly)),
+                    nobs    = nobs(model_poly),
+                    formula = deparse(formula(model_poly), width.cutoff=120L),
+                    model   = if (.poly_used_glmm) 'glmer.nb' else 'lmer(log1p)'
+                )
+                write.csv(fit_stats_poly, r_poly_fs_p, row.names=FALSE)
+
+                # emmeans on log scale; type='response' back-transforms to count scale
+                em_week    <- emmeans(model_poly, ~ Week_f,
+                                      type = if (.poly_used_glmm) 'response' else 'response')
+                contr_week <- as.data.frame(contrast(
+                    emmeans(model_poly, ~ Week_f),  # contrasts on link scale
+                    'poly'))
+                write.csv(contr_week, r_poly_co_p, row.names=FALSE)
+            """)
+
+            _poly_fe_df  = pd.read_csv(_poly_fe_p)
+            _poly_fit_df = pd.read_csv(_poly_fs_p)
+            _poly_co_df  = pd.read_csv(_poly_co_p)
+
+            for _fpath in [_poly_data_p, _poly_fe_p, _poly_co_p, _poly_fs_p]:
+                try:    _os_poly.unlink(_fpath)
+                except Exception: pass
+
+            _poly_aic    = float(_poly_fit_df['AIC'].iloc[0])
+            _poly_bic    = float(_poly_fit_df['BIC'].iloc[0])
+            _poly_loglik = float(_poly_fit_df['logLik'].iloc[0])
+            _poly_nobs   = int(_poly_fit_df['nobs'].iloc[0])
+
+            def _rget_val(row, *names):
+                for n in names:
+                    try:
+                        v = row[n]
+                        if not pd.isna(v): return float(v)
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                return float('nan')
+
+            _W  = 80
+            _fw = (42, 12, 10, 8, 8, 10)
+            _fhdr_poly = (
+                f"  {'Effect':<{_fw[0]}}  "
+                f"{'Estimate':>{_fw[1]}}  "
+                f"{'Std Error':>{_fw[2]}}  "
+                f"{'DF':>{_fw[3]}}  "
+                f"{'t Value':>{_fw[4]}}  "
+                f"{'Pr > |t|':>{_fw[5]}}  Sig"
+            )
+            _poly_model_type = str(_poly_fit_df.get('model', pd.Series(['glmer.nb'])).iloc[0])
+            _poly_lines = [
+                "",
+                "\u2550" * _W,
+                "  POLYNOMIAL CONTRASTS FOR WEEK EFFECT  (lme4 glmer.nb / emmeans)",
+                f"  Model: {_poly_model_type}  Total_Licks ~ Week_f + (1|ID)",
+                "  Family: Negative Binomial (log link)   [Week_f = ordered factor]",
+                "  Contrasts: emmeans::contrast(~ Week_f, 'poly')  [on link scale]",
+                "\u2550" * _W,
+                "",
+                "  Fit Statistics",
+                f"    {'AIC  (smaller is better)':<40} {_poly_aic:.1f}",
+                f"    {'BIC  (smaller is better)':<40} {_poly_bic:.1f}",
+                f"    {'-2 Log-Likelihood':<40} {-2 * _poly_loglik:.1f}",
+                f"    {'N observations':<40} {_poly_nobs}",
+                "",
+                "  Solution for Fixed Effects",
+                "",
+                _fhdr_poly,
+                "  " + "\u2500" * (sum(_fw) + 14),
+            ]
+
+            for _, _row in _poly_fe_df.iterrows():
+                _t_disp = _la_poly_fmt_term(str(_row.get('term', '')))
+                _est = _rget_val(_row, 'Estimate')
+                _se  = _rget_val(_row, 'Std. Error', 'Std.Error', 'Std..Error')
+                _df_ = _rget_val(_row, 'df', 'Df', 'DF')
+                _t   = _rget_val(_row, 't value', 't.value', 't_value')
+                _p   = _rget_val(_row, 'Pr(>|t|)', 'Pr...t..', 'p.value')
+                _poly_lines.append(
+                    f"  {_t_disp:<{_fw[0]}}  "
+                    f"{_est:>{_fw[1]}.4f}  "
+                    f"{_se:>{_fw[2]}.4f}  "
+                    f"{_df_:>{_fw[3]}.1f}  "
+                    f"{_t:>{_fw[4]}.3f}  "
+                    f"{_la_poly_fmt_p(_p):>{_fw[5]}}  "
+                    f"{_la_poly_sig_stars(_p)}"
+                )
+
+            _cw = (22, 12, 10, 8, 8, 10)
+            _chdr_poly = (
+                f"  {'Contrast':<{_cw[0]}}  "
+                f"{'Estimate':>{_cw[1]}}  "
+                f"{'Std Error':>{_cw[2]}}  "
+                f"{'DF':>{_cw[3]}}  "
+                f"{'t Value':>{_cw[4]}}  "
+                f"{'Pr > |t|':>{_cw[5]}}  Sig"
+            )
+            _poly_lines += [
+                "",
+                "  Polynomial Contrasts  (Week_f main effect decomposition)",
+                "",
+                _chdr_poly,
+                "  " + "\u2500" * (sum(_cw) + 14),
+            ]
+
+            for _, _row in _poly_co_df.iterrows():
+                _name = _la_poly_rename_contrast(str(_row.get('contrast', '')))
+                _est  = _rget_val(_row, 'estimate')
+                _se   = _rget_val(_row, 'SE')
+                _df_  = _rget_val(_row, 'df')
+                _t    = _rget_val(_row, 't.ratio')
+                _p    = _rget_val(_row, 'p.value')
+                _poly_lines.append(
+                    f"  {_name:<{_cw[0]}}  "
+                    f"{_est:>{_cw[1]}.4f}  "
+                    f"{_se:>{_cw[2]}.4f}  "
+                    f"{_df_:>{_cw[3]}.1f}  "
+                    f"{_t:>{_cw[4]}.3f}  "
+                    f"{_la_poly_fmt_p(_p):>{_cw[5]}}  "
+                    f"{_la_poly_sig_stars(_p)}"
+                )
+
+            _poly_lines += [
+                "",
+                "  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10",
+                "",
+                "\u2550" * _W,
+            ]
+
+            _poly_section = "\n".join(_poly_lines)
+            print(_poly_section)
+            _mm_report += _poly_section
+
+        except Exception as _poly_exc:
+            import traceback as _tb_poly
+            _poly_err = f"\n[ERROR] Polynomial contrasts (lmerTest/emmeans) failed: {_poly_exc}\n"
+            print(_poly_err)
+            _tb_poly.print_exc()
+            _mm_report += _poly_err
+
+        # ── Model diagnostics: residuals, Q-Q, scale-location, random effects ──
+        try:
+            import tempfile as _diag_tmp
+            import os as _diag_os
+
+            _diag_dir  = _diag_tmp.gettempdir().replace('\\', '/')
+            _diag_uid  = str(id(_pnl_raw))[-6:]
+            _diag_csv  = f"{_diag_dir}/la_diag_{_diag_uid}.csv"
+            _diag_png  = f"{_diag_dir}/la_diag_{_diag_uid}.png"
+
+            _ro.globalenv['r_diag_csv'] = _diag_csv
+            _ro.globalenv['r_diag_png'] = _diag_png
+
+            _ro.r("""
+                # Collect residual diagnostics from the already-fitted .model_lme
+                .resid_df <- data.frame(
+                    fitted    = fitted(.model_lme),
+                    residuals = residuals(.model_lme, type = 'pearson'),
+                    mouse_id  = .df_lme$mouse_id,
+                    week_num  = .df_lme$week_num
+                )
+                write.csv(.resid_df, r_diag_csv, row.names = FALSE)
+
+                # Four-panel diagnostic figure
+                png(r_diag_png, width = 1200, height = 1100, res = 150)
+                par(mfrow = c(2, 2), mar = c(4.5, 4.5, 3.5, 1.5), oma = c(0,0,2,0))
+
+                # 1. Residuals vs Fitted
+                plot(.resid_df$fitted, .resid_df$residuals,
+                     xlab = 'Fitted values', ylab = 'Pearson residuals',
+                     main = 'Residuals vs Fitted',
+                     pch = 16, col = adjustcolor('steelblue', 0.6), cex = 0.9)
+                abline(h = 0, lty = 2, col = 'grey40')
+                lines(lowess(.resid_df$fitted, .resid_df$residuals),
+                      col = 'firebrick', lwd = 1.8)
+
+                # 2. Normal Q-Q of residuals
+                qqnorm(.resid_df$residuals,
+                       main = 'Normal Q-Q  (Pearson residuals)',
+                       pch = 16, col = adjustcolor('steelblue', 0.6), cex = 0.9)
+                qqline(.resid_df$residuals, col = 'firebrick', lwd = 1.8)
+
+                # 3. Scale-Location (sqrt |residuals| vs fitted)
+                plot(.resid_df$fitted, sqrt(abs(.resid_df$residuals)),
+                     xlab = 'Fitted values',
+                     ylab = expression(sqrt("|Pearson residuals|")),
+                     main = 'Scale-Location',
+                     pch = 16, col = adjustcolor('steelblue', 0.6), cex = 0.9)
+                lines(lowess(.resid_df$fitted, sqrt(abs(.resid_df$residuals))),
+                      col = 'firebrick', lwd = 1.8)
+                abline(h = sqrt(mean(.resid_df$residuals^2)),
+                       lty = 2, col = 'grey40')
+
+                # 4. Q-Q of random intercepts (lme4 glmer.nb)
+                re_int <- tryCatch(
+                    ranef(.model_lme)[["mouse_id"]][["(Intercept)"]],
+                    error = function(e) ranef(.model_lme)[[1]][[1]]
+                )
+                qqnorm(re_int,
+                       main = 'Normal Q-Q  (random intercepts)',
+                       pch = 16, col = adjustcolor('darkorchid', 0.7), cex = 0.9)
+                qqline(re_int, col = 'firebrick', lwd = 1.8)
+
+                mtext('lme4 glmer.nb() — Model Diagnostics', outer = TRUE,
+                      cex = 1.1, font = 2)
+                dev.off()
+            """)
+
+            # Read residuals back for Python-side Shapiro-Wilk & Levene tests
+            _diag_df = pd.read_csv(_diag_csv)
+            _resid   = _diag_df['residuals'].dropna().values
+
+            # Shapiro-Wilk on residuals
+            if 3 <= len(_resid) <= 5000:
+                _sw_stat, _sw_p = stats.shapiro(_resid)
+                _sw_str = (f"Shapiro-Wilk W = {_sw_stat:.4f},  p = {_sw_p:.4f}  "
+                           f"({'normality OK' if _sw_p > 0.05 else 'NON-NORMAL'})")
+            else:
+                _sw_str = "Shapiro-Wilk: n outside 3-5000 range — skipped"
+
+            # Levene's test for homoscedasticity across weeks
+            _lev_groups = [
+                _diag_df.loc[_diag_df['week_num'] == _wk, 'residuals'].dropna().values
+                for _wk in sorted(_diag_df['week_num'].unique())
+                if len(_diag_df.loc[_diag_df['week_num'] == _wk]) >= 2
+            ]
+            if len(_lev_groups) >= 2:
+                _lev_stat, _lev_p = stats.levene(*_lev_groups)
+                _lev_str = (f"Levene's test (homoscedasticity across weeks): "
+                            f"W = {_lev_stat:.4f},  p = {_lev_p:.4f}  "
+                            f"({'homoscedastic' if _lev_p > 0.05 else 'HETEROSCEDASTIC'})")
+            else:
+                _lev_str = "Levene's test: not enough groups — skipped"
+
+            _diag_summary = "\n".join([
+                "",
+                "═" * 80,
+                "  MODEL DIAGNOSTICS  (lme4 glmer.nb Pearson residuals)",
+                "═" * 80,
+                "",
+                f"  {_sw_str}",
+                f"  {_lev_str}",
+                "",
+                "  Four-panel PNG saved alongside this report:",
+                "    Panel 1 — Residuals vs Fitted  (linearity / outlier check)",
+                "    Panel 2 — Normal Q-Q of Pearson residuals",
+                "    Panel 3 — Scale-Location  (homoscedasticity)",
+                "    Panel 4 — Normal Q-Q of random intercepts",
+                "  Red line = LOWESS smoother; dashed = reference line.",
+                "  Good fit: points scatter randomly around 0 (panels 1 & 3),",
+                "  points follow the diagonal (panels 2 & 4).",
+                "",
+            ])
+
+            print(_diag_summary)
+            _mm_report += _diag_summary
+
+            # Copy PNG next to the save_path if available, else print temp location
+            if save_path is not None:
+                import shutil as _shutil
+                _diag_out = save_path.parent / (save_path.stem + '_mixed_model_diagnostics.png')
+                _shutil.copy2(_diag_png, str(_diag_out))
+                print(f"[OK] Diagnostic plots saved -> {_diag_out}")
+                _mm_report += f"  Diagnostic PNG: {_diag_out}\n"
+            else:
+                print(f"[OK] Diagnostic plots saved (temp) -> {_diag_png}")
+
+            for _fp in [_diag_csv, _diag_png]:
+                try:    _diag_os.unlink(_fp)
+                except Exception: pass
+
+        except Exception as _diag_exc:
+            import traceback as _tb_diag
+            print(f"[WARNING] Diagnostic plots failed: {_diag_exc}")
+            _tb_diag.print_exc()
 
     # ══════════════════════════════════════════════════════════════════════
     # PATH B: linearmodels RandomEffects fallback (random intercept + AR(1) SE)
@@ -6122,6 +6515,280 @@ library(nlme)
         plt.show()
     else:
         plt.close(fig2)
+
+    return fig
+
+
+def plot_rmcorr_licks_vs_weight(
+    weekly_averages: Dict,
+    save_path: Optional[Path] = None,
+    show: bool = True,
+) -> Optional[plt.Figure]:
+    """Repeated-measures correlation (rmcorr) of lick count vs weight change.
+
+    Uses the R ``rmcorr`` package (Bakdash & Marusich 2017) which fits an
+    ANCOVA with participant as a factor, producing one common within-subject
+    slope and per-subject parallel regression lines.  The result is a true
+    repeated-measures correlation coefficient (r_rm) that accounts for the
+    non-independence of observations from the same mouse.
+
+    Requires rpy2 and the R package ``rmcorr`` (install.packages('rmcorr')).
+    Falls back to a plain Spearman scatter if rpy2 / rmcorr are unavailable.
+
+    Saves:
+        <save_path.stem>_rmcorr.svg   — matplotlib figure
+        <save_path.stem>_rmcorr.txt   — text report with r_rm, CI, p-value
+    """
+    import os as _os
+    import traceback as _tb
+    try:
+        return _plot_rmcorr_licks_vs_weight_impl(weekly_averages, save_path=save_path, show=show)
+    except Exception:
+        print("ERROR in plot_rmcorr_licks_vs_weight:")
+        _tb.print_exc()
+        return None
+
+
+def _plot_rmcorr_licks_vs_weight_impl(
+    weekly_averages: Dict,
+    save_path: Optional[Path] = None,
+    show: bool = True,
+) -> Optional[plt.Figure]:
+    import os as _os
+
+    # ── build flat per-animal-per-week data ──────────────────────────────
+    if EXPERIMENT_MODE == 'ramp':
+        sorted_dates = sorted(weekly_averages.keys(),
+                              key=lambda d: weekly_averages[d]['ca_percent'])
+    else:
+        sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+
+    records = []
+    for week_idx, date in enumerate(sorted_dates):
+        data = weekly_averages[date]
+        lick_arr = np.asarray(data['avg_licks_per_animal'], dtype=float)
+        wt_arr   = np.asarray(data['avg_total_weight_per_animal'], dtype=float)
+        ids      = data.get('animal_ids',
+                            [f"Animal_{j+1}" for j in range(len(lick_arr))])
+        for aid, lk, wt in zip(ids, lick_arr, wt_arr):
+            records.append({'mouse_id': str(aid), 'licks': lk, 'weight_pct': wt})
+
+    if not records:
+        print("ERROR: No per-animal data for rmcorr.")
+        return None
+
+    _df = pd.DataFrame(records).dropna(subset=['licks', 'weight_pct'])
+    if _df.shape[0] < 5 or _df['mouse_id'].nunique() < 3:
+        print("Not enough data for rmcorr (need ≥3 mice, ≥5 observations).")
+        return None
+
+    unique_animals = list(_df['mouse_id'].unique())
+    n_animals      = len(unique_animals)
+    cmap           = plt.cm.tab20
+    animal_color   = {aid: cmap(i % 20) for i, aid in enumerate(unique_animals)}
+    design_label   = _MLB['plot_suffix']
+
+    # ── attempt rmcorr via rpy2 ──────────────────────────────────────────
+    _r_rm  = np.nan
+    _p_rm  = np.nan
+    _ci_lo = np.nan
+    _ci_hi = np.nan
+    _slope = np.nan
+    _per_subject_intercepts: dict = {}
+    _rmcorr_ok = False
+    _rmcorr_report = ""
+
+    try:
+        import os as _osi
+        import glob as _globi
+
+        if _osi.name == 'nt':
+            _r_home = _osi.environ.get('R_HOME', '')
+            if _r_home:
+                for _p in [_osi.path.join(_r_home, 'bin', 'x64'),
+                            _osi.path.join(_r_home, 'bin')]:
+                    if _osi.path.isdir(_p):
+                        if _p not in _osi.environ.get('PATH', ''):
+                            _osi.environ['PATH'] = _p + _osi.pathsep + _osi.environ.get('PATH', '')
+                        try:
+                            _osi.add_dll_directory(_p)
+                        except (AttributeError, OSError):
+                            pass
+
+        import rpy2.robjects as _ro2
+        import rpy2.robjects.packages as _rpkgs2
+        _rpkgs2.importr('rmcorr')
+
+        import tempfile as _tmpi
+        _uid  = str(id(_df))[-6:]
+        _tdir = _tmpi.gettempdir().replace('\\', '/')
+        _csv  = f"{_tdir}/rmcorr_in_{_uid}.csv"
+        _out  = f"{_tdir}/rmcorr_out_{_uid}.csv"
+
+        _df.to_csv(_csv, index=False)
+        _ro2.globalenv['r_rmc_in']  = _csv
+        _ro2.globalenv['r_rmc_out'] = _out
+
+        _ro2.r("""
+            suppressPackageStartupMessages(library(rmcorr))
+            .d <- read.csv(r_rmc_in)
+            .d$mouse_id <- factor(.d$mouse_id)
+            .rmc <- rmcorr(participant = mouse_id,
+                           measure1    = weight_pct,
+                           measure2    = licks,
+                           dataset     = .d)
+            .all_coefs <- stats::coef(.rmc$model)
+            .slope     <- as.numeric(.all_coefs["weight_pct"])
+            .lvls <- levels(.d$mouse_id)
+            .intercepts <- sapply(.lvls, function(.lv) {
+                sx <- .d$weight_pct[.d$mouse_id == .lv]
+                sy <- .d$licks[.d$mouse_id == .lv]
+                if (length(sx) == 0 || is.na(.slope)) return(NA_real_)
+                mean(sy) - .slope * mean(sx)
+            })
+            .out_df <- data.frame(
+                mouse_id  = .lvls,
+                intercept = as.numeric(.intercepts),
+                slope     = .slope,
+                r_rm      = .rmc$r,
+                p_val     = .rmc$p,
+                ci_lo     = .rmc$CI[1],
+                ci_hi     = .rmc$CI[2],
+                df_rm     = .rmc$df
+            )
+            write.csv(.out_df, r_rmc_out, row.names = FALSE)
+        """)
+
+        _res_df = pd.read_csv(_out)
+        for _fp in [_csv, _out]:
+            try:    _os.unlink(_fp)
+            except Exception: pass
+
+        _r_rm  = float(_res_df['r_rm'].iloc[0])
+        _p_rm  = float(_res_df['p_val'].iloc[0])
+        _ci_lo = float(_res_df['ci_lo'].iloc[0])
+        _ci_hi = float(_res_df['ci_hi'].iloc[0])
+        _df_rm = float(_res_df['df_rm'].iloc[0])
+        _slope = float(_res_df['slope'].iloc[0])
+        _per_subject_intercepts = dict(
+            zip(_res_df['mouse_id'].astype(str), _res_df['intercept'].astype(float))
+        )
+        print(f"  [debug] slope={_slope:.4f}  n_intercepts={len(_per_subject_intercepts)}"
+              f"  intercept_keys={list(_per_subject_intercepts.keys())[:3]}")
+        # If R returned NaN for slope, compute it in Python from the rmcorr r value
+        # using the pooled within-subject regression: slope = r_rm * SD(y)/SD(x)
+        if np.isnan(_slope) and not np.isnan(_r_rm):
+            _sx = _df.groupby('mouse_id')['weight_pct'].apply(lambda v: v - v.mean()).std()
+            _sy = _df.groupby('mouse_id')['licks'].apply(lambda v: v - v.mean()).std()
+            if _sx > 0:
+                _slope = _r_rm * float(_sy) / float(_sx)
+                print(f"  [debug] slope recomputed from r_rm: {_slope:.4f}")
+            # recompute intercepts with new slope
+            _per_subject_intercepts = {
+                str(aid): (float(_df.loc[_df['mouse_id'] == aid, 'licks'].mean())
+                           - _slope * float(_df.loc[_df['mouse_id'] == aid, 'weight_pct'].mean()))
+                for aid in _df['mouse_id'].unique()
+            }
+        _rmcorr_ok = True
+        print(f"\nrmcorr: r_rm = {_r_rm:.4f},  p = {_p_rm:.4f},  "
+              f"95% CI [{_ci_lo:.4f}, {_ci_hi:.4f}],  df = {_df_rm:.0f}")
+
+    except Exception as _rmc_exc:
+        print(f"NOTE: rmcorr via rpy2 failed ({type(_rmc_exc).__name__}: {_rmc_exc})")
+        print("      Falling back to Spearman scatter (install R package 'rmcorr' for full output).")
+
+    # ── matplotlib figure ─────────────────────────────────────────────────
+    fig, ax = plt.subplots()
+    _ms = plt.rcParams.get('lines.markersize', 6)
+
+    # scatter points
+    for _, row in _df.iterrows():
+        ax.scatter(row['weight_pct'], row['licks'],
+                   color=animal_color[row['mouse_id']], marker='o',
+                   s=_ms ** 2, edgecolors='black', linewidths=0.5,
+                   alpha=0.8, zorder=4)
+
+    if _rmcorr_ok:
+        # draw single rmcorr line through the grand mean
+        if not np.isnan(_slope):
+            x_min = _df['weight_pct'].min()
+            x_max = _df['weight_pct'].max()
+            x_pad = (x_max - x_min) * 0.05
+            xs = np.linspace(x_min - x_pad, x_max + x_pad, 200)
+            _grand_intercept = (_df['licks'].mean()
+                                - _slope * _df['weight_pct'].mean())
+            ax.plot(xs, _grand_intercept + _slope * xs,
+                    color='black', linewidth=1.2, zorder=4)
+
+        _p_str = f"p = {_p_rm:.4f}" if _p_rm >= 0.0001 else "p < 0.0001"
+        _ann = (f"$r_{{rm}}$ = {_r_rm:.3f}\n"
+                f"{_p_str}\n"
+                f"95% CI [{_ci_lo:.3f}, {_ci_hi:.3f}]\n"
+                f"n = {n_animals} mice")
+    else:
+        # fallback: Spearman trend line
+        _valid = _df[['weight_pct', 'licks']].dropna()
+        if len(_valid) >= 3:
+            _rho, _pv = stats.spearmanr(_valid['weight_pct'], _valid['licks'])
+            _sl, _ic, *_ = stats.linregress(_valid['weight_pct'], _valid['licks'])
+            xs = np.linspace(_valid['weight_pct'].min(), _valid['weight_pct'].max(), 200)
+            ax.plot(xs, _sl * xs + _ic, color='dimgray', linestyle='--', zorder=2)
+            _p_str = f"p = {_pv:.4f}" if _pv >= 0.0001 else "p < 0.0001"
+            _ann = (f"Spearman \u03c1 = {_rho:.3f}\n{_p_str}\nn = {n_animals} mice\n"
+                    f"(rmcorr unavailable)")
+        else:
+            _ann = f"n = {n_animals} mice\n(rmcorr unavailable)"
+
+    ax.text(0.03, 0.97, _ann,
+            transform=ax.transAxes, va='top', ha='left', fontsize=7.5,
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.75, edgecolor='gray'))
+
+    ax.set_xlabel('Total Weight Change (%)', weight='bold')
+    ax.set_ylabel('Total Lick Count', weight='bold')
+    ax.set_title(f'Repeated-Measures Correlation: Licks ~ Weight Change\n({design_label})',
+                 weight='bold')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(direction='in', which='both', length=5)
+    plt.tight_layout()
+
+    # ── save ──────────────────────────────────────────────────────────────
+    if save_path is not None:
+        _rmc_svg = save_path.parent / (save_path.stem + '_rmcorr.svg')
+        fig.savefig(_rmc_svg, format='svg', dpi=200, bbox_inches='tight')
+        print(f"rmcorr figure saved -> {_rmc_svg}")
+
+        _rmc_txt = save_path.parent / (save_path.stem + '_rmcorr.txt')
+        if _rmcorr_ok:
+            _p_str_txt = f"p = {_p_rm:.4f}" if _p_rm >= 0.0001 else "p < 0.0001"
+            _rmc_txt.write_text("\n".join([
+                "=" * 70,
+                "REPEATED-MEASURES CORRELATION  (Bakdash & Marusich 2017)",
+                "  rmcorr(participant=mouse_id, measure1=weight_pct, measure2=licks)",
+                "  Package: R::rmcorr",
+                "=" * 70,
+                "",
+                f"  r_rm  = {_r_rm:.4f}",
+                f"  {_p_str_txt}",
+                f"  95% CI  [{_ci_lo:.4f}, {_ci_hi:.4f}]",
+                f"  df    = {_df_rm:.0f}",
+                f"  n mice  = {n_animals}",
+                f"  n obs   = {_df.shape[0]}",
+                "",
+                "  Interpretation: r_rm is the within-individual Pearson correlation",
+                "  after removing between-subject variance (ANCOVA with participant",
+                "  as factor). Parallel lines in the plot share one common slope.",
+                "=" * 70,
+            ]), encoding='utf-8')
+        else:
+            _rmc_txt.write_text("rmcorr not available — install R package 'rmcorr' and rpy2.\n",
+                                encoding='utf-8')
+        print(f"rmcorr report saved  -> {_rmc_txt}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
     return fig
 
@@ -6459,6 +7126,14 @@ def main():
             plt.close(fig_corr)
             print(f"Saved licks vs weight correlation plot to: {corr_save_path}")
 
+    # Optional: Repeated-measures correlation (rmcorr)
+    save_rmc = input("\nRun repeated-measures correlation (rmcorr) of licks vs weight? (y/n): ").strip().lower()
+    if save_rmc in ['y', 'yes']:
+        rmc_save_path = master_csv.parent / "licks_vs_weight_correlation.svg"
+        fig_rmc = plot_rmcorr_licks_vs_weight(weekly_averages, save_path=rmc_save_path, show=False)
+        if fig_rmc:
+            plt.close(fig_rmc)
+
     # Optional: Run normality tests on lick measures
     run_normality = input("\nRun Shapiro-Wilk & Levene's normality tests on lick measures? (y/n): ").strip().lower()
     if run_normality in ['y', 'yes']:
@@ -6479,6 +7154,25 @@ def main():
     if run_desc in ['y', 'yes']:
         generate_lick_descriptive_stats_report(weekly_averages, save_report=True)
 
+    # Optional: R-based polynomial contrasts (lme4 / lmerTest / emmeans)
+    if HAS_RPY2:
+        _poly_q = input(
+            "\nRun R-based lmer polynomial contrasts for week trends "
+            "(linear/quadratic/cubic)? (y/n): "
+        ).strip().lower()
+    else:
+        _poly_q = 'n'
+        print("\n[INFO] rpy2 not installed — skipping polynomial contrasts.")
+        print("       Install with:  pip install rpy2")
+        print("       Also requires: install.packages(c('lme4','lmerTest','emmeans'))  in R")
+    if _poly_q in ['y', 'yes']:
+        _ts_poly = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _poly_save = master_csv.parent / f"lick_poly_contrasts_{_ts_poly}.txt"
+        test_week_polynomial_contrasts_r(
+            weekly_averages=weekly_averages,
+            save_path=_poly_save,
+        )
+
     print("\n" + "=" * 80)
     print("COMPREHENSIVE STATISTICAL ANALYSIS COMPLETED")
     print("=" * 80)
@@ -6494,6 +7188,509 @@ def main():
     print(f"Lick Rate Analysis: 5-minute bins over 30 minutes for each week + comprehensive combined plot")
     
     return weekly_results, weekly_averages, anova_results, bonferroni_results
+
+
+# =============================================================================
+# R-BASED POLYNOMIAL CONTRASTS  (lme4 / lmerTest / emmeans)
+# =============================================================================
+
+def _la_poly_fmt_p(p) -> str:
+    """Format a p-value for the PROC MIXED-style report."""
+    try:
+        if pd.isna(p): return 'n/a'
+        p = float(p)
+        if p < 0.0001: return '< .0001'
+        return f'{p:.4f}'
+    except (TypeError, ValueError):
+        return 'n/a'
+
+
+def _la_poly_sig_stars(p) -> str:
+    """Return significance stars for a p-value."""
+    try:
+        if pd.isna(p): return ''
+        p = float(p)
+        if p < 0.001: return '***'
+        if p < 0.01:  return '**'
+        if p < 0.05:  return '*'
+        if p < 0.10:  return '.'
+        return ''
+    except (TypeError, ValueError):
+        return ''
+
+
+def _la_poly_rename_contrast(name: str) -> str:
+    """Capitalise an emmeans polynomial contrast label."""
+    name = str(name).strip()
+    _map = {'linear': 'Linear', 'quadratic': 'Quadratic',
+            'cubic': 'Cubic', 'quartic': 'Quartic', 'quintic': 'Quintic'}
+    return _map.get(name.lower(), name.capitalize())
+
+
+def _la_poly_fmt_term(term: str) -> str:
+    """Convert lmerTest term names to readable display strings."""
+    term = str(term)
+    _replacements = [
+        ('(Intercept)', 'Intercept'),
+        ('Week_f.L',    'Week_f  [linear]'),
+        ('Week_f.Q',    'Week_f  [quadratic]'),
+        ('Week_f.C',    'Week_f  [cubic]'),
+        ('Week_f^4',    'Week_f  [degree 4]'),
+        ('Week_f^5',    'Week_f  [degree 5]'),
+    ]
+    for old, new in _replacements:
+        if old in term:
+            term = term.replace(old, new)
+            break
+    return term
+
+
+def _build_lmer_df(weekly_averages: Dict) -> pd.DataFrame:
+    """Convert weekly_averages dict to a long-format DataFrame for lmer.
+
+    Returns one row per animal per week with columns:
+        ID, Week, Sex, CA_Percent, Total_Licks, Total_Bouts,
+        First_5min_Lick_Pct, Time_to_50pct_Licks
+    """
+    rows = []
+    sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+
+    for week_idx, date in enumerate(sorted_dates):
+        wk = weekly_averages[date]
+        animal_ids  = wk.get('animal_ids', [])
+        animal_sexes = wk.get('animal_sexes', [])
+        ca_pct      = float(wk.get('ca_percent', np.nan))
+
+        licks    = np.asarray(wk.get('avg_licks_per_animal', []), dtype=float)
+        bouts    = np.asarray(wk.get('avg_bouts_per_animal', []), dtype=float)
+        fl_pct   = np.asarray(wk.get('first_5min_lick_pcts_per_animal', []), dtype=float)
+        t50      = np.asarray(wk.get('time_to_50pct_licks_per_animal', []), dtype=float)
+
+        n = len(licks)
+        if n == 0:
+            continue
+
+        # pad metadata arrays if shorter than lick array
+        ids   = list(animal_ids)  + [f'Animal_{i+1}' for i in range(len(animal_ids), n)]
+        sexes = list(animal_sexes)+ ['Unknown' for _ in range(len(animal_sexes), n)]
+
+        for i in range(n):
+            rows.append({
+                'ID':                  str(ids[i]),
+                'Week':                week_idx + 1,   # 1-based
+                'Sex':                 str(sexes[i]),
+                'CA_Percent':          ca_pct,
+                'Total_Licks':         licks[i] if i < len(licks) else np.nan,
+                'Total_Bouts':         bouts[i] if i < len(bouts) else np.nan,
+                'First_5min_Lick_Pct': fl_pct[i] if i < len(fl_pct) else np.nan,
+                'Time_to_50pct_Licks': t50[i]   if i < len(t50)   else np.nan,
+            })
+
+    return pd.DataFrame(rows)
+
+
+def test_week_polynomial_contrasts_r(
+    weekly_averages: Dict,
+    measures: Optional[List[str]] = None,
+    max_degree: int = 3,
+    save_path: Optional[Path] = None,
+) -> Dict:
+    """Test polynomial trends for the Week / CA% factor via R lme4 / lmerTest / emmeans.
+
+    Fits the model in R:
+
+        measure ~ Week_f + Sex + (1|ID)          [nonramp: Week is the repeated factor]
+        measure ~ CA_Percent_f + Sex + (1|ID)    [ramp:    CA% is the repeated factor]
+
+    where the within-subjects factor is coded as an ordered factor so that
+    emmeans can decompose its main effect into orthogonal polynomial components
+    (linear, quadratic, cubic, …).
+
+    The report is formatted to mirror SAS PROC MIXED output:
+        Effect | Estimate | Std Error | DF | t Value | Pr > |t|
+
+    Parameters
+    ----------
+    weekly_averages : Dict
+        Output of compute_weekly_averages().
+    measures : list of str, optional
+        Outcome measures to analyse. Defaults to Total_Licks, Total_Bouts,
+        First_5min_Lick_Pct, Time_to_50pct_Licks (whichever are present).
+    max_degree : int
+        Maximum polynomial degree (default 3 → linear/quadratic/cubic).
+        Capped at n_levels − 1 automatically.
+    save_path : Path, optional
+        If provided the full report is written to this path.
+
+    Returns
+    -------
+    dict  with keys  'report' (str) and 'measures' (dict of per-measure results).
+    """
+    W = 80
+
+    print("\n" + "=" * W)
+    print("R-BASED LMER: POLYNOMIAL CONTRASTS FOR TIME  (PROC MIXED STYLE)")
+    print("=" * W)
+
+    if not HAS_RPY2:
+        print(
+            "[ERROR] rpy2 is not installed — cannot run R-based analysis.\n"
+            "  pip install rpy2\n"
+            "  Also requires R with:  install.packages(c('lme4','lmerTest','emmeans'))"
+        )
+        return {'error': 'rpy2 not installed'}
+
+    import rpy2.robjects as ro
+    from rpy2.robjects import pandas2ri
+    from rpy2.robjects.packages import importr
+    import tempfile
+    import os
+
+    # ── rpy2 converter ─────────────────────────────────────────────────
+    try:
+        from rpy2.robjects.conversion import localconverter
+        def _to_r(df):
+            with localconverter(ro.default_converter + pandas2ri.converter):
+                return ro.conversion.py2rpy(df)
+    except Exception:
+        pandas2ri.activate()
+        def _to_r(df):
+            return pandas2ri.py2rpy(df)
+
+    def _rget(row, *names):
+        for n in names:
+            try:
+                v = row[n]
+                if not pd.isna(v): return float(v)
+            except (KeyError, TypeError, ValueError):
+                pass
+        return np.nan
+
+    # ── build long-format dataframe ─────────────────────────────────────
+    print("\nStep 1: Building long-format DataFrame from weekly_averages...")
+    long_df = _build_lmer_df(weekly_averages)
+
+    if len(long_df) == 0:
+        print("[ERROR] No data could be extracted from weekly_averages.")
+        return {'error': 'empty dataframe'}
+
+    # Determine within-subjects factor
+    within_col   = 'CA_Percent' if EXPERIMENT_MODE == 'ramp' else 'Week'
+    within_label = 'CA%'        if EXPERIMENT_MODE == 'ramp' else 'Week'
+    factor_vals  = sorted(long_df[within_col].dropna().unique())
+    n_levels     = len(factor_vals)
+    _max_deg     = min(max_degree, n_levels - 1)
+
+    has_sex = 'Sex' in long_df.columns and long_df['Sex'].nunique() > 1
+
+    print(f"  {within_label} levels : {factor_vals}")
+    print(f"  N animals      : {long_df['ID'].nunique()}")
+    print(f"  Sex factor     : {has_sex}")
+    print(f"  Max poly degree: {_max_deg}")
+
+    # ── default measures ────────────────────────────────────────────────
+    if measures is None:
+        _candidates = ['Total_Licks', 'Total_Bouts',
+                       'First_5min_Lick_Pct', 'Time_to_50pct_Licks']
+        measures = [m for m in _candidates if m in long_df.columns]
+        if not measures:
+            measures = ['Total_Licks']
+
+    # ── verify R packages ───────────────────────────────────────────────
+    print("\nStep 2: Verifying R packages (lme4, lmerTest, emmeans)...")
+    try:
+        importr('lme4')
+        importr('lmerTest')
+        importr('emmeans')
+        print("  [OK] All required R packages available.")
+    except Exception as _e:
+        print(f"[ERROR] Required R packages not found: {_e}")
+        print("  Install in R:  install.packages(c('lme4', 'lmerTest', 'emmeans'))")
+        return {'error': f'R packages unavailable: {_e}'}
+
+    _MEASURE_LABELS = {
+        'Total_Licks':         'Total Licks',
+        'Total_Bouts':         'Total Lick Bouts',
+        'First_5min_Lick_Pct': '% Licks in First 5 min',
+        'Time_to_50pct_Licks': 'Time to 50% Licks (min)',
+    }
+
+    results_by_measure: Dict = {}
+    report_sections: List[str] = []
+    _ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    report_sections += [
+        "=" * W,
+        "  LMER POLYNOMIAL CONTRASTS  (R: lme4 / lmerTest / emmeans)",
+        "  Output formatted to match SAS PROC MIXED",
+        "=" * W,
+        f"  Generated         : {_ts}",
+        f"  Experiment mode   : {EXPERIMENT_MODE}",
+        f"  Within-subj factor: {within_label}  (levels: {factor_vals})",
+        f"  N animals         : {long_df['ID'].nunique()}",
+        f"  Max poly degree   : {_max_deg}",
+        "",
+        "  Fixed-effects model:",
+        f"    measure ~ {within_col}_f + Sex + (1|ID)   [Sex omitted if single-sex]",
+        f"    {within_col}_f = ordered factor",
+        "    (1|ID)  = random intercept per animal   Method = REML",
+        "    DF      = Satterthwaite approximation  (lmerTest)",
+        "    Contrasts via emmeans::contrast(..., 'poly')",
+        "=" * W,
+        "",
+        "  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10",
+        "",
+    ]
+
+    for measure in measures:
+        if measure not in long_df.columns:
+            print(f"\n  [SKIP] '{measure}' not in dataframe.")
+            continue
+
+        print(f"\nStep 3 [{measure}]: Fitting lmer model in R...")
+
+        req_cols = ['ID', within_col, measure]
+        if has_sex:
+            req_cols.append('Sex')
+        adf = long_df[req_cols].dropna().copy()
+        if 'Sex' not in adf.columns:
+            adf['Sex'] = 'Unknown'
+        adf['_factor_val'] = adf[within_col].astype(str)
+
+        if len(adf) < 6:
+            print(f"  [WARNING] Only {len(adf)} observations — skipping.")
+            continue
+
+        m_has_sex     = has_sex and adf['Sex'].nunique() > 1
+        measure_label = _MEASURE_LABELS.get(measure, measure.replace('_', ' '))
+        factor_col_r  = 'within_f'
+        formula_disp  = (
+            f"{measure} ~ {within_col}_f + Sex + (1|ID)"
+            if m_has_sex else
+            f"{measure} ~ {within_col}_f + (1|ID)"
+        )
+
+        _tmpdir = tempfile.gettempdir().replace('\\', '/')
+        _uid    = str(id(adf))[-6:]
+        _fe_p   = f"{_tmpdir}/la_lmer_fe_{measure}_{_uid}.csv"
+        _co_p   = f"{_tmpdir}/la_lmer_co_{measure}_{_uid}.csv"
+        _fs_p   = f"{_tmpdir}/la_lmer_fs_{measure}_{_uid}.csv"
+
+        try:
+            ro.globalenv['r_df']        = _to_r(adf)
+            ro.globalenv['r_measure']   = measure
+            ro.globalenv['r_within']    = within_col
+            ro.globalenv['r_has_sex']   = ro.BoolVector([m_has_sex])
+            ro.globalenv['r_fe_p']      = _fe_p
+            ro.globalenv['r_co_p']      = _co_p
+            ro.globalenv['r_fs_p']      = _fs_p
+
+            ro.r("""
+                suppressPackageStartupMessages(library(lmerTest))
+                suppressPackageStartupMessages(library(emmeans))
+
+                df_r <- r_df
+                # Build ordered factor from the within-subjects column
+                wvals        <- sort(unique(df_r[[r_within]]))
+                df_r$within_f <- factor(df_r[[r_within]], levels = wvals, ordered = TRUE)
+                df_r$Sex      <- factor(df_r$Sex)
+
+                if (r_has_sex[1]) {
+                    form <- as.formula(paste0(r_measure,
+                        ' ~ within_f + Sex + (1|ID)'))
+                } else {
+                    form <- as.formula(paste0(r_measure,
+                        ' ~ within_f + (1|ID)'))
+                }
+
+                model <- lmerTest::lmer(form, data = df_r, REML = TRUE)
+
+                # Fixed effects (Satterthwaite p-values)
+                fe      <- as.data.frame(coef(summary(model)))
+                fe$term <- rownames(fe)
+                write.csv(fe, r_fe_p, row.names = FALSE)
+
+                # Fit statistics
+                n_grps <- tryCatch(lme4::ngrps(model)[['ID']], error = function(e) NA_integer_)
+                fit_stats <- data.frame(
+                    AIC     = AIC(model),
+                    BIC     = BIC(model),
+                    logLik  = as.numeric(logLik(model)),
+                    nobs    = nobs(model),
+                    ngroups = n_grps,
+                    formula = deparse(formula(model), width.cutoff = 120L)
+                )
+                write.csv(fit_stats, r_fs_p, row.names = FALSE)
+
+                # Polynomial contrasts for the within-subjects factor
+                em_overall    <- emmeans(model, ~ within_f)
+                contr_overall <- as.data.frame(contrast(em_overall, 'poly'))
+                write.csv(contr_overall, r_co_p, row.names = FALSE)
+            """)
+
+            fe_df       = pd.read_csv(_fe_p)
+            fit_df      = pd.read_csv(_fs_p)
+            contr_ov_df = pd.read_csv(_co_p)
+
+            for _p in [_fe_p, _co_p, _fs_p]:
+                try:    os.unlink(_p)
+                except Exception: pass
+
+            fit_aic    = float(fit_df['AIC'].iloc[0])
+            fit_bic    = float(fit_df['BIC'].iloc[0])
+            fit_loglik = float(fit_df['logLik'].iloc[0])
+            fit_nobs   = int(fit_df['nobs'].iloc[0])
+            fit_ngrps  = (int(fit_df['ngroups'].iloc[0])
+                          if 'ngroups' in fit_df.columns and
+                             not pd.isna(fit_df['ngroups'].iloc[0])
+                          else '?')
+            fit_formula = (str(fit_df['formula'].iloc[0])
+                           if 'formula' in fit_df.columns else formula_disp)
+
+            print(f"  [OK] AIC={fit_aic:.1f}  BIC={fit_bic:.1f}  "
+                  f"n={fit_nobs} obs  {fit_ngrps} animals")
+
+            # ── format report section ─────────────────────────────────
+            sec: List[str] = []
+            sec += [
+                "",
+                "\u2550" * W,
+                f"  DEPENDENT VARIABLE:  {measure_label}  ({measure})",
+                "\u2550" * W,
+                "",
+                "  THE MIXED PROCEDURE",
+                "",
+                "  Model Information",
+                f"    {'Dependent Variable':<32} {measure_label}",
+                f"    {'Covariance Structure':<32} Variance Components",
+                f"    {'Subject Effect':<32} ID  (random intercept)",
+                f"    {'Estimation Method':<32} REML",
+                f"    {'Degrees of Freedom Method':<32} Satterthwaite  (lmerTest)",
+                f"    {'Within-subjects Factor':<32} {within_label}  ({within_col}_f, ordered factor)",
+                f"    {'Formula':<32} {fit_formula}",
+                "",
+                f"  Number of Observations Read    {fit_nobs}",
+                f"  Number of Observations Used    {fit_nobs}",
+                f"  Number of Subjects (ID)        {fit_ngrps}",
+                "",
+                "  Fit Statistics",
+                f"    {'AIC  (smaller is better)':<40} {fit_aic:.1f}",
+                f"    {'BIC  (smaller is better)':<40} {fit_bic:.1f}",
+                f"    {'-2 Log-Likelihood':<40} {-2 * fit_loglik:.1f}",
+                "",
+            ]
+
+            # Solution for Fixed Effects
+            _fw = (42, 12, 10, 8, 8, 10)
+            _fhdr = (
+                f"  {'Effect':<{_fw[0]}}  "
+                f"{'Estimate':>{_fw[1]}}  "
+                f"{'Std Error':>{_fw[2]}}  "
+                f"{'DF':>{_fw[3]}}  "
+                f"{'t Value':>{_fw[4]}}  "
+                f"{'Pr > |t|':>{_fw[5]}}  Sig"
+            )
+            sec += [
+                "  Solution for Fixed Effects",
+                "",
+                _fhdr,
+                "  " + "\u2500" * (sum(_fw) + 14),
+            ]
+
+            for _, row in fe_df.iterrows():
+                term_raw = str(row.get('term', ''))
+                # Replace generic 'within_f' placeholder with the real factor name
+                term_disp = _la_poly_fmt_term(
+                    term_raw.replace('within_f', f'{within_col}_f')
+                )
+                est = _rget(row, 'Estimate')
+                se  = _rget(row, 'Std. Error', 'Std.Error', 'Std..Error')
+                df_ = _rget(row, 'df', 'Df', 'DF')
+                t   = _rget(row, 't value', 't.value', 't_value')
+                p   = _rget(row, 'Pr(>|t|)', 'Pr...t..', 'p.value')
+                sec.append(
+                    f"  {term_disp:<{_fw[0]}}  "
+                    f"{est:>{_fw[1]}.4f}  "
+                    f"{se:>{_fw[2]}.4f}  "
+                    f"{df_:>{_fw[3]}.1f}  "
+                    f"{t:>{_fw[4]}.3f}  "
+                    f"{_la_poly_fmt_p(p):>{_fw[5]}}  "
+                    f"{_la_poly_sig_stars(p)}"
+                )
+
+            sec.append("")
+
+            # Polynomial contrasts — OVERALL
+            _cw = (22, 12, 10, 8, 8, 10)
+            _chdr = (
+                f"  {'Contrast':<{_cw[0]}}  "
+                f"{'Estimate':>{_cw[1]}}  "
+                f"{'Std Error':>{_cw[2]}}  "
+                f"{'DF':>{_cw[3]}}  "
+                f"{'t Value':>{_cw[4]}}  "
+                f"{'Pr > |t|':>{_cw[5]}}  Sig"
+            )
+            sec += [
+                f"  Polynomial Contrasts for {within_label}  (OVERALL)",
+                "",
+                _chdr,
+                "  " + "\u2500" * (sum(_cw) + 14),
+            ]
+
+            for _, row in contr_ov_df.iterrows():
+                name = _la_poly_rename_contrast(str(row.get('contrast', '')))
+                est  = _rget(row, 'estimate')
+                se   = _rget(row, 'SE')
+                df_  = _rget(row, 'df')
+                t    = _rget(row, 't.ratio')
+                p    = _rget(row, 'p.value')
+                sec.append(
+                    f"  {name:<{_cw[0]}}  "
+                    f"{est:>{_cw[1]}.4f}  "
+                    f"{se:>{_cw[2]}.4f}  "
+                    f"{df_:>{_cw[3]}.1f}  "
+                    f"{t:>{_cw[4]}.3f}  "
+                    f"{_la_poly_fmt_p(p):>{_cw[5]}}  "
+                    f"{_la_poly_sig_stars(p)}"
+                )
+
+            sec += [
+                "",
+                "  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10",
+                "",
+            ]
+
+            report_sections.extend(sec)
+            results_by_measure[measure] = {
+                'fixed_effects'    : fe_df,
+                'fit_stats'        : fit_df,
+                'contrasts_overall': contr_ov_df,
+                'formula'          : formula_disp,
+                'report_section'   : '\n'.join(sec),
+            }
+
+        except Exception as _exc:
+            import traceback
+            print(f"  [ERROR] R analysis failed for '{measure}': {_exc}")
+            traceback.print_exc()
+            report_sections.append(
+                f"\n  [ERROR] R analysis failed for '{measure}': {_exc}\n"
+            )
+
+    report_sections += [
+        "=" * W,
+        "  End of LMER Polynomial Contrasts Report",
+        "=" * W,
+    ]
+
+    full_report = "\n".join(report_sections)
+    print("\n" + full_report)
+
+    if save_path is not None:
+        Path(save_path).write_text(full_report, encoding='utf-8')
+        print(f"\n[OK] Report saved -> {save_path}")
+
+    return {'measures': results_by_measure, 'report': full_report}
 
 
 def generate_test_registry_report(save_path=None) -> str:
