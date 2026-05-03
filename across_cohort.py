@@ -514,7 +514,7 @@ def combine_cohorts_for_analysis(cohort_dfs: Dict[str, pd.DataFrame]) -> pd.Data
 
 def add_day_column_across_cohorts(combined_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add a 'Day' column to combined cohort data where Day 0 is the first date for each animal.
+    Add a cohort-aligned 'Day' column to combined data.
     
     Parameters:
         combined_df: Combined DataFrame with ID and Date columns
@@ -537,13 +537,24 @@ def add_day_column_across_cohorts(combined_df: pd.DataFrame) -> pd.DataFrame:
     # Sort by ID and Date
     df = df.sort_values(['ID', 'Date']).reset_index(drop=True)
     
-    # Compute day number per ID (Day 0 = first measurement day, subtracting 1
-    # so that the first actual data day is Day 0 rather than Day 1)
+    # Compute 1-indexed Day per ID:
+    #   nonramp: first date = Day 0 (baseline, excluded from plots); Day 1+ plotted
+    #   ramp:    first date = Day 1 (no baseline day skipped)
     first_dates = df.groupby('ID')['Date'].transform('min')
-    df['Day'] = (df['Date'] - first_dates).dt.days - 1
-    
+    if 'Cohort' in df.columns:
+        # Apply per-cohort offset based on whether the cohort label contains 'ramp'
+        is_ramp = df['Cohort'].str.lower().str.contains('ramp', na=False)
+        df['Day'] = (df['Date'] - first_dates).dt.days + is_ramp.astype(int)
+    else:
+        # Default to nonramp logic (Day 0 = baseline)
+        df['Day'] = (df['Date'] - first_dates).dt.days
+
     print(f"[OK] Added 'Day' column (range: {df['Day'].min()} to {df['Day'].max()})")
     
+    # Drop baseline rows (Day 0 for nonramp; nothing to drop for ramp since Day starts at 1)
+    df = df[df['Day'] >= 1].copy()
+    print(f"[OK] Filtered to Day >= 1 (range: {df['Day'].min()} to {df['Day'].max()})")
+
     return df
 
 
@@ -2074,7 +2085,7 @@ def plot_total_change_by_id(
     x_data_max = int(np.nanmax(all_x)) if all_x.size else 1
     x_step = _auto_integer_step(x_data_min, x_data_max, target_ticks=10, allow_sub5=True)
     _apply_integer_axis(ax, axis='x', data_min=x_data_min, data_max=x_data_max,
-                        step=x_step, clamp_min=0, left_pad_steps=0, right_pad_steps=0)
+                        step=x_step, clamp_min=1, left_pad_steps=0, right_pad_steps=0)
     y_step = _auto_integer_step(y_data_min, y_data_max, target_ticks=7)
     _apply_integer_axis(ax, axis='y', data_min=y_data_min, data_max=y_data_max,
                         step=y_step, left_pad_steps=0, right_pad_steps=1)
@@ -2166,7 +2177,7 @@ def plot_daily_change_by_id(
     x_data_max = int(np.nanmax(all_x)) if all_x.size else 1
     x_step = _auto_integer_step(x_data_min, x_data_max, target_ticks=10, allow_sub5=True)
     _apply_integer_axis(ax, axis='x', data_min=x_data_min, data_max=x_data_max,
-                        step=x_step, clamp_min=0, left_pad_steps=0, right_pad_steps=0)
+                        step=x_step, clamp_min=1, left_pad_steps=0, right_pad_steps=0)
     y_step = _auto_integer_step(y_data_min, y_data_max, target_ticks=7)
     _apply_integer_axis(ax, axis='y', data_min=y_data_min, data_max=y_data_max,
                         step=y_step, left_pad_steps=0, right_pad_steps=1)
@@ -2270,7 +2281,7 @@ linewidth=0.9, alpha=0.9)
         x_data_min, x_data_max = 0, 1
     x_step = _auto_integer_step(x_data_min, x_data_max, target_ticks=10, allow_sub5=True)
     _apply_integer_axis(ax, axis='x', data_min=x_data_min, data_max=x_data_max,
-                        step=x_step, clamp_min=0, left_pad_steps=0, right_pad_steps=0)
+                        step=x_step, clamp_min=1, left_pad_steps=0, right_pad_steps=0)
     y_step = _auto_integer_step(y_data_min, y_data_max, target_ticks=7)
     _apply_integer_axis(ax, axis='y', data_min=y_data_min, data_max=y_data_max,
                         step=y_step, left_pad_steps=0, right_pad_steps=1)
@@ -2369,7 +2380,7 @@ linewidth=0.9, alpha=0.9)
         x_data_min, x_data_max = 0, 1
     x_step = _auto_integer_step(x_data_min, x_data_max, target_ticks=10, allow_sub5=True)
     _apply_integer_axis(ax, axis='x', data_min=x_data_min, data_max=x_data_max,
-                        step=x_step, clamp_min=0, left_pad_steps=0, right_pad_steps=0)
+                        step=x_step, clamp_min=1, left_pad_steps=0, right_pad_steps=0)
     y_step = _auto_integer_step(y_data_min, y_data_max, target_ticks=7)
     _apply_integer_axis(ax, axis='y', data_min=y_data_min, data_max=y_data_max,
                         step=y_step, left_pad_steps=0, right_pad_steps=1)
@@ -2460,7 +2471,7 @@ def plot_total_change_by_ca(
         x_data_max = int(all_idx_concat.max())
         x_step = _auto_integer_step(x_data_min, x_data_max, target_ticks=10, allow_sub5=True)
         _apply_integer_axis(ax, axis='x', data_min=x_data_min, data_max=x_data_max,
-                            step=x_step, clamp_min=0, left_pad_steps=0, right_pad_steps=0)
+                            step=x_step, clamp_min=1, left_pad_steps=0, right_pad_steps=0)
         y_step = _auto_integer_step(y_data_min, y_data_max, target_ticks=7)
         _apply_integer_axis(ax, axis='y', data_min=y_data_min, data_max=y_data_max,
                             step=y_step, left_pad_steps=0, right_pad_steps=1)
@@ -2551,7 +2562,7 @@ def plot_daily_change_by_ca(
         x_data_max = int(all_idx_concat.max())
         x_step = _auto_integer_step(x_data_min, x_data_max, target_ticks=10, allow_sub5=True)
         _apply_integer_axis(ax, axis='x', data_min=x_data_min, data_max=x_data_max,
-                            step=x_step, clamp_min=0, left_pad_steps=0, right_pad_steps=0)
+                            step=x_step, clamp_min=1, left_pad_steps=0, right_pad_steps=0)
         y_step = _auto_integer_step(y_data_min, y_data_max, target_ticks=7)
         _apply_integer_axis(ax, axis='y', data_min=y_data_min, data_max=y_data_max,
                             step=y_step, left_pad_steps=0, right_pad_steps=1)
@@ -2638,7 +2649,7 @@ def plot_total_change_by_cohort(
         x_data_max = int(all_idx_concat.max())
         x_step = _auto_integer_step(x_data_min, x_data_max, target_ticks=10, allow_sub5=True)
         _apply_integer_axis(ax, axis='x', data_min=x_data_min, data_max=x_data_max,
-                            step=x_step, clamp_min=0, left_pad_steps=0, right_pad_steps=0)
+                            step=x_step, clamp_min=1, left_pad_steps=0, right_pad_steps=0)
         y_step = _auto_integer_step(y_data_min, y_data_max, target_ticks=7)
         _apply_integer_axis(ax, axis='y', data_min=y_data_min, data_max=y_data_max,
                             step=y_step, left_pad_steps=0, right_pad_steps=1)
@@ -2725,7 +2736,7 @@ def plot_daily_change_by_cohort(
         x_data_max = int(all_idx_concat.max())
         x_step = _auto_integer_step(x_data_min, x_data_max, target_ticks=10, allow_sub5=True)
         _apply_integer_axis(ax, axis='x', data_min=x_data_min, data_max=x_data_max,
-                            step=x_step, clamp_min=0, left_pad_steps=0, right_pad_steps=0)
+                            step=x_step, clamp_min=1, left_pad_steps=0, right_pad_steps=0)
         y_step = _auto_integer_step(y_data_min, y_data_max, target_ticks=7)
         _apply_integer_axis(ax, axis='y', data_min=y_data_min, data_max=y_data_max,
                             step=y_step, left_pad_steps=0, right_pad_steps=1)
@@ -3397,9 +3408,10 @@ def plot_behavioral_metrics_by_cohort(
             cdf['Date'] = pd.to_datetime(cdf['Date'], errors='coerce')
         cdf = cdf.sort_values(['ID', 'Date']).reset_index(drop=True)
         first_dates = cdf.groupby('ID')['Date'].transform('min')
-        cdf['_Day'] = (cdf['Date'] - first_dates).dt.days - 1
-        cdf = cdf[cdf['_Day'] >= 0].copy()
-        cdf['_Week'] = (cdf['_Day'] // 7) + 1
+        _day_offset = 1 if 'ramp' in label.lower() else 0
+        cdf['_Day'] = (cdf['Date'] - first_dates).dt.days + _day_offset
+        cdf = cdf[cdf['_Day'] >= 1].copy()
+        cdf['_Week'] = (cdf['_Day'] - 1) // 7 + 1
 
         weeks = sorted(cdf['_Week'].dropna().unique().astype(int))
         all_weeks_set.update(weeks)
@@ -3673,7 +3685,7 @@ def plot_weight_interaction_effects(
         if 'Day' not in combined.columns:
             combined = add_day_column_across_cohorts(combined)
         combined = _add_week_column_across_cohorts(combined)
-        combined = combined[combined['Day'] >= 0]
+        combined = combined[combined['Day'] >= 1]
     except Exception as e:
         print(f"[ERROR] Could not prepare combined data for weight interaction plots: {e}")
         return {}
@@ -3863,9 +3875,10 @@ def perform_behavioral_mixed_analysis(
             cdf['Date'] = pd.to_datetime(cdf['Date'], errors='coerce')
         cdf = cdf.sort_values(['ID', 'Date']).reset_index(drop=True)
         first_dates = cdf.groupby('ID')['Date'].transform('min')
-        cdf['_Day'] = (cdf['Date'] - first_dates).dt.days - 1
-        cdf = cdf[cdf['_Day'] >= 0].copy()
-        cdf['_Week'] = (cdf['_Day'] // 7) + 1
+        _day_offset = 1 if 'ramp' in label.lower() else 0
+        cdf['_Day'] = (cdf['Date'] - first_dates).dt.days + _day_offset
+        cdf = cdf[cdf['_Day'] >= 1].copy()
+        cdf['_Week'] = (cdf['_Day'] - 1) // 7 + 1
         cdf['_Cohort'] = label
         for col, _, _, _ in BEHAVIORS:
             if col in cdf.columns:
@@ -6329,13 +6342,13 @@ def check_ols_assumptions_cross_cohort(
 def _add_week_column_across_cohorts(combined_df: pd.DataFrame) -> pd.DataFrame:
     """
     Add a 'Week' column (1-indexed) derived from 'Day'.
-    Week 1 = Days 0-6, Week 2 = Days 7-13, etc.
+    Week 1 = Days 1-7, Week 2 = Days 8-14, etc.
     Requires 'Day' column (calls add_day_column_across_cohorts if absent).
     """
     df = combined_df.copy()
     if 'Day' not in df.columns:
         df = add_day_column_across_cohorts(df)
-    df['Week'] = (df['Day'] // 7) + 1
+    df['Week'] = (df['Day'] - 1) // 7 + 1
     return df
 
 
@@ -9449,8 +9462,7 @@ def combine_cohorts_with_weeks(
         combined = add_day_column_across_cohorts(combined)
     combined = _add_week_column_across_cohorts(combined)
 
-    # Exclude baseline day (Day < 0 is the pre-exposure weigh-in)
-    combined = combined[combined['Day'] >= 0].copy()
+    combined = combined[combined['Day'] >= 1].copy()
 
     # ------------------------------------------------------------------ #
     # Build CA_at_week annotation
@@ -10595,7 +10607,7 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             # Cohort x Week weekly mean plots (+/- SEM)
             print("\n  Generating Cohort x Week weekly mean plots (+/- SEM)...")
             try:
-                combined_wk = combined[combined['Day'] >= 0].copy()
+                combined_wk = combined[combined['Day'] >= 1].copy()
                 combined_wk = _add_week_column_across_cohorts(combined_wk)
 
                 for measure in available_measures:
@@ -10896,12 +10908,7 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined = clean_cohort(combined)
             if 'Day' not in combined.columns:
                 combined = add_day_column_across_cohorts(combined)
-            # Ramp has no pre-experiment baseline: shift its days +1 so first real
-            # day aligns to Day 0 (matching the 0% group after baseline removal).
-            if ramp_label and 'Cohort' in combined.columns:
-                ramp_mask = combined['Cohort'] == ramp_label
-                combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
-            combined = combined[combined['Day'] >= 0].copy()  # remove 0% baseline (Day -1)
+            combined = combined[combined['Day'] >= 1].copy()
 
             plot_dir.mkdir(exist_ok=True)
             figs = {}
@@ -10939,15 +10946,7 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 combined_wk = clean_cohort(combined_wk)
                 if 'Day' not in combined_wk.columns:
                     combined_wk = add_day_column_across_cohorts(combined_wk)
-                if ramp_label and 'Cohort' in combined_wk.columns:
-                    ramp_mask = combined_wk['Cohort'] == ramp_label
-                    combined_wk.loc[ramp_mask, 'Day'] = combined_wk.loc[ramp_mask, 'Day'] + 1
-                combined_wk = combined_wk[combined_wk['Day'] >= 0].copy()
-                # Ramp Day 0 excluded before week assignment (no valid change value).
-                if ramp_label and 'Cohort' in combined_wk.columns:
-                    combined_wk = combined_wk[
-                        ~((combined_wk['Cohort'] == ramp_label) & (combined_wk['Day'] == 0))
-                    ].copy()
+                combined_wk = combined_wk[combined_wk['Day'] >= 1].copy()
                 combined_wk = _add_week_column_across_cohorts(combined_wk)
             except Exception as e:
                 print(f"  [ERROR] Could not build cohort-week dataframe: {e}")
@@ -11030,11 +11029,7 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined = clean_cohort(combined)
             if 'Day' not in combined.columns:
                 combined = add_day_column_across_cohorts(combined)
-            # Apply same day alignment: shift ramp +1 so both cohorts start at Day 0
-            if ramp_label and 'Cohort' in combined.columns:
-                ramp_mask = combined['Cohort'] == ramp_label
-                combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
-            combined = combined[combined['Day'] >= 0].copy()
+            combined = combined[combined['Day'] >= 1].copy()
 
             plot_dir.mkdir(exist_ok=True)
             figs = {}
@@ -11072,14 +11067,7 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined_wk = clean_cohort(combined_wk)
             if 'Day' not in combined_wk.columns:
                 combined_wk = add_day_column_across_cohorts(combined_wk)
-            if ramp_label and 'Cohort' in combined_wk.columns:
-                ramp_mask = combined_wk['Cohort'] == ramp_label
-                combined_wk.loc[ramp_mask, 'Day'] = combined_wk.loc[ramp_mask, 'Day'] + 1
-            combined_wk = combined_wk[combined_wk['Day'] >= 0].copy()
-            if ramp_label and 'Cohort' in combined_wk.columns:
-                combined_wk = combined_wk[
-                    ~((combined_wk['Cohort'] == ramp_label) & (combined_wk['Day'] == 0))
-                ].copy()
+            combined_wk = combined_wk[combined_wk['Day'] >= 1].copy()
             combined_wk = _add_week_column_across_cohorts(combined_wk)
         except Exception as e:
             print(f"  [ERROR] Could not build cohort-week dataframe: {e}")
@@ -11113,11 +11101,7 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     """
     Interactive analysis menu for the 2% nonramp vs ramp comparison.
     Sex-based analyses removed; OLS assumption diagnostics added.
-    Ramp data is treated identically to the 0vramp menu:
-      - Ramp Day column shifted +1 so Day 0 = first real measurement.
-      - Day 0 included in by-ID and by-cohort plots (raw weight valid).
-      - Day 0 excluded from weekly-mean and slope analyses
-        (Daily/Total Change undefined on Day 0 for the ramp).
+        Ramp and nonramp cohorts are aligned directly on Day 1-35.
     """
     from datetime import datetime
 
@@ -11217,12 +11201,7 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined = clean_cohort(combined)
             if 'Day' not in combined.columns:
                 combined = add_day_column_across_cohorts(combined)
-            if ramp_label and 'Cohort' in combined.columns:
-                ramp_mask = combined['Cohort'] == ramp_label
-                combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
-            combined = combined[combined['Day'] >= 0].copy()
-            # Ramp Day 0 (first weight measurement) is included in by-ID plots;
-            # the raw weight point is valid to display.
+            combined = combined[combined['Day'] >= 1].copy()
 
             plot_dir.mkdir(exist_ok=True)
             figs = {}
@@ -11260,15 +11239,7 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 combined_wk = clean_cohort(combined_wk)
                 if 'Day' not in combined_wk.columns:
                     combined_wk = add_day_column_across_cohorts(combined_wk)
-                if ramp_label and 'Cohort' in combined_wk.columns:
-                    ramp_mask = combined_wk['Cohort'] == ramp_label
-                    combined_wk.loc[ramp_mask, 'Day'] = combined_wk.loc[ramp_mask, 'Day'] + 1
-                combined_wk = combined_wk[combined_wk['Day'] >= 0].copy()
-                # Ramp Day 0 excluded before week assignment (no valid change value).
-                if ramp_label and 'Cohort' in combined_wk.columns:
-                    combined_wk = combined_wk[
-                        ~((combined_wk['Cohort'] == ramp_label) & (combined_wk['Day'] == 0))
-                    ].copy()
+                combined_wk = combined_wk[combined_wk['Day'] >= 1].copy()
                 combined_wk = _add_week_column_across_cohorts(combined_wk)
             except Exception as e:
                 print(f"  [ERROR] Could not build cohort-week dataframe: {e}")
@@ -11351,11 +11322,7 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined = clean_cohort(combined)
             if 'Day' not in combined.columns:
                 combined = add_day_column_across_cohorts(combined)
-            if ramp_label and 'Cohort' in combined.columns:
-                ramp_mask = combined['Cohort'] == ramp_label
-                combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
-            combined = combined[combined['Day'] >= 0].copy()
-            # Ramp Day 0 (first weight measurement) included in cohort-avg plots.
+            combined = combined[combined['Day'] >= 1].copy()
 
             plot_dir.mkdir(exist_ok=True)
             figs = {}
@@ -11393,14 +11360,7 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined_wk = clean_cohort(combined_wk)
             if 'Day' not in combined_wk.columns:
                 combined_wk = add_day_column_across_cohorts(combined_wk)
-            if ramp_label and 'Cohort' in combined_wk.columns:
-                ramp_mask = combined_wk['Cohort'] == ramp_label
-                combined_wk.loc[ramp_mask, 'Day'] = combined_wk.loc[ramp_mask, 'Day'] + 1
-            combined_wk = combined_wk[combined_wk['Day'] >= 0].copy()
-            if ramp_label and 'Cohort' in combined_wk.columns:
-                combined_wk = combined_wk[
-                    ~((combined_wk['Cohort'] == ramp_label) & (combined_wk['Day'] == 0))
-                ].copy()
+            combined_wk = combined_wk[combined_wk['Day'] >= 1].copy()
             combined_wk = _add_week_column_across_cohorts(combined_wk)
         except Exception as e:
             print(f"  [ERROR] Could not build cohort-week dataframe: {e}")
@@ -11442,14 +11402,7 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 combined_wk3 = clean_cohort(combined_wk3)
                 if 'Day' not in combined_wk3.columns:
                     combined_wk3 = add_day_column_across_cohorts(combined_wk3)
-                if ramp_label and 'Cohort' in combined_wk3.columns:
-                    ramp_mask = combined_wk3['Cohort'] == ramp_label
-                    combined_wk3.loc[ramp_mask, 'Day'] = combined_wk3.loc[ramp_mask, 'Day'] + 1
-                combined_wk3 = combined_wk3[combined_wk3['Day'] >= 0].copy()
-                if ramp_label and 'Cohort' in combined_wk3.columns:
-                    combined_wk3 = combined_wk3[
-                        ~((combined_wk3['Cohort'] == ramp_label) & (combined_wk3['Day'] == 0))
-                    ].copy()
+                combined_wk3 = combined_wk3[combined_wk3['Day'] >= 1].copy()
                 combined_wk3 = _add_week_column_across_cohorts(combined_wk3)
 
                 WEEK3 = 3  # 1-indexed
@@ -11588,9 +11541,10 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         cdf['Date'] = pd.to_datetime(cdf['Date'], errors='coerce')
                     cdf = cdf.sort_values(['ID', 'Date']).reset_index(drop=True)
                     first_dates = cdf.groupby('ID')['Date'].transform('min')
-                    cdf['_Day'] = (cdf['Date'] - first_dates).dt.days - 1
-                    cdf = cdf[cdf['_Day'] >= 0].copy()
-                    cdf['_Week'] = (cdf['_Day'] // 7) + 1
+                    _day_offset = 1 if 'ramp' in lbl.lower() else 0
+                    cdf['_Day'] = (cdf['Date'] - first_dates).dt.days + _day_offset
+                    cdf = cdf[cdf['_Day'] >= 1].copy()
+                    cdf['_Week'] = (cdf['_Day'] - 1) // 7 + 1
                     week3_cdf = cdf[cdf['_Week'] == WEEK3_B]
 
                     for col, aberrant_val, _ in BEHAVIORS_BAR:
@@ -11673,10 +11627,7 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     Interactive analysis menu for the 3-cohort comparison:
     0% nonramp vs 2% nonramp vs Ramp.
     All analyses use Week as the time axis.
-    Ramp Day 0 logic is identical to the 2-cohort ramp menus:
-      - Ramp Day column shifted +1 so Day 0 = first real measurement.
-      - Day 0 included in by-ID and by-cohort plots (raw weight valid).
-      - Day 0 excluded from by-sex, weekly-mean, and slope analyses.
+        All cohorts are aligned directly on Day 1-35.
     """
     from datetime import datetime
 
@@ -11763,11 +11714,7 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined = clean_cohort(combined)
             if 'Day' not in combined.columns:
                 combined = add_day_column_across_cohorts(combined)
-            if ramp_label and 'Cohort' in combined.columns:
-                ramp_mask = combined['Cohort'] == ramp_label
-                combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
-            combined = combined[combined['Day'] >= 0].copy()
-            # Ramp Day 0 included in by-ID plots; raw weight is valid to display.
+            combined = combined[combined['Day'] >= 1].copy()
 
             plot_dir.mkdir(exist_ok=True)
             figs = {}
@@ -11804,15 +11751,7 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined = clean_cohort(combined)
             if 'Day' not in combined.columns:
                 combined = add_day_column_across_cohorts(combined)
-            if ramp_label and 'Cohort' in combined.columns:
-                ramp_mask = combined['Cohort'] == ramp_label
-                combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
-            combined = combined[combined['Day'] >= 0].copy()
-            # Ramp Day 0 excluded from sex-averaged plots (no valid change baseline).
-            if ramp_label and 'Cohort' in combined.columns:
-                combined = combined[
-                    ~((combined['Cohort'] == ramp_label) & (combined['Day'] == 0))
-                ].copy()
+            combined = combined[combined['Day'] >= 1].copy()
 
             plot_dir.mkdir(exist_ok=True)
             figs = {}
@@ -11850,15 +11789,7 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 combined_wk = clean_cohort(combined_wk)
                 if 'Day' not in combined_wk.columns:
                     combined_wk = add_day_column_across_cohorts(combined_wk)
-                if ramp_label and 'Cohort' in combined_wk.columns:
-                    ramp_mask = combined_wk['Cohort'] == ramp_label
-                    combined_wk.loc[ramp_mask, 'Day'] = combined_wk.loc[ramp_mask, 'Day'] + 1
-                combined_wk = combined_wk[combined_wk['Day'] >= 0].copy()
-                # Ramp Day 0 excluded before week assignment (no valid change value).
-                if ramp_label and 'Cohort' in combined_wk.columns:
-                    combined_wk = combined_wk[
-                        ~((combined_wk['Cohort'] == ramp_label) & (combined_wk['Day'] == 0))
-                    ].copy()
+                combined_wk = combined_wk[combined_wk['Day'] >= 1].copy()
                 combined_wk = _add_week_column_across_cohorts(combined_wk)
             except Exception as e:
                 print(f"  [ERROR] Could not build cohort-week dataframe: {e}")
@@ -11959,11 +11890,7 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined = clean_cohort(combined)
             if 'Day' not in combined.columns:
                 combined = add_day_column_across_cohorts(combined)
-            if ramp_label and 'Cohort' in combined.columns:
-                ramp_mask = combined['Cohort'] == ramp_label
-                combined.loc[ramp_mask, 'Day'] = combined.loc[ramp_mask, 'Day'] + 1
-            combined = combined[combined['Day'] >= 0].copy()
-            # Ramp Day 0 included in cohort-avg plots (raw weight valid).
+            combined = combined[combined['Day'] >= 1].copy()
 
             plot_dir.mkdir(exist_ok=True)
             figs = {}
@@ -12001,14 +11928,7 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined_wk = clean_cohort(combined_wk)
             if 'Day' not in combined_wk.columns:
                 combined_wk = add_day_column_across_cohorts(combined_wk)
-            if ramp_label and 'Cohort' in combined_wk.columns:
-                ramp_mask = combined_wk['Cohort'] == ramp_label
-                combined_wk.loc[ramp_mask, 'Day'] = combined_wk.loc[ramp_mask, 'Day'] + 1
-            combined_wk = combined_wk[combined_wk['Day'] >= 0].copy()
-            if ramp_label and 'Cohort' in combined_wk.columns:
-                combined_wk = combined_wk[
-                    ~((combined_wk['Cohort'] == ramp_label) & (combined_wk['Day'] == 0))
-                ].copy()
+            combined_wk = combined_wk[combined_wk['Day'] >= 1].copy()
             combined_wk = _add_week_column_across_cohorts(combined_wk)
         except Exception as e:
             print(f"  [ERROR] Could not build cohort-week dataframe: {e}")
