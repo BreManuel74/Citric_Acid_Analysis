@@ -5280,10 +5280,15 @@ def test_nparLD_lick_analysis(
         # Temp file paths
         _tmpdir = tempfile.gettempdir().replace('\\', '/')
         _uid    = str(id(adf))[-6:]
-        _ats_fp = f"{_tmpdir}/nparLD_ats_{measure}_{_uid}.csv"
-        _wts_fp = f"{_tmpdir}/nparLD_wts_{measure}_{_uid}.csv"
-        _rte_fp = f"{_tmpdir}/nparLD_rte_{measure}_{_uid}.csv"
-        _txt_fp = f"{_tmpdir}/nparLD_txt_{measure}_{_uid}.txt"
+        _ats_fp  = f"{_tmpdir}/nparLD_ats_{measure}_{_uid}.csv"
+        _wts_fp  = f"{_tmpdir}/nparLD_wts_{measure}_{_uid}.csv"
+        _rte_fp  = f"{_tmpdir}/nparLD_rte_{measure}_{_uid}.csv"
+        _txt_fp  = f"{_tmpdir}/nparLD_txt_{measure}_{_uid}.txt"
+        _meta_fp = f"{_tmpdir}/nparLD_meta_{measure}_{_uid}.csv"
+        # Determine permanent plot save path next to the report (or in cwd)
+        _plot_base = save_path.with_suffix('') if save_path else Path('.') / 'nparLD_plot'
+        _plot_fp   = Path(f"{_plot_base}_{measure}.png")
+        _plot_fp_r = str(_plot_fp).replace('\\', '/')
 
         try:
             ro.globalenv['r_df']       = _to_r(adf)
@@ -5292,6 +5297,8 @@ def test_nparLD_lick_analysis(
             ro.globalenv['r_wts_fp']   = _wts_fp
             ro.globalenv['r_rte_fp']   = _rte_fp
             ro.globalenv['r_txt_fp']   = _txt_fp
+            ro.globalenv['r_meta_fp']  = _meta_fp
+            ro.globalenv['r_plot_fp']  = _plot_fp_r
 
             ro.r("""
                 suppressPackageStartupMessages(library(nparLD))
@@ -5310,6 +5317,17 @@ def test_nparLD_lick_analysis(
                     group.name = "Cohort",
                     description = FALSE
                 )
+
+                # Save the nparLD RTE plot to a PNG file instead of showing it on screen
+                # Wrapped in tryCatch so a plot failure does not abort the analysis
+                tryCatch({
+                    png(r_plot_fp, width = 800, height = 600, res = 100)
+                    plot(result)
+                    dev.off()
+                }, error = function(e) {
+                    tryCatch(dev.off(), error = function(e2) NULL)
+                    warning(paste("nparLD plot() failed (plot not saved):", conditionMessage(e)))
+                })
 
                 # Full print output
                 full_txt <- capture.output(print(result))
@@ -5340,17 +5358,42 @@ def test_nparLD_lick_analysis(
                 } else {
                     write.csv(data.frame(), r_rte_fp, row.names = FALSE)
                 }
+
+                # Model metadata (name, design settings)
+                model_name  <- if (!is.null(result$model.name)) result$model.name else "F1-LD-F1"
+                setting     <- result$setting
+                n_groups    <- if (!is.null(setting$g)) setting$g else NA
+                n_timepts   <- if (!is.null(setting$t)) setting$t else NA
+                alpha_used  <- if (!is.null(setting$error.rate)) setting$error.rate else 0.05
+                n_per_grp   <- if (!is.null(setting$n)) paste(setting$n, collapse=",") else NA
+                meta_df <- data.frame(
+                    model_name = model_name,
+                    n_groups   = n_groups,
+                    n_timepts  = n_timepts,
+                    alpha      = alpha_used,
+                    n_per_grp  = n_per_grp
+                )
+                write.csv(meta_df, r_meta_fp, row.names = FALSE)
             """)
 
             # Read results back
-            ats_df = pd.read_csv(_ats_fp) if os.path.exists(_ats_fp) else pd.DataFrame()
-            wts_df = pd.read_csv(_wts_fp) if os.path.exists(_wts_fp) else pd.DataFrame()
-            rte_df = pd.read_csv(_rte_fp) if os.path.exists(_rte_fp) else pd.DataFrame()
-            r_text = Path(_txt_fp).read_text(encoding='utf-8') if os.path.exists(_txt_fp) else ''
+            ats_df  = pd.read_csv(_ats_fp)  if os.path.exists(_ats_fp)  else pd.DataFrame()
+            wts_df  = pd.read_csv(_wts_fp)  if os.path.exists(_wts_fp)  else pd.DataFrame()
+            rte_df  = pd.read_csv(_rte_fp)  if os.path.exists(_rte_fp)  else pd.DataFrame()
+            r_text  = Path(_txt_fp).read_text(encoding='utf-8') if os.path.exists(_txt_fp) else ''
+            meta_df = pd.read_csv(_meta_fp) if os.path.exists(_meta_fp) else pd.DataFrame()
+            r_model_name = str(meta_df['model_name'].iloc[0]) if not meta_df.empty else 'F1-LD-F1'
+            r_alpha      = float(meta_df['alpha'].iloc[0])    if not meta_df.empty else 0.05
+            r_n_per_grp  = str(meta_df['n_per_grp'].iloc[0])  if not meta_df.empty else ''
 
-            for _fp in [_ats_fp, _wts_fp, _rte_fp, _txt_fp]:
+            for _fp in [_ats_fp, _wts_fp, _rte_fp, _txt_fp, _meta_fp]:
                 try:    os.unlink(_fp)
                 except Exception: pass
+
+            # Report plot save path
+            _plot_saved = _plot_fp.exists()
+            if _plot_saved:
+                print(f"  [OK] nparLD RTE plot saved: {_plot_fp}")
 
             # Collect ATS p-values for cross-DV FDR
             _eff_col = 'effect' if 'effect' in ats_df.columns else None
@@ -5366,6 +5409,12 @@ def test_nparLD_lick_analysis(
 
             # ── format report section ────────────────────────────────────
             sec: List[str] = []
+            _grp_sizes = ''
+            if r_n_per_grp:
+                _parts = r_n_per_grp.split(',')
+                _grp_sizes = '  |  '.join(
+                    f"{g}: n={s.strip()}" for g, s in zip(ca_groups, _parts)
+                ) if len(_parts) == len(ca_groups) else r_n_per_grp
             sec += [
                 "",
                 "═" * W,
@@ -5373,12 +5422,20 @@ def test_nparLD_lick_analysis(
                 "═" * W,
                 "",
                 "  Model Information",
-                f"    {'Model':<40} F1-LD-F1  (nparLD)",
+                f"    {'Model (R)':<40} {r_model_name}",
+                f"    {'Method':<40} Nonparametric rank-based (nparLD)",
                 f"    {'Between-subjects factor':<40} Cohort  ({', '.join(ca_groups)})",
                 f"    {'Within-subjects factor':<40} Week    ({', '.join(str(int(w)) for w in weeks)})",
                 f"    {'N subjects (complete data)':<40} {n_subj}",
                 f"    {'N observations used':<40} {n_obs}",
                 f"    {'N subjects dropped (incomplete data)':<40} {_n_dropped}",
+                f"    {'N per group (from R)':<40} {_grp_sizes if _grp_sizes else '—'}",
+                f"    {'Significance level (alpha)':<40} {r_alpha:.2f}",
+                f"    {'RTE plot saved':<40} {_plot_fp.name if _plot_saved else '[not saved]'}",
+                "",
+                "  Note: nparLD uses rank transformation; no parametric model is fit.",
+                "  Residuals, R², AIC/BIC are not applicable. Inference is based on",
+                "  Relative Treatment Effects (RTEs) which are bounded in [0, 1].",
                 "",
             ]
 
@@ -5433,49 +5490,143 @@ def test_nparLD_lick_analysis(
             else:
                 sec += ["  [INFO] WTS table not returned by nparLD.", ""]
 
-            # RTE table
+            # RTE table — nparLD marginal RTEs have no SE/CI, so only show RTE column
             if not rte_df.empty:
-                # Row labels may arrive in 'Unnamed: 0' when read_csv imports the index
                 if 'Unnamed: 0' in rte_df.columns:
                     rte_df = rte_df.rename(columns={'Unnamed: 0': 'label'})
                 _lbl_col = 'label' if 'label' in rte_df.columns else rte_df.columns[0]
                 _est_col = next((c for c in ['RTE', 'Estimate', 'rte']
                                  if c in rte_df.columns), None)
-                _se_col  = next((c for c in ['Std.Error', 'SE', 'se']
-                                 if c in rte_df.columns), None)
-                _lo_col  = next((c for c in ['Lower', 'lower', '2.5%']
-                                 if c in rte_df.columns), None)
-                _hi_col  = next((c for c in ['Upper', 'upper', '97.5%']
-                                 if c in rte_df.columns), None)
+                _nobs_col = next((c for c in ['Nobs', 'nobs', 'N'] if c in rte_df.columns), None)
                 sec += [
                     "  Relative Treatment Effects (RTEs)  —  rank-based effect sizes (0-1 scale)",
                     "  Interpretation: RTE near 0.5 = no effect; >0.5 = higher ranks in this cell",
                     "",
-                    f"  {'Cell (Cohort : Week)':<32}  {'RTE':>8}  {'Std.Err':>8}  "
-                    f"{'95% CI Lower':>13}  {'95% CI Upper':>13}",
-                    "  " + "─" * 80,
                 ]
-                for _, row in rte_df.iterrows():
+                # Split into marginal rows (Cohort-only, Week-only) and cell rows (Cohort:Week)
+                all_rows = list(rte_df.iterrows())
+                cohort_rows = [(lbl, row) for _, row in all_rows
+                               if ':' not in str(lbl := str(row.get(_lbl_col, '')))
+                               and 'Week' not in lbl.replace('CohortRamp', '').replace('Cohort0%', '').replace('Cohort2%', '')]
+                week_rows   = [(lbl, row) for _, row in all_rows
+                               if ':' not in str(lbl := str(row.get(_lbl_col, '')))
+                               and lbl.startswith('Week')]
+                cell_rows   = [(lbl, row) for _, row in all_rows
+                               if ':' in str(lbl := str(row.get(_lbl_col, '')))]
+                # Re-derive correctly (the list comp above shadows lbl badly)
+                cohort_rows, week_rows, cell_rows = [], [], []
+                for _, row in all_rows:
                     lbl = str(row.get(_lbl_col, '')).strip()
-                    est = float(row[_est_col]) if _est_col and _est_col in row.index else np.nan
-                    se  = float(row[_se_col])  if _se_col  and _se_col  in row.index else np.nan
-                    lo  = float(row[_lo_col])  if _lo_col  and _lo_col  in row.index else np.nan
-                    hi  = float(row[_hi_col])  if _hi_col  and _hi_col  in row.index else np.nan
-                    sec.append(
-                        f"  {lbl:<32}  {est:>8.4f}  {se:>8.4f}  {lo:>13.4f}  {hi:>13.4f}"
-                    )
-                sec.append("")
+                    if ':' in lbl:
+                        cell_rows.append((lbl, row))
+                    elif lbl.startswith('Week'):
+                        week_rows.append((lbl, row))
+                    else:
+                        cohort_rows.append((lbl, row))
+
+                def _rte_line(lbl, row, indent=4):
+                    est  = float(row[_est_col])  if _est_col  and _est_col  in row.index else np.nan
+                    nobs = int(row[_nobs_col])    if _nobs_col and _nobs_col in row.index else None
+                    nobs_str = f"  n={nobs}" if nobs is not None else ''
+                    return f"  {' '*indent}{lbl:<36}  {est:>6.4f}{nobs_str}"
+
+                if cohort_rows:
+                    sec.append("  Between-subjects (Cohort marginal):")
+                    for lbl, row in cohort_rows:
+                        sec.append(_rte_line(lbl, row))
+                    sec.append("")
+                if week_rows:
+                    sec.append("  Within-subjects (Week marginal):")
+                    for lbl, row in week_rows:
+                        sec.append(_rte_line(lbl, row))
+                    sec.append("")
+                if cell_rows:
+                    sec.append("  Cell RTEs (Cohort × Week):")
+                    for lbl, row in cell_rows:
+                        sec.append(_rte_line(lbl, row))
+                    sec.append("")
             else:
                 sec += ["  [INFO] RTE table not returned by nparLD.", ""]
 
-            # Full R print output (verbatim for complete model info)
+            # Pairwise group comparisons from $pair.comparison
+            # Parse from the verbatim R text
+            _pair_lines = []
+            _atime_lines = []
             if r_text.strip():
+                import re as _re
+                lines_rt = r_text.splitlines()
+                # Find $pair.comparison block
+                in_pair, in_atime = False, False
+                for ln in lines_rt:
+                    stripped = ln.strip()
+                    if stripped == '$pair.comparison':
+                        in_pair, in_atime = True, False
+                        continue
+                    if stripped == '$ANOVA.test.time':
+                        in_atime, in_pair = True, False
+                        continue
+                    if stripped.startswith('$'):
+                        in_pair, in_atime = False, False
+                        continue
+                    if in_pair and stripped:
+                        _pair_lines.append(stripped)
+                    if in_atime and stripped:
+                        _atime_lines.append(stripped)
+
+            if _pair_lines:
+                # Parse header + data rows
+                # Header: "Pairs  Test  Statistic  df  p-value"
+                # Data:   "1 Cohort0% CA:Cohort2% CA  Cohort  39.575280  1.000000  3.156537e-10"
                 sec += [
-                    "  Full R Output  (nparLD print — complete model information)",
-                    "  " + "─" * 60,
+                    "  Pairwise Group Comparisons  (from nparLD $pair.comparison)",
+                    "  ─" + "─" * 77,
                 ]
-                for line in r_text.splitlines():
-                    sec.append("  " + line)
+                for ln in _pair_lines:
+                    # Skip pure header line (starts with "Pairs")
+                    if ln.lstrip().startswith('Pairs'):
+                        continue
+                    # Try to parse: row_num  pairs_label  test  statistic  df  p-value
+                    m = _re.match(
+                        r'^\d+\s+(.+?)\s+(Cohort|Week|Cohort:Week)\s+([\d.e+\-]+)\s+([\d.e+\-]+)\s+([\d.e+\-]+)\s*$',
+                        ln
+                    )
+                    if m:
+                        pair_lbl  = m.group(1).strip().replace('Cohort', '').replace(':', ' vs ')
+                        test_lbl  = m.group(2)
+                        stat_val  = float(m.group(3))
+                        df_val    = float(m.group(4))
+                        pv_val    = float(m.group(5))
+                        sec.append(
+                            f"  {pair_lbl:<28}  {test_lbl:<12}  ATS={stat_val:>9.4f}  "
+                            f"df={df_val:>6.2f}  {_poly_fmt_p(pv_val):>10}  {_poly_sig_stars(pv_val)}"
+                        )
+                    else:
+                        sec.append("  " + ln)
+                sec.append("")
+
+            if _atime_lines:
+                sec += [
+                    "  Within-Group Time Effects  (ATS per cohort, from nparLD $ANOVA.test.time)",
+                    "  ─" + "─" * 77,
+                    f"  {'Cohort':<14}  {'ATS':>10}  {'df':>8}  {'p-value':>12}  Sig",
+                    "  " + "─" * 56,
+                ]
+                # Header row from R output: "Statistic  df  p-value"
+                for ln in _atime_lines:
+                    if _re.match(r'^\s*Statistic', ln):
+                        continue
+                    m = _re.match(r'^(\S.+?)\s+([\d.e+\-]+)\s+([\d.e+\-]+)\s+([\d.e+\-]+)\s*$', ln)
+                    if m:
+                        grp   = m.group(1).strip()
+                        stat  = float(m.group(2))
+                        df_   = float(m.group(3))
+                        pv    = float(m.group(4))
+                        sec.append(
+                            f"  {grp:<14}  {stat:>10.4f}  {df_:>8.4f}  "
+                            f"{_poly_fmt_p(pv):>12}  {_poly_sig_stars(pv)}"
+                        )
+                    else:
+                        sec.append("  " + ln)
                 sec.append("")
 
             sec += ["  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10", ""]
@@ -5549,6 +5700,537 @@ def test_nparLD_lick_analysis(
     return {
         'measures'  : results_by_measure,
         'fdr_pvals' : _ats_pvals,
+        'report'    : full_report,
+    }
+
+
+# =============================================================================
+# R-BASED NEGATIVE BINOMIAL MIXED MODEL (glmmTMB)
+# =============================================================================
+
+def test_negbinom_lick_analysis(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    measures: Optional[List[str]] = None,
+    time_points: Optional[List[int]] = None,
+    save_path: Optional[Path] = None,
+) -> Dict:
+    """Negative binomial (or Gaussian) mixed-effects model via R glmmTMB.
+
+    Design: Cohort (between) \u00d7 Week (within), random intercepts per subject.
+    Formula: measure ~ CA_group * Week + (1 | ID)
+
+    For non-negative integer count data (Total_Licks, Fecal_Count) the
+    negative-binomial-2 family (log link) is used.  For percentage/continuous
+    measures a Gaussian model with identity link is substituted and noted in
+    the report.
+
+    Unlike nparLD, glmmTMB handles unbalanced data natively \u2014 no subjects
+    are dropped for missing time points.
+
+    Requires: rpy2  +  R with  install.packages(c('glmmTMB','emmeans','car'))
+    """
+    W = 80
+
+    print("\n" + "=" * W)
+    print("R-BASED NEGATIVE BINOMIAL MIXED MODEL  (glmmTMB, random intercepts)")
+    print("=" * W)
+
+    if not HAS_RPY2:
+        print(
+            "[ERROR] rpy2 is not installed \u2014 cannot run R-based analysis.\n"
+            "  pip install rpy2\n"
+            "  Also requires R with:  install.packages(c('glmmTMB','emmeans','car'))"
+        )
+        return {'error': 'rpy2 not installed'}
+
+    _ensure_r_path()
+
+    import rpy2.robjects as ro
+    from rpy2.robjects import pandas2ri
+    from rpy2.robjects.packages import importr
+    import tempfile, os
+
+    # \u2500\u2500 rpy2 pandas converter \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    try:
+        from rpy2.robjects.conversion import localconverter
+        def _to_r(df):
+            with localconverter(ro.default_converter + pandas2ri.converter):
+                return ro.conversion.py2rpy(df)
+    except Exception:
+        pandas2ri.activate()
+        def _to_r(df):
+            return pandas2ri.py2rpy(df)
+
+    # \u2500\u2500 default measures \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    _DEFAULT_MEASURES = ["Total_Licks", "Fecal_Count", "First_5min_Lick_Pct"]
+    if measures is None:
+        _comb_tmp = combine_lick_cohorts(cohort_dfs)
+        measures = [m for m in _DEFAULT_MEASURES if m in _comb_tmp.columns]
+        if not measures:
+            measures = ["Total_Licks"]
+
+    # \u2500\u2500 prepare combined dataset \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    print("\nStep 1: Preparing combined dataset...")
+    combined_df = combine_lick_cohorts(cohort_dfs)
+    if 'Week' not in combined_df.columns:
+        combined_df = add_week_column(combined_df)
+    if time_points is not None:
+        combined_df = combined_df[combined_df['Week'].isin(time_points)].copy()
+
+    combined_df = combined_df.copy()
+    if 'Cohort' in combined_df.columns:
+        combined_df['CA_group'] = combined_df['Cohort']
+    elif 'CA%' in combined_df.columns:
+        combined_df['CA_group'] = combined_df['CA%'].apply(
+            lambda x: f"{x:.0f}% CA" if pd.notna(x) else 'Unknown'
+        )
+    else:
+        combined_df['CA_group'] = 'Unknown'
+
+    weeks     = sorted(combined_df['Week'].dropna().unique())
+    ca_groups = sorted(combined_df['CA_group'].dropna().unique())
+    _n_animals_total = combined_df['ID'].nunique() if 'ID' in combined_df.columns else '?'
+
+    print(f"  Weeks (0-based): {[int(w) for w in weeks]}")
+    print(f"  CA groups      : {ca_groups}")
+    print(f"  Total animals  : {_n_animals_total}")
+
+    # \u2500\u2500 verify R packages \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    print("\nStep 2: Verifying R packages (glmmTMB, emmeans, car)...")
+    try:
+        importr('glmmTMB')
+        importr('emmeans')
+        importr('car')
+        print("  [OK] glmmTMB, emmeans, car are available.")
+    except Exception as _e:
+        print(f"[ERROR] Required R packages not found: {_e}")
+        print("  Install in R:  install.packages(c('glmmTMB', 'emmeans', 'car'))")
+        return {'error': f'R packages unavailable: {_e}'}
+
+    results_by_measure: Dict = {}
+    report_sections: List[str] = []
+    _ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _anova_pvals: Dict[str, Dict[str, float]] = {}
+
+    # \u2500\u2500 report header \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    report_sections += [
+        "=" * W,
+        "  NEGATIVE BINOMIAL MIXED MODEL  (R: glmmTMB)",
+        "  Design: Cohort (between) \u00d7 Week (within)  |  Random intercepts: (1 | ID)",
+        "=" * W,
+        f"  Generated          : {_ts}",
+        f"  Between factor     : Cohort  ({', '.join(ca_groups)})",
+        f"  Within factor      : Week    ({', '.join(str(int(w)) for w in weeks)})",
+        f"  N animals (total)  : {_n_animals_total}",
+        f"  Dependent variables: {', '.join(measures)}",
+        "",
+        "  Model formula: measure ~ CA_group * Week + (1 | ID)",
+        "  Family: nbinom2(log)  for non-negative integer count data",
+        "          gaussian(id)  for percentage/continuous measures (noted per DV)",
+        "",
+        "  Unlike nparLD, glmmTMB handles unbalanced data \u2014 all subjects included.",
+        "",
+        "  Test statistics:",
+        "    \u03c7\u00b2 = Type III Wald chi-square (car::Anova, type=3)",
+        "    z  = z-statistic per coefficient (log scale for NB)",
+        "    Estimates for NB are log rate ratios; exponentiate for fold-changes.",
+        "",
+        "  Multiple comparison correction:",
+        "    BH-FDR across DVs per omnibus effect",
+        "    BH adjusted within each pairwise contrast set",
+        "=" * W,
+        "",
+        "  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10",
+        "",
+    ]
+
+    # \u2500\u2500 per-measure loop \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    for measure in measures:
+        if measure not in combined_df.columns:
+            print(f"\n  [SKIP] '{measure}' not found in combined data.")
+            continue
+
+        print(f"\nStep 3 [{measure}]: Running glmmTMB in R...")
+        measure_label = _OMNIBUS_MEASURE_LABELS.get(measure, measure.replace('_', ' '))
+
+        adf = combined_df[['ID', 'Week', 'CA_group', measure]].dropna().copy()
+        adf['Week'] = adf['Week'].astype(int)
+
+        n_subj = adf['ID'].nunique()
+        n_obs  = len(adf)
+
+        if n_subj < 3:
+            print(f"  [WARNING] < 3 subjects for '{measure}' \u2014 skipping.")
+            continue
+
+        # Temp file paths
+        _tmpdir = tempfile.gettempdir().replace('\\', '/')
+        _uid    = str(id(adf))[-6:]
+        _fit_fp       = f"{_tmpdir}/negbinom_fit_{measure}_{_uid}.csv"
+        _anova_fp     = f"{_tmpdir}/negbinom_anova_{measure}_{_uid}.csv"
+        _fixef_fp     = f"{_tmpdir}/negbinom_fixef_{measure}_{_uid}.csv"
+        _ranef_fp     = f"{_tmpdir}/negbinom_ranef_{measure}_{_uid}.csv"
+        _pairs_grp_fp = f"{_tmpdir}/negbinom_pairs_grp_{measure}_{_uid}.csv"
+        _pairs_wk_fp  = f"{_tmpdir}/negbinom_pairs_wk_{measure}_{_uid}.csv"
+        _txt_fp       = f"{_tmpdir}/negbinom_txt_{measure}_{_uid}.txt"
+
+        try:
+            ro.globalenv['r_df']            = _to_r(adf)
+            ro.globalenv['r_measure']       = measure
+            ro.globalenv['r_fit_fp']        = _fit_fp
+            ro.globalenv['r_anova_fp']      = _anova_fp
+            ro.globalenv['r_fixef_fp']      = _fixef_fp
+            ro.globalenv['r_ranef_fp']      = _ranef_fp
+            ro.globalenv['r_pairs_grp_fp']  = _pairs_grp_fp
+            ro.globalenv['r_pairs_wk_fp']   = _pairs_wk_fp
+            ro.globalenv['r_txt_fp']        = _txt_fp
+
+            ro.r("""
+                suppressPackageStartupMessages({
+                    library(glmmTMB)
+                    library(emmeans)
+                    library(car)
+                })
+
+                df_r          <- r_df
+                df_r$ID       <- as.factor(df_r$ID)
+                df_r$CA_group <- as.factor(df_r$CA_group)
+                df_r$Week     <- as.factor(df_r$Week)
+
+                # Auto-detect family: count data -> nbinom2, else gaussian
+                vals     <- df_r[[r_measure]]
+                is_count <- all(vals %% 1 == 0, na.rm=TRUE) && all(vals >= 0, na.rm=TRUE)
+                if (is_count) {
+                    fam      <- nbinom2(link="log")
+                    fam_name <- "nbinom2 (log link)"
+                } else {
+                    fam      <- gaussian(link="identity")
+                    fam_name <- "gaussian (identity link) -- not count data"
+                }
+
+                # Fit the model
+                model <- glmmTMB(
+                    formula(paste0(r_measure, " ~ CA_group * Week + (1 | ID)")),
+                    data   = df_r,
+                    family = fam
+                )
+
+                # Full summary text
+                model_txt <- capture.output(summary(model))
+                writeLines(model_txt, r_txt_fp)
+
+                # Model fit statistics
+                ll      <- logLik(model)
+                nb_disp <- tryCatch(sigma(model), error=function(e) NA_real_)
+                fit_df  <- data.frame(
+                    family     = fam_name,
+                    AIC        = AIC(model),
+                    BIC        = BIC(model),
+                    logLik     = as.numeric(ll),
+                    df_used    = attr(ll, "df"),
+                    nobs       = nobs(model),
+                    dispersion = nb_disp
+                )
+                write.csv(fit_df, r_fit_fp, row.names=FALSE)
+
+                # Type III Wald chi-square
+                anova_res        <- Anova(model, type=3)
+                anova_df         <- as.data.frame(anova_res)
+                anova_df$effect  <- rownames(anova_df)
+                write.csv(anova_df, r_anova_fp, row.names=FALSE)
+
+                # Fixed effects coefficients
+                fixef_cond       <- as.data.frame(summary(model)$coefficients$cond)
+                fixef_cond$term  <- rownames(fixef_cond)
+                write.csv(fixef_cond, r_fixef_fp, row.names=FALSE)
+
+                # Random effects variance
+                ranef_var <- tryCatch(
+                    as.data.frame(VarCorr(model)),
+                    error = function(e) data.frame(note=conditionMessage(e))
+                )
+                write.csv(ranef_var, r_ranef_fp, row.names=FALSE)
+
+                # Pairwise: Cohort within each Week (BH adjusted)
+                emm_grp   <- emmeans(model, ~ CA_group | Week)
+                pairs_grp <- as.data.frame(pairs(emm_grp, adjust="BH"))
+                write.csv(pairs_grp, r_pairs_grp_fp, row.names=FALSE)
+
+                # Pairwise: Week within each Cohort (BH adjusted)
+                emm_wk   <- emmeans(model, ~ Week | CA_group)
+                pairs_wk <- as.data.frame(pairs(emm_wk, adjust="BH"))
+                write.csv(pairs_wk, r_pairs_wk_fp, row.names=FALSE)
+            """)
+
+            # Read results back
+            fit_df_py    = pd.read_csv(_fit_fp)       if os.path.exists(_fit_fp)       else pd.DataFrame()
+            anova_df_py  = pd.read_csv(_anova_fp)     if os.path.exists(_anova_fp)     else pd.DataFrame()
+            fixef_df_py  = pd.read_csv(_fixef_fp)     if os.path.exists(_fixef_fp)     else pd.DataFrame()
+            ranef_df_py  = pd.read_csv(_ranef_fp)     if os.path.exists(_ranef_fp)     else pd.DataFrame()
+            pairs_grp_df = pd.read_csv(_pairs_grp_fp) if os.path.exists(_pairs_grp_fp) else pd.DataFrame()
+            pairs_wk_df  = pd.read_csv(_pairs_wk_fp)  if os.path.exists(_pairs_wk_fp)  else pd.DataFrame()
+            r_text       = Path(_txt_fp).read_text(encoding='utf-8') if os.path.exists(_txt_fp) else ''
+
+            for _fp in [_fit_fp, _anova_fp, _fixef_fp, _ranef_fp,
+                        _pairs_grp_fp, _pairs_wk_fp, _txt_fp]:
+                try:    os.unlink(_fp)
+                except Exception: pass
+
+            # Collect p-values for BH-FDR across DVs
+            _p_col_a = next((c for c in ['Pr(>Chisq)', 'p.value', 'p-value', 'Pr(>Chi)']
+                             if c in anova_df_py.columns), None)
+            if _p_col_a and 'effect' in anova_df_py.columns and not anova_df_py.empty:
+                for _, row in anova_df_py.iterrows():
+                    eff = str(row['effect']).strip()
+                    if eff.lower() in ('(intercept)', 'intercept'):
+                        continue
+                    try:
+                        _anova_pvals.setdefault(eff, {})[measure] = float(row[_p_col_a])
+                    except (ValueError, TypeError):
+                        pass
+
+            # \u2500\u2500 format report section \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+            sec: List[str] = []
+            _fam  = str(fit_df_py['family'].iloc[0])    if not fit_df_py.empty else '?'
+            _aic  = float(fit_df_py['AIC'].iloc[0])     if not fit_df_py.empty else np.nan
+            _bic  = float(fit_df_py['BIC'].iloc[0])     if not fit_df_py.empty else np.nan
+            _ll_v = float(fit_df_py['logLik'].iloc[0])  if not fit_df_py.empty else np.nan
+            _df_u = int(fit_df_py['df_used'].iloc[0])   if not fit_df_py.empty else 0
+            _nobs = int(fit_df_py['nobs'].iloc[0])      if not fit_df_py.empty else n_obs
+            _disp_val = fit_df_py['dispersion'].iloc[0] if not fit_df_py.empty else np.nan
+            _disp_str = f"{float(_disp_val):.4f}" if pd.notna(_disp_val) else "\u2014"
+
+            sec += [
+                "",
+                "\u2550" * W,
+                f"  DEPENDENT VARIABLE:  {measure_label}  ({measure})",
+                "\u2550" * W,
+                "",
+                "  Model Information",
+                f"    {'Formula':<40} {measure} ~ CA_group * Week + (1 | ID)",
+                f"    {'Family':<40} {_fam}",
+                f"    {'Between-subjects factor':<40} Cohort  ({', '.join(ca_groups)})",
+                f"    {'Within-subjects factor':<40} Week    ({', '.join(str(int(w)) for w in weeks)})",
+                f"    {'N subjects':<40} {n_subj}",
+                f"    {'N observations':<40} {_nobs}",
+                f"    {'AIC':<40} {_aic:.2f}",
+                f"    {'BIC':<40} {_bic:.2f}",
+                f"    {'Log-likelihood':<40} {_ll_v:.4f}  (df = {_df_u})",
+                f"    {'Dispersion parameter':<40} {_disp_str}",
+                "",
+            ]
+
+            # Type III Wald chi-square table
+            if not anova_df_py.empty:
+                _chi_col = next((c for c in ['Chisq', 'LR Chisq', 'F']
+                                 if c in anova_df_py.columns), None)
+                _df_col  = next((c for c in ['Df', 'df'] if c in anova_df_py.columns), None)
+                _p_col_a = next((c for c in ['Pr(>Chisq)', 'p.value', 'p-value', 'Pr(>Chi)']
+                                 if c in anova_df_py.columns), None)
+                sec += [
+                    "  Type III Wald Chi-Square Tests  (car::Anova, type=3)",
+                    f"  {'Effect':<30}  {chr(967)+chr(178):>10}  {'df':>6}  {'p-value':>10}  Sig",
+                    "  " + "\u2500" * 62,
+                ]
+                for _, row in anova_df_py.iterrows():
+                    eff = str(row.get('effect', '')).strip()
+                    if eff.lower() in ('(intercept)', 'intercept'):
+                        continue
+                    chi = float(row[_chi_col]) if _chi_col and _chi_col in row.index else np.nan
+                    df_ = float(row[_df_col])  if _df_col  and _df_col  in row.index else np.nan
+                    pv  = float(row[_p_col_a]) if _p_col_a and _p_col_a in row.index else np.nan
+                    sec.append(
+                        f"  {eff:<30}  {chi:>10.4f}  {df_:>6.0f}  "
+                        f"{_poly_fmt_p(pv):>10}  {_poly_sig_stars(pv)}"
+                    )
+                sec.append("")
+            else:
+                sec += ["  [INFO] Type III Wald tests not returned.", ""]
+
+            # Fixed effects table
+            if not fixef_df_py.empty:
+                _est_col = next((c for c in ['Estimate'] if c in fixef_df_py.columns), None)
+                _se_col  = next((c for c in ['Std. Error', 'Std.Error']
+                                 if c in fixef_df_py.columns), None)
+                _z_col   = next((c for c in ['z value', 'z.value', 't value']
+                                 if c in fixef_df_py.columns), None)
+                _p_col_f = next((c for c in ['Pr(>|z|)', 'Pr(>|t|)', 'p.value']
+                                 if c in fixef_df_py.columns), None)
+                sec += [
+                    "  Fixed Effects  (log-scale for NB; exp(Estimate) = rate ratio)",
+                    f"  {'Term':<42}  {'Estimate':>10}  {'SE':>8}  {'z':>8}  {'p-value':>10}  Sig",
+                    "  " + "\u2500" * 86,
+                ]
+                for _, row in fixef_df_py.iterrows():
+                    term = str(row.get('term', '')).strip()
+                    est  = float(row[_est_col]) if _est_col and _est_col in row.index else np.nan
+                    se   = float(row[_se_col])  if _se_col  and _se_col  in row.index else np.nan
+                    zv   = float(row[_z_col])   if _z_col   and _z_col   in row.index else np.nan
+                    pv   = float(row[_p_col_f]) if _p_col_f and _p_col_f in row.index else np.nan
+                    sec.append(
+                        f"  {term:<42}  {est:>10.4f}  {se:>8.4f}  {zv:>8.3f}  "
+                        f"{_poly_fmt_p(pv):>10}  {_poly_sig_stars(pv)}"
+                    )
+                sec.append("")
+            else:
+                sec += ["  [INFO] Fixed effects not returned.", ""]
+
+            # Random effects
+            _has_ranef = not ranef_df_py.empty and 'note' not in ranef_df_py.columns
+            if _has_ranef:
+                _var_col = next((c for c in ['vcov', 'Variance', 'var']
+                                 if c in ranef_df_py.columns), None)
+                _sd_col  = next((c for c in ['sdcor', 'StdDev', 'SD', 'sd']
+                                 if c in ranef_df_py.columns), None)
+                sec += [
+                    "  Random Effects  (random intercept per subject ID)",
+                    f"  {'Group':<20}  {'Component':<20}  {'Variance':>12}  {'Std.Dev.':>10}",
+                    "  " + "\u2500" * 68,
+                ]
+                for _, row in ranef_df_py.iterrows():
+                    grp  = str(row.get('grp',  row.get('Groups', '')))
+                    comp = str(row.get('var1', row.get('Name',   '')))
+                    var_ = float(row[_var_col]) if _var_col and _var_col in row.index else np.nan
+                    sd_  = float(row[_sd_col])  if _sd_col  and _sd_col  in row.index else np.nan
+                    var_s = f"{var_:>12.4f}" if not np.isnan(var_) else f"{'—':>12}"
+                    sd_s  = f"{sd_:>10.4f}"  if not np.isnan(sd_)  else f"{'—':>10}"
+                    sec.append(f"  {grp:<20}  {comp:<20}  {var_s}  {sd_s}")
+                sec.append("")
+            else:
+                sec += ["  [INFO] Random effects variance not returned.", ""]
+
+            # Pairwise: Cohort within each Week
+            if not pairs_grp_df.empty:
+                _cont_c = next((c for c in ['contrast'] if c in pairs_grp_df.columns), None)
+                _wk_c   = next((c for c in ['Week'] if c in pairs_grp_df.columns), None)
+                _est_c  = next((c for c in ['estimate', 'Estimate']
+                                if c in pairs_grp_df.columns), None)
+                _se_c   = next((c for c in ['SE'] if c in pairs_grp_df.columns), None)
+                _z_c    = next((c for c in ['z.ratio', 'z ratio', 't.ratio']
+                                if c in pairs_grp_df.columns), None)
+                _p_c    = next((c for c in ['p.value'] if c in pairs_grp_df.columns), None)
+                sec += [
+                    "  Pairwise Group Comparisons  (Cohort contrasts within each Week, BH adj.)",
+                    f"  {'Week':<8}  {'Contrast':<42}  {'Estimate':>10}  {'SE':>8}  {'z':>8}  {'p (BH)':>10}  Sig",
+                    "  " + "\u2500" * 96,
+                ]
+                cur_wk = None
+                for _, row in pairs_grp_df.iterrows():
+                    wk   = str(row[_wk_c]).strip()  if _wk_c   and _wk_c   in row.index else '?'
+                    cont = str(row[_cont_c]).strip() if _cont_c and _cont_c in row.index else '?'
+                    est  = float(row[_est_c]) if _est_c and _est_c in row.index else np.nan
+                    se   = float(row[_se_c])  if _se_c  and _se_c  in row.index else np.nan
+                    zv   = float(row[_z_c])   if _z_c   and _z_c   in row.index else np.nan
+                    pv   = float(row[_p_c])   if _p_c   and _p_c   in row.index else np.nan
+                    if wk != cur_wk:
+                        cur_wk = wk
+                        sec.append(f"  {'─' * 96}")
+                        sec.append(f"  Week {wk}")
+                    sec.append(
+                        f"  {'':>8}  {cont:<42}  {est:>10.4f}  {se:>8.4f}  {zv:>8.3f}  "
+                        f"{_poly_fmt_p(pv):>10}  {_poly_sig_stars(pv)}"
+                    )
+                sec.append("")
+            else:
+                sec += ["  [INFO] Pairwise group contrasts not returned.", ""]
+
+            # Pairwise: Week within each Cohort
+            if not pairs_wk_df.empty:
+                _cont_c2 = next((c for c in ['contrast'] if c in pairs_wk_df.columns), None)
+                _grp_c2  = next((c for c in ['CA_group'] if c in pairs_wk_df.columns), None)
+                _est_c2  = next((c for c in ['estimate', 'Estimate']
+                                 if c in pairs_wk_df.columns), None)
+                _se_c2   = next((c for c in ['SE'] if c in pairs_wk_df.columns), None)
+                _z_c2    = next((c for c in ['z.ratio', 'z ratio', 't.ratio']
+                                 if c in pairs_wk_df.columns), None)
+                _p_c2    = next((c for c in ['p.value'] if c in pairs_wk_df.columns), None)
+                sec += [
+                    "  Pairwise Week Comparisons  (Week contrasts within each Cohort, BH adj.)",
+                    f"  {'Cohort':<22}  {'Contrast':<32}  {'Estimate':>10}  {'SE':>8}  {'z':>8}  {'p (BH)':>10}  Sig",
+                    "  " + "\u2500" * 96,
+                ]
+                cur_grp = None
+                for _, row in pairs_wk_df.iterrows():
+                    grp  = str(row[_grp_c2]).strip()  if _grp_c2  and _grp_c2  in row.index else '?'
+                    cont = str(row[_cont_c2]).strip()  if _cont_c2 and _cont_c2 in row.index else '?'
+                    est  = float(row[_est_c2]) if _est_c2 and _est_c2 in row.index else np.nan
+                    se   = float(row[_se_c2])  if _se_c2  and _se_c2  in row.index else np.nan
+                    zv   = float(row[_z_c2])   if _z_c2   and _z_c2   in row.index else np.nan
+                    pv   = float(row[_p_c2])   if _p_c2   and _p_c2   in row.index else np.nan
+                    if grp != cur_grp:
+                        cur_grp = grp
+                        sec.append(f"  {'─' * 96}")
+                        sec.append(f"  {grp}")
+                    sec.append(
+                        f"  {'':>22}  {cont:<32}  {est:>10.4f}  {se:>8.4f}  {zv:>8.3f}  "
+                        f"{_poly_fmt_p(pv):>10}  {_poly_sig_stars(pv)}"
+                    )
+                sec.append("")
+            else:
+                sec += ["  [INFO] Pairwise week contrasts not returned.", ""]
+
+            report_sections.extend(sec)
+            results_by_measure[measure] = {
+                'fit':       fit_df_py,
+                'anova':     anova_df_py,
+                'fixef':     fixef_df_py,
+                'ranef':     ranef_df_py,
+                'pairs_grp': pairs_grp_df,
+                'pairs_wk':  pairs_wk_df,
+                'r_text':    r_text,
+                'report_section': "\n".join(sec),
+            }
+
+        except Exception as _e:
+            import traceback
+            _tb = traceback.format_exc()
+            _err_msg = f"  [ERROR] glmmTMB analysis failed for '{measure}': {_e}"
+            print(_err_msg)
+            print(_tb)
+            report_sections += ["", _err_msg, ""]
+            results_by_measure[measure] = {'error': str(_e)}
+
+    # \u2500\u2500 BH-FDR summary across DVs \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    if _anova_pvals and len(measures) > 1:
+        _fdr_sec = [
+            "=" * W,
+            "  BH-FDR CORRECTION  (across DVs per effect)",
+            "=" * W,
+            "",
+            f"  {'Effect':<30}  {'Measure':<30}  {'raw p':>10}  {'adj p (BH)':>12}  Sig",
+            "  " + "\u2500" * 88,
+        ]
+        for eff, mdict in sorted(_anova_pvals.items()):
+            raw_ps = [mdict[m] for m in measures if m in mdict]
+            adj_ps = _bh_fdr(raw_ps) if raw_ps else []
+            for i, m in enumerate([m for m in measures if m in mdict]):
+                ml = _OMNIBUS_MEASURE_LABELS.get(m, m.replace('_', ' '))
+                pr = raw_ps[i]
+                pa = adj_ps[i]
+                _fdr_sec.append(
+                    f"  {eff:<30}  {ml:<30}  {_poly_fmt_p(pr):>10}  {_poly_fmt_p(pa):>12}  "
+                    f"{_poly_sig_stars(pa)}"
+                )
+        _fdr_sec.append("")
+        report_sections.extend(_fdr_sec)
+
+    # \u2500\u2500 footer \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    report_sections += [
+        "=" * W,
+        "  End of Negative Binomial Mixed Model Report",
+        "=" * W,
+    ]
+
+    full_report = "\n".join(report_sections)
+    print("\n" + full_report)
+
+    if save_path is not None:
+        Path(save_path).write_text(full_report, encoding='utf-8')
+        print(f"\n[OK] Report saved -> {save_path}")
+
+    return {
+        'measures'  : results_by_measure,
+        'fdr_pvals' : _anova_pvals,
         'report'    : full_report,
     }
 
@@ -6018,9 +6700,11 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("                            (requires rpy2 + R with lme4, lmerTest, emmeans)")
     print(" 16. nparLD analysis      -- Nonparametric repeated measures via R's nparLD package (F1-LD-F1: Cohort \u00d7 Week)")
     print("                            (requires rpy2 + R with:  install.packages('nparLD'))")
+    print(" 17. Negative binomial    -- Neg. binomial GLMM via R's glmmTMB (Cohort \u00d7 Week + random intercepts)")
+    print("                            (requires rpy2 + R with:  install.packages(c('glmmTMB','emmeans','car')))")
     print()
 
-    user_input = input("Select option (1-16) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-17) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -6619,6 +7303,30 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 print(f"  [WARNING] nparLD analysis failed: {e}")
                 import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 17: Negative binomial mixed model (Cohort x Week)
+    # ------------------------------------------------------------------ #
+    if user_input == '17':
+        print("\n" + "=" * 80)
+        print("RUNNING: Negative binomial mixed model (glmmTMB: Cohort \u00d7 Week, random intercepts)")
+        print("=" * 80)
+        if not HAS_RPY2:
+            print("[WARNING] rpy2 is not installed \u2014 cannot run R-based analysis.")
+            print("  pip install rpy2")
+            print("  Also requires R with:  install.packages(c('glmmTMB', 'emmeans', 'car'))")
+        else:
+            try:
+                nb_rpt_path = Path(f"0v2_lick_negbinom_{timestamp}.txt")
+                nb_results = test_negbinom_lick_analysis(
+                    cohorts,
+                    save_path=nb_rpt_path,
+                )
+                if 'error' not in nb_results:
+                    print(f"\n[OK] Report saved -> {nb_rpt_path}")
+            except Exception as e:
+                print(f"  [WARNING] Negative binomial analysis failed: {e}")
+                import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("0% vs 2% lick analysis complete.")
     print("=" * 80)
@@ -6654,9 +7362,11 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  6. Run all (1-5)")
     print("  7. nparLD analysis      -- Nonparametric repeated measures via R's nparLD package (F1-LD-F1: Cohort \u00d7 Week)")
     print("                            (requires rpy2 + R with:  install.packages('nparLD'))")
+    print("  8. Negative binomial    -- Neg. binomial GLMM via R's glmmTMB (Cohort \u00d7 Week + random intercepts)")
+    print("                            (requires rpy2 + R with:  install.packages(c('glmmTMB','emmeans','car')))")
     print()
 
-    user_input = input("Select option (1-7) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-8) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -7022,6 +7732,30 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 print(f"  [WARNING] nparLD analysis failed: {e}")
                 import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 8: Negative binomial mixed model (Cohort x Week)
+    # ------------------------------------------------------------------ #
+    if user_input == '8':
+        print("\n" + "=" * 80)
+        print("RUNNING: Negative binomial mixed model (glmmTMB: Cohort \u00d7 Week, random intercepts)")
+        print("=" * 80)
+        if not HAS_RPY2:
+            print("[WARNING] rpy2 is not installed \u2014 cannot run R-based analysis.")
+            print("  pip install rpy2")
+            print("  Also requires R with:  install.packages(c('glmmTMB', 'emmeans', 'car'))")
+        else:
+            try:
+                nb_rpt_path = Path(f"0vramp_lick_negbinom_{timestamp}.txt")
+                nb_results = test_negbinom_lick_analysis(
+                    cohorts,
+                    save_path=nb_rpt_path,
+                )
+                if 'error' not in nb_results:
+                    print(f"\n[OK] Report saved -> {nb_rpt_path}")
+            except Exception as e:
+                print(f"  [WARNING] Negative binomial analysis failed: {e}")
+                import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("0% nonramp vs Ramp lick plots complete.")
     print("=" * 80)
@@ -7059,9 +7793,11 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  8. Run all (1-7)")
     print("  9. nparLD analysis      -- Nonparametric repeated measures via R's nparLD package (F1-LD-F1: Cohort \u00d7 Week)")
     print("                            (requires rpy2 + R with:  install.packages('nparLD'))")
+    print(" 10. Negative binomial    -- Neg. binomial GLMM via R's glmmTMB (Cohort \u00d7 Week + random intercepts)")
+    print("                            (requires rpy2 + R with:  install.packages(c('glmmTMB','emmeans','car')))")
     print()
 
-    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-10) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -7654,6 +8390,30 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 print(f"  [WARNING] nparLD analysis failed: {e}")
                 import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 10: Negative binomial mixed model (Cohort x Week)
+    # ------------------------------------------------------------------ #
+    if user_input == '10':
+        print("\n" + "=" * 80)
+        print("RUNNING: Negative binomial mixed model (glmmTMB: Cohort \u00d7 Week, random intercepts)")
+        print("=" * 80)
+        if not HAS_RPY2:
+            print("[WARNING] rpy2 is not installed \u2014 cannot run R-based analysis.")
+            print("  pip install rpy2")
+            print("  Also requires R with:  install.packages(c('glmmTMB', 'emmeans', 'car'))")
+        else:
+            try:
+                nb_rpt_path = Path(f"2vramp_lick_negbinom_{timestamp}.txt")
+                nb_results = test_negbinom_lick_analysis(
+                    cohorts,
+                    save_path=nb_rpt_path,
+                )
+                if 'error' not in nb_results:
+                    print(f"\n[OK] Report saved -> {nb_rpt_path}")
+            except Exception as e:
+                print(f"  [WARNING] Negative binomial analysis failed: {e}")
+                import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("2% nonramp vs Ramp lick plots complete.")
     print("=" * 80)
@@ -7689,9 +8449,11 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  6. Run all (1-5)")
     print("  7. nparLD analysis      -- Nonparametric repeated measures via R's nparLD package (F1-LD-F1: Cohort \u00d7 Week)")
     print("                            (requires rpy2 + R with:  install.packages('nparLD'))")
+    print("  8. Negative binomial    -- Neg. binomial GLMM via R's glmmTMB (Cohort \u00d7 Week + random intercepts)")
+    print("                            (requires rpy2 + R with:  install.packages(c('glmmTMB','emmeans','car')))")
     print()
 
-    user_input = input("Select option (1-7) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-8) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -8053,6 +8815,30 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     print(f"\n[OK] Report saved -> {nparld_rpt_path}")
             except Exception as e:
                 print(f"  [WARNING] nparLD analysis failed: {e}")
+                import traceback; traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 8: Negative binomial mixed model (Cohort x Week)
+    # ------------------------------------------------------------------ #
+    if user_input == '8':
+        print("\n" + "=" * 80)
+        print("RUNNING: Negative binomial mixed model (glmmTMB: Cohort \u00d7 Week, random intercepts)")
+        print("=" * 80)
+        if not HAS_RPY2:
+            print("[WARNING] rpy2 is not installed \u2014 cannot run R-based analysis.")
+            print("  pip install rpy2")
+            print("  Also requires R with:  install.packages(c('glmmTMB', 'emmeans', 'car'))")
+        else:
+            try:
+                nb_rpt_path = Path(f"all3_lick_negbinom_{timestamp}.txt")
+                nb_results = test_negbinom_lick_analysis(
+                    cohorts,
+                    save_path=nb_rpt_path,
+                )
+                if 'error' not in nb_results:
+                    print(f"\n[OK] Report saved -> {nb_rpt_path}")
+            except Exception as e:
+                print(f"  [WARNING] Negative binomial analysis failed: {e}")
                 import traceback; traceback.print_exc()
 
     print("\n" + "=" * 80)
