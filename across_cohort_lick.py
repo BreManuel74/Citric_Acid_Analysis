@@ -4516,6 +4516,34 @@ def plot_omnibus_interaction(
 # R-BASED POLYNOMIAL CONTRASTS (lme4 / lmerTest / emmeans)
 # =============================================================================
 
+def _ensure_r_path() -> None:
+    """Ensure R's bin/x64 directory is in PATH before any rpy2 call.
+
+    On Windows, rpy2 locates R via R_HOME but Windows DLL loading also requires
+    that the directory containing Rblas.dll / Rlapack.dll (R\\bin\\x64) is on the
+    system PATH.  Without this, base packages like 'stats' fail with:
+        LoadLibrary failure: The specified module could not be found.
+
+    This is safe to call multiple times (it is a no-op if already set up).
+    """
+    import os, sys
+    if sys.platform != 'win32':
+        return
+    r_home = os.environ.get('R_HOME', '')
+    if not r_home:
+        try:
+            import rpy2.situation as _sit
+            r_home = _sit.get_r_home() or ''
+        except Exception:
+            pass
+    if not r_home:
+        return
+    for _sub in (os.path.join(r_home, 'bin', 'x64'),
+                 os.path.join(r_home, 'bin')):
+        if os.path.isdir(_sub) and _sub.lower() not in os.environ.get('PATH', '').lower():
+            os.environ['PATH'] = _sub + os.pathsep + os.environ['PATH']
+
+
 def _poly_fmt_p(p) -> str:
     """Format a p-value for the PROC MIXED-style polynomial contrasts report."""
     try:
@@ -4636,6 +4664,8 @@ def test_week_polynomial_contrasts_r(
         )
         return {'error': 'rpy2 not installed'}
 
+    _ensure_r_path()  # Windows: add R\bin\x64 to PATH before loading any DLLs
+
     import rpy2.robjects as ro
     from rpy2.robjects import pandas2ri
     from rpy2.robjects.packages import importr
@@ -4692,12 +4722,15 @@ def test_week_polynomial_contrasts_r(
     )
 
     combined_df = combined_df.copy()
-    if 'CA%' in combined_df.columns:
+    # Use Cohort label when available — stable between-subjects ID.
+    # For Ramp cohorts CA% varies per week, so using CA% would scatter
+    # ramp animals across multiple spurious group levels.
+    if 'Cohort' in combined_df.columns:
+        combined_df['CA_group'] = combined_df['Cohort']
+    elif 'CA%' in combined_df.columns:
         combined_df['CA_group'] = combined_df['CA%'].apply(
             lambda x: f"{x:.0f}% CA" if pd.notna(x) else 'Unknown'
         )
-    elif 'Cohort' in combined_df.columns:
-        combined_df['CA_group'] = combined_df['Cohort']
     else:
         combined_df['CA_group'] = 'Unknown'
 
@@ -5056,6 +5089,467 @@ def test_week_polynomial_contrasts_r(
     return {
         'measures': results_by_measure,
         'report'  : full_report,
+    }
+
+
+# =============================================================================
+# R-BASED nparLD: NONPARAMETRIC REPEATED MEASURES (F1-LD-F1 DESIGN)
+# =============================================================================
+
+def test_nparLD_lick_analysis(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    measures: Optional[List[str]] = None,
+    time_points: Optional[List[int]] = None,
+    save_path: Optional[Path] = None,
+) -> Dict:
+    """Nonparametric repeated-measures analysis via R package nparLD (F1-LD-F1 design).
+
+    Design: Cohort (between-subjects, 1 factor) × Week (within-subjects/longitudinal, 1 factor).
+    No sex factor. Three dependent variables analysed by default, with BH-FDR correction
+    applied across DVs separately for each effect (Cohort, Week, Cohort × Week).
+
+    The F1-LD-F1 model produces:
+        - ATS  — ANOVA-Type Statistic (F-approximation; recommended for small samples)
+        - WTS  — Wald-Type Statistic  (Chi-square; asymptotic, shown for reference)
+        - RTEs — Relative Treatment Effects per group × time cell (rank-based, 0–1 scale)
+
+    Missing data: nparLD requires balanced data. Subjects missing any time point are
+    automatically excluded and a count of dropped subjects is reported.
+
+    Requires: rpy2  +  R with  install.packages('nparLD')
+
+    Parameters
+    ----------
+    cohort_dfs  : dict
+        Loaded cohort DataFrames (from load_lick_cohorts).
+    measures    : list of str, optional
+        DVs to analyse.  Default: ['Total_Licks', 'Fecal_Count', 'First_5min_Lick_Pct'].
+    time_points : list of int, optional
+        Restrict to these Week indices (0-based).  None = all weeks.
+    save_path   : Path, optional
+        Write the full plain-text report here.
+
+    Returns
+    -------
+    dict
+        'measures'  : per-DV dicts with 'ats', 'wts', 'rte', 'r_text', 'report_section'
+        'fdr_pvals' : {effect: {measure: raw_p}}
+        'report'    : full formatted string
+    """
+    W = 80
+
+    print("\n" + "=" * W)
+    print("R-BASED nparLD: NONPARAMETRIC REPEATED MEASURES  (F1-LD-F1 DESIGN)")
+    print("=" * W)
+
+    if not HAS_RPY2:
+        print(
+            "[ERROR] rpy2 is not installed — cannot run R-based analysis.\n"
+            "  pip install rpy2\n"
+            "  Also requires R with:  install.packages('nparLD')"
+        )
+        return {'error': 'rpy2 not installed'}
+
+    _ensure_r_path()  # Windows: add R\bin\x64 to PATH before loading any DLLs
+
+    import rpy2.robjects as ro
+    from rpy2.robjects import pandas2ri
+    from rpy2.robjects.packages import importr
+    import tempfile, os
+
+    # ── rpy2 pandas converter ────────────────────────────────────────────
+    try:
+        from rpy2.robjects.conversion import localconverter
+        def _to_r(df):
+            with localconverter(ro.default_converter + pandas2ri.converter):
+                return ro.conversion.py2rpy(df)
+    except Exception:
+        pandas2ri.activate()
+        def _to_r(df):
+            return pandas2ri.py2rpy(df)
+
+    # ── default measures ─────────────────────────────────────────────────
+    _DEFAULT_MEASURES = ["Total_Licks", "Fecal_Count", "First_5min_Lick_Pct"]
+    if measures is None:
+        _comb_tmp = combine_lick_cohorts(cohort_dfs)
+        measures = [m for m in _DEFAULT_MEASURES if m in _comb_tmp.columns]
+        if not measures:
+            measures = ["Total_Licks"]
+
+    # ── prepare combined dataset ─────────────────────────────────────────
+    print("\nStep 1: Preparing combined dataset...")
+    combined_df = combine_lick_cohorts(cohort_dfs)
+
+    if 'Week' not in combined_df.columns:
+        combined_df = add_week_column(combined_df)
+
+    if time_points is not None:
+        combined_df = combined_df[combined_df['Week'].isin(time_points)].copy()
+
+    combined_df = combined_df.copy()
+    # Use Cohort label when available — stable between-subjects ID.
+    # For Ramp cohorts CA% varies per week, so using CA% would scatter
+    # ramp animals across multiple spurious group levels.
+    if 'Cohort' in combined_df.columns:
+        combined_df['CA_group'] = combined_df['Cohort']
+    elif 'CA%' in combined_df.columns:
+        combined_df['CA_group'] = combined_df['CA%'].apply(
+            lambda x: f"{x:.0f}% CA" if pd.notna(x) else 'Unknown'
+        )
+    else:
+        combined_df['CA_group'] = 'Unknown'
+
+    weeks     = sorted(combined_df['Week'].dropna().unique())
+    ca_groups = sorted(combined_df['CA_group'].dropna().unique())
+    _n_animals_total = combined_df['ID'].nunique() if 'ID' in combined_df.columns else '?'
+
+    print(f"  Weeks (0-based): {[int(w) for w in weeks]}")
+    print(f"  CA groups      : {ca_groups}")
+    print(f"  Total animals  : {_n_animals_total}")
+
+    # ── verify R nparLD ──────────────────────────────────────────────────
+    print("\nStep 2: Verifying R package (nparLD)...")
+    try:
+        importr('nparLD')
+        print("  [OK] nparLD is available.")
+    except Exception as _e:
+        print(f"[ERROR] nparLD not found: {_e}")
+        print("  Install in R:  install.packages('nparLD')")
+        return {'error': f'nparLD unavailable: {_e}'}
+
+    results_by_measure: Dict = {}
+    report_sections: List[str] = []
+    _ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _ats_pvals: Dict[str, Dict[str, float]] = {}   # {effect: {measure: raw_p}}
+
+    # ── report header ────────────────────────────────────────────────────
+    report_sections += [
+        "=" * W,
+        "  NONPARAMETRIC REPEATED MEASURES ANALYSIS  (R: nparLD)",
+        "  Design: F1-LD-F1  (1 between-subjects × 1 within-subjects factor)",
+        "=" * W,
+        f"  Generated          : {_ts}",
+        f"  Between factor     : Cohort  ({', '.join(ca_groups)})",
+        f"  Within factor      : Week    ({', '.join(str(int(w)) for w in weeks)})",
+        f"  N animals (total)  : {_n_animals_total}",
+        f"  Dependent variables: {', '.join(measures)}",
+        "",
+        "  Test statistics:",
+        "    ATS = ANOVA-Type Statistic (F-approximation, recommended for small n)",
+        "    WTS = Wald-Type Statistic  (Chi-sq, asymptotic, shown for reference)",
+        "    RTE = Relative Treatment Effect (rank-based mean, 0-1 scale)",
+        "",
+        "  Multiple comparison correction:",
+        "    BH-FDR applied across DVs per effect (Cohort, Week, Cohort:Week interaction)",
+        "=" * W,
+        "",
+        "  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10",
+        "",
+    ]
+
+    # ── per-measure loop ─────────────────────────────────────────────────
+    for measure in measures:
+        if measure not in combined_df.columns:
+            print(f"\n  [SKIP] '{measure}' not found in combined data.")
+            continue
+
+        print(f"\nStep 3 [{measure}]: Running nparLD in R...")
+        measure_label = _OMNIBUS_MEASURE_LABELS.get(measure, measure.replace('_', ' '))
+
+        adf = combined_df[['ID', 'Week', 'CA_group', measure]].dropna().copy()
+        adf['Week'] = adf['Week'].astype(int)
+
+        # nparLD requires balanced data: keep only subjects with all time points
+        _week_set = set(adf['Week'].unique())
+        _complete_ids = [
+            sid for sid, grp in adf.groupby('ID')
+            if set(grp['Week'].unique()) >= _week_set
+        ]
+        _n_dropped = adf['ID'].nunique() - len(_complete_ids)
+        if _n_dropped > 0:
+            print(f"  [INFO] Dropped {_n_dropped} subject(s) with incomplete week data for '{measure}'.")
+        adf = adf[adf['ID'].isin(_complete_ids)].copy()
+
+        if adf['ID'].nunique() < 3:
+            print(f"  [WARNING] < 3 subjects with complete data for '{measure}' — skipping.")
+            continue
+
+        n_subj = adf['ID'].nunique()
+        n_obs  = len(adf)
+
+        # Temp file paths
+        _tmpdir = tempfile.gettempdir().replace('\\', '/')
+        _uid    = str(id(adf))[-6:]
+        _ats_fp = f"{_tmpdir}/nparLD_ats_{measure}_{_uid}.csv"
+        _wts_fp = f"{_tmpdir}/nparLD_wts_{measure}_{_uid}.csv"
+        _rte_fp = f"{_tmpdir}/nparLD_rte_{measure}_{_uid}.csv"
+        _txt_fp = f"{_tmpdir}/nparLD_txt_{measure}_{_uid}.txt"
+
+        try:
+            ro.globalenv['r_df']       = _to_r(adf)
+            ro.globalenv['r_measure']  = measure
+            ro.globalenv['r_ats_fp']   = _ats_fp
+            ro.globalenv['r_wts_fp']   = _wts_fp
+            ro.globalenv['r_rte_fp']   = _rte_fp
+            ro.globalenv['r_txt_fp']   = _txt_fp
+
+            ro.r("""
+                suppressPackageStartupMessages(library(nparLD))
+
+                df_r          <- r_df
+                df_r$ID       <- as.factor(df_r$ID)
+                df_r$CA_group <- as.factor(df_r$CA_group)
+                df_r$Week     <- as.integer(df_r$Week)
+
+                result <- f1.ld.f1(
+                    y          = df_r[[r_measure]],
+                    time       = df_r$Week,
+                    group      = df_r$CA_group,
+                    subject    = df_r$ID,
+                    time.name  = "Week",
+                    group.name = "Cohort",
+                    description = FALSE
+                )
+
+                # Full print output
+                full_txt <- capture.output(print(result))
+                writeLines(full_txt, r_txt_fp)
+
+                # ANOVA-type table (ATS)
+                if (!is.null(result$ANOVA.test)) {
+                    ats <- as.data.frame(result$ANOVA.test)
+                    ats$effect <- rownames(ats)
+                    write.csv(ats, r_ats_fp, row.names = FALSE)
+                } else {
+                    write.csv(data.frame(), r_ats_fp, row.names = FALSE)
+                }
+
+                # Wald-type table (WTS)
+                if (!is.null(result$Wald.test)) {
+                    wts <- as.data.frame(result$Wald.test)
+                    wts$effect <- rownames(wts)
+                    write.csv(wts, r_wts_fp, row.names = FALSE)
+                } else {
+                    write.csv(data.frame(), r_wts_fp, row.names = FALSE)
+                }
+
+                # Relative Treatment Effects
+                if (!is.null(result$RTE)) {
+                    rte <- as.data.frame(result$RTE)
+                    write.csv(rte, r_rte_fp, row.names = TRUE)
+                } else {
+                    write.csv(data.frame(), r_rte_fp, row.names = FALSE)
+                }
+            """)
+
+            # Read results back
+            ats_df = pd.read_csv(_ats_fp) if os.path.exists(_ats_fp) else pd.DataFrame()
+            wts_df = pd.read_csv(_wts_fp) if os.path.exists(_wts_fp) else pd.DataFrame()
+            rte_df = pd.read_csv(_rte_fp) if os.path.exists(_rte_fp) else pd.DataFrame()
+            r_text = Path(_txt_fp).read_text(encoding='utf-8') if os.path.exists(_txt_fp) else ''
+
+            for _fp in [_ats_fp, _wts_fp, _rte_fp, _txt_fp]:
+                try:    os.unlink(_fp)
+                except Exception: pass
+
+            # Collect ATS p-values for cross-DV FDR
+            _eff_col = 'effect' if 'effect' in ats_df.columns else None
+            _p_col   = next((c for c in ['p-value', 'p.value', 'Pr(>F)', 'p_value']
+                             if c in ats_df.columns), None)
+            if _eff_col and _p_col and not ats_df.empty:
+                for _, row in ats_df.iterrows():
+                    eff = str(row[_eff_col]).strip()
+                    try:
+                        _ats_pvals.setdefault(eff, {})[measure] = float(row[_p_col])
+                    except (ValueError, TypeError):
+                        pass
+
+            # ── format report section ────────────────────────────────────
+            sec: List[str] = []
+            sec += [
+                "",
+                "═" * W,
+                f"  DEPENDENT VARIABLE:  {measure_label}  ({measure})",
+                "═" * W,
+                "",
+                "  Model Information",
+                f"    {'Model':<40} F1-LD-F1  (nparLD)",
+                f"    {'Between-subjects factor':<40} Cohort  ({', '.join(ca_groups)})",
+                f"    {'Within-subjects factor':<40} Week    ({', '.join(str(int(w)) for w in weeks)})",
+                f"    {'N subjects (complete data)':<40} {n_subj}",
+                f"    {'N observations used':<40} {n_obs}",
+                f"    {'N subjects dropped (incomplete data)':<40} {_n_dropped}",
+                "",
+            ]
+
+            # ATS table
+            if not ats_df.empty:
+                _s_col  = next((c for c in ['Statistic', 'ATS', 'F']
+                                if c in ats_df.columns), None)
+                _d1_col = next((c for c in ['df1', 'df', 'Df'] if c in ats_df.columns), None)
+                _d2_col = next((c for c in ['df2'] if c in ats_df.columns), None)
+                sec += [
+                    "  ANOVA-Type Statistics (ATS)  —  F-approximation, recommended for small n",
+                    f"  {'Effect':<30}  {'ATS':>10}  {'df1':>8}  {'df2':>8}  {'p-value':>10}  Sig",
+                    "  " + "─" * 74,
+                ]
+                for _, row in ats_df.iterrows():
+                    eff  = str(row.get('effect', '')).strip()
+                    stat = float(row[_s_col])  if _s_col  and _s_col  in row.index else np.nan
+                    df1  = float(row[_d1_col]) if _d1_col and _d1_col in row.index else np.nan
+                    df2  = float(row[_d2_col]) if _d2_col and _d2_col in row.index else np.nan
+                    pv   = float(row[_p_col])  if _p_col  and _p_col  in row.index else np.nan
+                    df2_str = f"{df2:>8.2f}" if not np.isnan(df2) else f"{'—':>8}"
+                    sec.append(
+                        f"  {eff:<30}  {stat:>10.4f}  {df1:>8.2f}  {df2_str}  "
+                        f"{_poly_fmt_p(pv):>10}  {_poly_sig_stars(pv)}"
+                    )
+                sec.append("")
+            else:
+                sec += ["  [INFO] ATS table not returned by nparLD.", ""]
+
+            # WTS table
+            if not wts_df.empty:
+                _ws_col  = next((c for c in ['Statistic', 'WTS', 'Chisq']
+                                 if c in wts_df.columns), None)
+                _wd_col  = next((c for c in ['df', 'Df'] if c in wts_df.columns), None)
+                _wp_col  = next((c for c in ['p-value', 'p.value', 'Pr(>Chisq)']
+                                 if c in wts_df.columns), None)
+                sec += [
+                    "  Wald-Type Statistics (WTS)  —  Chi-square, asymptotic (shown for reference)",
+                    f"  {'Effect':<30}  {'WTS (chi-sq)':>12}  {'df':>6}  {'p-value':>10}  Sig",
+                    "  " + "─" * 66,
+                ]
+                for _, row in wts_df.iterrows():
+                    eff  = str(row.get('effect', '')).strip()
+                    stat = float(row[_ws_col]) if _ws_col and _ws_col in row.index else np.nan
+                    df_  = float(row[_wd_col]) if _wd_col and _wd_col in row.index else np.nan
+                    pv   = float(row[_wp_col]) if _wp_col and _wp_col in row.index else np.nan
+                    sec.append(
+                        f"  {eff:<30}  {stat:>12.4f}  {df_:>6.2f}  "
+                        f"{_poly_fmt_p(pv):>10}  {_poly_sig_stars(pv)}"
+                    )
+                sec.append("")
+            else:
+                sec += ["  [INFO] WTS table not returned by nparLD.", ""]
+
+            # RTE table
+            if not rte_df.empty:
+                # Row labels may arrive in 'Unnamed: 0' when read_csv imports the index
+                if 'Unnamed: 0' in rte_df.columns:
+                    rte_df = rte_df.rename(columns={'Unnamed: 0': 'label'})
+                _lbl_col = 'label' if 'label' in rte_df.columns else rte_df.columns[0]
+                _est_col = next((c for c in ['RTE', 'Estimate', 'rte']
+                                 if c in rte_df.columns), None)
+                _se_col  = next((c for c in ['Std.Error', 'SE', 'se']
+                                 if c in rte_df.columns), None)
+                _lo_col  = next((c for c in ['Lower', 'lower', '2.5%']
+                                 if c in rte_df.columns), None)
+                _hi_col  = next((c for c in ['Upper', 'upper', '97.5%']
+                                 if c in rte_df.columns), None)
+                sec += [
+                    "  Relative Treatment Effects (RTEs)  —  rank-based effect sizes (0-1 scale)",
+                    "  Interpretation: RTE near 0.5 = no effect; >0.5 = higher ranks in this cell",
+                    "",
+                    f"  {'Cell (Cohort : Week)':<32}  {'RTE':>8}  {'Std.Err':>8}  "
+                    f"{'95% CI Lower':>13}  {'95% CI Upper':>13}",
+                    "  " + "─" * 80,
+                ]
+                for _, row in rte_df.iterrows():
+                    lbl = str(row.get(_lbl_col, '')).strip()
+                    est = float(row[_est_col]) if _est_col and _est_col in row.index else np.nan
+                    se  = float(row[_se_col])  if _se_col  and _se_col  in row.index else np.nan
+                    lo  = float(row[_lo_col])  if _lo_col  and _lo_col  in row.index else np.nan
+                    hi  = float(row[_hi_col])  if _hi_col  and _hi_col  in row.index else np.nan
+                    sec.append(
+                        f"  {lbl:<32}  {est:>8.4f}  {se:>8.4f}  {lo:>13.4f}  {hi:>13.4f}"
+                    )
+                sec.append("")
+            else:
+                sec += ["  [INFO] RTE table not returned by nparLD.", ""]
+
+            # Full R print output (verbatim for complete model info)
+            if r_text.strip():
+                sec += [
+                    "  Full R Output  (nparLD print — complete model information)",
+                    "  " + "─" * 60,
+                ]
+                for line in r_text.splitlines():
+                    sec.append("  " + line)
+                sec.append("")
+
+            sec += ["  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10", ""]
+            report_sections.extend(sec)
+
+            results_by_measure[measure] = {
+                'ats'           : ats_df,
+                'wts'           : wts_df,
+                'rte'           : rte_df,
+                'r_text'        : r_text,
+                'n_subj'        : n_subj,
+                'n_obs'         : n_obs,
+                'n_dropped'     : _n_dropped,
+                'report_section': '\n'.join(sec),
+            }
+
+        except Exception as _exc:
+            import traceback
+            print(f"  [ERROR] nparLD analysis failed for '{measure}': {_exc}")
+            traceback.print_exc()
+            report_sections.append(
+                f"\n  [ERROR] nparLD analysis failed for '{measure}': {_exc}\n"
+            )
+
+    # ── BH-FDR summary across DVs ────────────────────────────────────────
+    if _ats_pvals and len([m for m in measures if m in results_by_measure]) > 1:
+        _fdr_sec: List[str] = [
+            "",
+            "═" * W,
+            "  BH-FDR CORRECTION ACROSS DEPENDENT VARIABLES",
+            "═" * W,
+            "  ATS p-values corrected using Benjamini-Hochberg FDR.",
+            "  Correction applied separately per effect row",
+            "  (one set of adjusted p-values for Cohort, one for Week, one for interaction).",
+            "",
+        ]
+        for eff, pv_by_m in sorted(_ats_pvals.items()):
+            _ms_with_p = [m for m in measures if m in pv_by_m]
+            if not _ms_with_p:
+                continue
+            _raw_ps = [pv_by_m[m] for m in _ms_with_p]
+            _adj_ps = _bh_fdr(_raw_ps)
+            _fdr_sec += [
+                f"  Effect: {eff}",
+                f"  {'DV':<30}  {'p (raw)':>10}  {'p (BH-adj)':>12}  Sig (adj)",
+                "  " + "─" * 62,
+            ]
+            for m, pr, pa in zip(_ms_with_p, _raw_ps, _adj_ps):
+                ml = _OMNIBUS_MEASURE_LABELS.get(m, m.replace('_', ' '))
+                _fdr_sec.append(
+                    f"  {ml:<30}  {_poly_fmt_p(pr):>10}  {_poly_fmt_p(pa):>12}  "
+                    f"{_poly_sig_stars(pa)}"
+                )
+            _fdr_sec.append("")
+        report_sections.extend(_fdr_sec)
+
+    # ── footer ───────────────────────────────────────────────────────────
+    report_sections += [
+        "=" * W,
+        "  End of nparLD Nonparametric Repeated Measures Report",
+        "=" * W,
+    ]
+
+    full_report = "\n".join(report_sections)
+    print("\n" + full_report)
+
+    if save_path is not None:
+        Path(save_path).write_text(full_report, encoding='utf-8')
+        print(f"\n[OK] Report saved -> {save_path}")
+
+    return {
+        'measures'  : results_by_measure,
+        'fdr_pvals' : _ats_pvals,
+        'report'    : full_report,
     }
 
 
@@ -5522,9 +6016,11 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print(" 14. Fecal count plot     -- Mean fecal count across weeks, one line per cohort (mean \u00b1 SEM)")
     print(" 15. Polynomial contrasts -- R lme4/lmerTest/emmeans: linear/quadratic/cubic trends for Week")
     print("                            (requires rpy2 + R with lme4, lmerTest, emmeans)")
+    print(" 16. nparLD analysis      -- Nonparametric repeated measures via R's nparLD package (F1-LD-F1: Cohort \u00d7 Week)")
+    print("                            (requires rpy2 + R with:  install.packages('nparLD'))")
     print()
 
-    user_input = input("Select option (1-15) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-16) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -6099,6 +6595,30 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 print(f"  [WARNING] Polynomial contrasts failed: {e}")
                 import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 16: nparLD nonparametric repeated measures (Cohort x Week)
+    # ------------------------------------------------------------------ #
+    if user_input == '16':
+        print("\n" + "=" * 80)
+        print("RUNNING: nparLD nonparametric repeated measures (F1-LD-F1: Cohort \u00d7 Week)")
+        print("=" * 80)
+        if not HAS_RPY2:
+            print("[WARNING] rpy2 is not installed \u2014 cannot run R-based analysis.")
+            print("  pip install rpy2")
+            print("  Also requires R with:  install.packages('nparLD')")
+        else:
+            try:
+                nparld_rpt_path = Path(f"0v2_lick_nparLD_{timestamp}.txt")
+                nparld_results = test_nparLD_lick_analysis(
+                    cohorts,
+                    save_path=nparld_rpt_path,
+                )
+                if 'error' not in nparld_results:
+                    print(f"\n[OK] Report saved -> {nparld_rpt_path}")
+            except Exception as e:
+                print(f"  [WARNING] nparLD analysis failed: {e}")
+                import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("0% vs 2% lick analysis complete.")
     print("=" * 80)
@@ -6132,9 +6652,11 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  4. Fecal count plot     -- Mean fecal count across weeks, one line per cohort (mean \u00b1 SEM)")
     print("  5. Week 4 fecal bar     -- Bar plot of average fecal count at Week 4 per cohort (mean \u00b1 SEM + individual points)")
     print("  6. Run all (1-5)")
+    print("  7. nparLD analysis      -- Nonparametric repeated measures via R's nparLD package (F1-LD-F1: Cohort \u00d7 Week)")
+    print("                            (requires rpy2 + R with:  install.packages('nparLD'))")
     print()
 
-    user_input = input("Select option (1-6) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-7) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -6476,6 +6998,30 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 except Exception:
                     pass
 
+    # ------------------------------------------------------------------ #
+    # Option 7: nparLD nonparametric repeated measures (Cohort x Week)
+    # ------------------------------------------------------------------ #
+    if user_input == '7':
+        print("\n" + "=" * 80)
+        print("RUNNING: nparLD nonparametric repeated measures (F1-LD-F1: Cohort \u00d7 Week)")
+        print("=" * 80)
+        if not HAS_RPY2:
+            print("[WARNING] rpy2 is not installed \u2014 cannot run R-based analysis.")
+            print("  pip install rpy2")
+            print("  Also requires R with:  install.packages('nparLD')")
+        else:
+            try:
+                nparld_rpt_path = Path(f"0vramp_lick_nparLD_{timestamp}.txt")
+                nparld_results = test_nparLD_lick_analysis(
+                    cohorts,
+                    save_path=nparld_rpt_path,
+                )
+                if 'error' not in nparld_results:
+                    print(f"\n[OK] Report saved -> {nparld_rpt_path}")
+            except Exception as e:
+                print(f"  [WARNING] nparLD analysis failed: {e}")
+                import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("0% nonramp vs Ramp lick plots complete.")
     print("=" * 80)
@@ -6511,9 +7057,11 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  6. Week 3 lick bar      -- Bar plot of average Total Licks at Week 3 per cohort (mean \u00b1 SEM + individual points)")
     print("  7. Week 3 weight bar    -- Bar plot of average total weight change at Week 3 per cohort (mean \u00b1 SEM + individual points)")
     print("  8. Run all (1-7)")
+    print("  9. nparLD analysis      -- Nonparametric repeated measures via R's nparLD package (F1-LD-F1: Cohort \u00d7 Week)")
+    print("                            (requires rpy2 + R with:  install.packages('nparLD'))")
     print()
 
-    user_input = input("Select option (1-8) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -7082,6 +7630,30 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 except Exception:
                     pass
 
+    # ------------------------------------------------------------------ #
+    # Option 9: nparLD nonparametric repeated measures (Cohort x Week)
+    # ------------------------------------------------------------------ #
+    if user_input == '9':
+        print("\n" + "=" * 80)
+        print("RUNNING: nparLD nonparametric repeated measures (F1-LD-F1: Cohort \u00d7 Week)")
+        print("=" * 80)
+        if not HAS_RPY2:
+            print("[WARNING] rpy2 is not installed \u2014 cannot run R-based analysis.")
+            print("  pip install rpy2")
+            print("  Also requires R with:  install.packages('nparLD')")
+        else:
+            try:
+                nparld_rpt_path = Path(f"2vramp_lick_nparLD_{timestamp}.txt")
+                nparld_results = test_nparLD_lick_analysis(
+                    cohorts,
+                    save_path=nparld_rpt_path,
+                )
+                if 'error' not in nparld_results:
+                    print(f"\n[OK] Report saved -> {nparld_rpt_path}")
+            except Exception as e:
+                print(f"  [WARNING] nparLD analysis failed: {e}")
+                import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("2% nonramp vs Ramp lick plots complete.")
     print("=" * 80)
@@ -7115,9 +7687,11 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  4. Fecal count plot     -- Mean fecal count across weeks, one line per cohort (mean \u00b1 SEM)")
     print("  5. Week 4 fecal bar     -- Bar plot of average fecal count at Week 4 per cohort (mean \u00b1 SEM + individual points)")
     print("  6. Run all (1-5)")
+    print("  7. nparLD analysis      -- Nonparametric repeated measures via R's nparLD package (F1-LD-F1: Cohort \u00d7 Week)")
+    print("                            (requires rpy2 + R with:  install.packages('nparLD'))")
     print()
 
-    user_input = input("Select option (1-6) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-7) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -7456,6 +8030,30 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     _plt.close('all')
                 except Exception:
                     pass
+
+    # ------------------------------------------------------------------ #
+    # Option 7: nparLD nonparametric repeated measures (Cohort x Week)
+    # ------------------------------------------------------------------ #
+    if user_input == '7':
+        print("\n" + "=" * 80)
+        print("RUNNING: nparLD nonparametric repeated measures (F1-LD-F1: Cohort \u00d7 Week)")
+        print("=" * 80)
+        if not HAS_RPY2:
+            print("[WARNING] rpy2 is not installed \u2014 cannot run R-based analysis.")
+            print("  pip install rpy2")
+            print("  Also requires R with:  install.packages('nparLD')")
+        else:
+            try:
+                nparld_rpt_path = Path(f"all3_lick_nparLD_{timestamp}.txt")
+                nparld_results = test_nparLD_lick_analysis(
+                    cohorts,
+                    save_path=nparld_rpt_path,
+                )
+                if 'error' not in nparld_results:
+                    print(f"\n[OK] Report saved -> {nparld_rpt_path}")
+            except Exception as e:
+                print(f"  [WARNING] nparLD analysis failed: {e}")
+                import traceback; traceback.print_exc()
 
     print("\n" + "=" * 80)
     print("0% vs 2% vs Ramp lick plots complete.")
