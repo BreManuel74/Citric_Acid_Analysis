@@ -5240,7 +5240,8 @@ def test_nparLD_lick_analysis(
         "    RTE = Relative Treatment Effect (rank-based mean, 0-1 scale)",
         "",
         "  Multiple comparison correction:",
-        "    BH-FDR applied across DVs per effect (Cohort, Week, Cohort:Week interaction)",
+        "    BH-FDR across DVs per omnibus effect (Cohort, Week, Cohort:Week interaction)",
+        "    Holm-Bonferroni within $pair.comparison pairwise p-values (per test type)",
         "=" * W,
         "",
         "  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10",
@@ -5574,34 +5575,55 @@ def test_nparLD_lick_analysis(
                         _atime_lines.append(stripped)
 
             if _pair_lines:
-                # Parse header + data rows
+                # Parse all pairwise rows first, then apply Holm-Bonferroni per test type
                 # Header: "Pairs  Test  Statistic  df  p-value"
                 # Data:   "1 Cohort0% CA:Cohort2% CA  Cohort  39.575280  1.000000  3.156537e-10"
-                sec += [
-                    "  Pairwise Group Comparisons  (from nparLD $pair.comparison)",
-                    "  ─" + "─" * 77,
-                ]
+                _parsed_pairs = []
                 for ln in _pair_lines:
-                    # Skip pure header line (starts with "Pairs")
                     if ln.lstrip().startswith('Pairs'):
                         continue
-                    # Try to parse: row_num  pairs_label  test  statistic  df  p-value
                     m = _re.match(
                         r'^\d+\s+(.+?)\s+(Cohort|Week|Cohort:Week)\s+([\d.e+\-]+)\s+([\d.e+\-]+)\s+([\d.e+\-]+)\s*$',
                         ln
                     )
                     if m:
-                        pair_lbl  = m.group(1).strip().replace('Cohort', '').replace(':', ' vs ')
-                        test_lbl  = m.group(2)
-                        stat_val  = float(m.group(3))
-                        df_val    = float(m.group(4))
-                        pv_val    = float(m.group(5))
-                        sec.append(
-                            f"  {pair_lbl:<28}  {test_lbl:<12}  ATS={stat_val:>9.4f}  "
-                            f"df={df_val:>6.2f}  {_poly_fmt_p(pv_val):>10}  {_poly_sig_stars(pv_val)}"
-                        )
+                        _parsed_pairs.append({
+                            'pair'  : m.group(1).strip().replace('Cohort', '').replace(':', ' vs '),
+                            'test'  : m.group(2),
+                            'stat'  : float(m.group(3)),
+                            'df'    : float(m.group(4)),
+                            'p_raw' : float(m.group(5)),
+                        })
                     else:
-                        sec.append("  " + ln)
+                        _parsed_pairs.append({'raw_line': ln})
+
+                # Apply Holm-Bonferroni separately within each test type
+                _test_type_indices: Dict[str, list] = {}
+                for _pi, _pr in enumerate(_parsed_pairs):
+                    if 'test' in _pr:
+                        _test_type_indices.setdefault(_pr['test'], []).append(_pi)
+                for _ttype, _tidxs in _test_type_indices.items():
+                    _raw_ps  = [_parsed_pairs[i]['p_raw'] for i in _tidxs]
+                    _adj_ps  = _holm_bonferroni(_raw_ps)
+                    for _ti, _ap in zip(_tidxs, _adj_ps):
+                        _parsed_pairs[_ti]['p_adj'] = _ap
+
+                sec += [
+                    "  Pairwise Group Comparisons  (from nparLD $pair.comparison)",
+                    "  Holm-Bonferroni correction applied within each test type (Cohort / Week / Cohort:Week)",
+                    f"  {'Pair':<28}  {'Test':<12}  {'ATS':>11}  {'df':>6}  {'p (raw)':>10}  {'p (Holm)':>10}  Sig",
+                    "  " + "─" * 92,
+                ]
+                for _pr in _parsed_pairs:
+                    if 'raw_line' in _pr:
+                        sec.append("  " + _pr['raw_line'])
+                    else:
+                        _p_adj = _pr.get('p_adj', _pr['p_raw'])
+                        sec.append(
+                            f"  {_pr['pair']:<28}  {_pr['test']:<12}  ATS={_pr['stat']:>9.4f}  "
+                            f"df={_pr['df']:>6.2f}  {_poly_fmt_p(_pr['p_raw']):>10}  "
+                            f"{_poly_fmt_p(_p_adj):>10}  {_poly_sig_stars(_p_adj)}"
+                        )
                 sec.append("")
 
             if _atime_lines:
@@ -5713,6 +5735,7 @@ def test_negbinom_lick_analysis(
     measures: Optional[List[str]] = None,
     time_points: Optional[List[int]] = None,
     save_path: Optional[Path] = None,
+    posthoc_adjust: str = "holm",
 ) -> Dict:
     """Negative binomial (or Gaussian) mixed-effects model via R glmmTMB.
 
@@ -5730,6 +5753,10 @@ def test_negbinom_lick_analysis(
     Requires: rpy2  +  R with  install.packages(c('glmmTMB','emmeans','car'))
     """
     W = 80
+    # Short label for column headers / report text
+    _adj_label = (posthoc_adjust.upper()
+                  if posthoc_adjust.upper() in ('BH', 'BY', 'FDR')
+                  else posthoc_adjust.capitalize())
 
     print("\n" + "=" * W)
     print("R-BASED NEGATIVE BINOMIAL MIXED MODEL  (glmmTMB, random intercepts)")
@@ -5837,8 +5864,8 @@ def test_negbinom_lick_analysis(
         "    Estimates for NB are log rate ratios; exponentiate for fold-changes.",
         "",
         "  Multiple comparison correction:",
-        "    BH-FDR across DVs per omnibus effect",
-        "    BH adjusted within each pairwise contrast set",
+        "    BH-FDR across DVs per omnibus effect (omnibus table only)",
+        f"    {_adj_label} adjusted within each pairwise contrast set  (emmeans adjust='{posthoc_adjust}')",
         "=" * W,
         "",
         "  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10",
@@ -5885,6 +5912,7 @@ def test_negbinom_lick_analysis(
             ro.globalenv['r_pairs_grp_fp']  = _pairs_grp_fp
             ro.globalenv['r_pairs_wk_fp']   = _pairs_wk_fp
             ro.globalenv['r_txt_fp']        = _txt_fp
+            ro.globalenv['r_posthoc_adjust'] = posthoc_adjust
 
             ro.r("""
                 suppressPackageStartupMessages({
@@ -5972,14 +6000,14 @@ def test_negbinom_lick_analysis(
                 )
                 write.csv(ranef_var, r_ranef_fp, row.names=FALSE)
 
-                # Pairwise: Cohort within each Week (BH adjusted)
+                # Pairwise: Cohort within each Week
                 emm_grp   <- emmeans(model, ~ CA_group | Week)
-                pairs_grp <- as.data.frame(pairs(emm_grp, adjust="BH"))
+                pairs_grp <- as.data.frame(pairs(emm_grp, adjust=r_posthoc_adjust))
                 write.csv(pairs_grp, r_pairs_grp_fp, row.names=FALSE)
 
-                # Pairwise: Week within each Cohort (BH adjusted)
+                # Pairwise: Week within each Cohort
                 emm_wk   <- emmeans(model, ~ Week | CA_group)
-                pairs_wk <- as.data.frame(pairs(emm_wk, adjust="BH"))
+                pairs_wk <- as.data.frame(pairs(emm_wk, adjust=r_posthoc_adjust))
                 write.csv(pairs_wk, r_pairs_wk_fp, row.names=FALSE)
             """)
 
@@ -6139,8 +6167,8 @@ def test_negbinom_lick_analysis(
                                 if c in pairs_grp_df.columns), None)
                 _p_c    = next((c for c in ['p.value'] if c in pairs_grp_df.columns), None)
                 sec += [
-                    "  Pairwise Group Comparisons  (Cohort contrasts within each Week, BH adj.)",
-                    f"  {'Week':<8}  {'Contrast':<42}  {'Estimate':>10}  {'SE':>8}  {'z':>8}  {'p (BH)':>10}  Sig",
+                    f"  Pairwise Group Comparisons  (Cohort contrasts within each Week, {_adj_label} adj.)",
+                    f"  {'Week':<8}  {'Contrast':<42}  {'Estimate':>10}  {'SE':>8}  {'z':>8}  {'p (' + _adj_label + ')':>10}  Sig",
                     "  " + "\u2500" * 96,
                 ]
                 cur_wk = None
@@ -6174,8 +6202,8 @@ def test_negbinom_lick_analysis(
                                  if c in pairs_wk_df.columns), None)
                 _p_c2    = next((c for c in ['p.value'] if c in pairs_wk_df.columns), None)
                 sec += [
-                    "  Pairwise Week Comparisons  (Week contrasts within each Cohort, BH adj.)",
-                    f"  {'Cohort':<22}  {'Contrast':<32}  {'Estimate':>10}  {'SE':>8}  {'z':>8}  {'p (BH)':>10}  Sig",
+                    f"  Pairwise Week Comparisons  (Week contrasts within each Cohort, {_adj_label} adj.)",
+                    f"  {'Cohort':<22}  {'Contrast':<32}  {'Estimate':>10}  {'SE':>8}  {'z':>8}  {'p (' + _adj_label + ')':>10}  Sig",
                     "  " + "\u2500" * 96,
                 ]
                 cur_grp = None
