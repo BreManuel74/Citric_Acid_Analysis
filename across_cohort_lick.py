@@ -5825,8 +5825,9 @@ def test_negbinom_lick_analysis(
         f"  Dependent variables: {', '.join(measures)}",
         "",
         "  Model formula: measure ~ CA_group * Week + (1 | ID)",
-        "  Family: nbinom2(log)  for non-negative integer count data",
-        "          gaussian(id)  for percentage/continuous measures (noted per DV)",
+        "  Family: nbinom2(log)     for non-negative integer count data",
+        "          beta_family(logit) for percentage data (0-100%), rescaled+boundary-squeezed",
+        "          gaussian(id)       for other continuous measures (noted per DV)",
         "",
         "  Unlike nparLD, glmmTMB handles unbalanced data \u2014 all subjects included.",
         "",
@@ -5897,15 +5898,35 @@ def test_negbinom_lick_analysis(
                 df_r$CA_group <- as.factor(df_r$CA_group)
                 df_r$Week     <- as.factor(df_r$Week)
 
-                # Auto-detect family: count data -> nbinom2, else gaussian
+                # Auto-detect family:
+                #   count data (integer, >=0)           -> nbinom2(log)
+                #   percentage data (0-100, non-integer) -> beta_family(logit),
+                #                                          squeezed to (eps, 1-eps)
+                #   other continuous                     -> gaussian(identity)
                 vals     <- df_r[[r_measure]]
                 is_count <- all(vals %% 1 == 0, na.rm=TRUE) && all(vals >= 0, na.rm=TRUE)
+                is_pct   <- !is_count &&
+                            min(vals, na.rm=TRUE) >= 0 &&
+                            max(vals, na.rm=TRUE) <= 100 &&
+                            any(vals > 1, na.rm=TRUE)   # >1 distinguishes 0-100 from 0-1 props
                 if (is_count) {
                     fam      <- nbinom2(link="log")
                     fam_name <- "nbinom2 (log link)"
+                } else if (is_pct) {
+                    # Rescale 0-100 -> 0-1, then squeeze exact boundaries away
+                    # (beta distribution is undefined at exactly 0 or 1)
+                    eps <- 0.001
+                    vals_scaled <- vals / 100
+                    vals_scaled[vals_scaled <= 0] <- eps
+                    vals_scaled[vals_scaled >= 1] <- 1 - eps
+                    df_r[[r_measure]] <- vals_scaled
+                    fam      <- beta_family(link="logit")
+                    fam_name <- paste0("beta_family (logit link) -- percentage rescaled ",
+                                       "to (0,1), boundaries squeezed to (",
+                                       eps, ", ", 1-eps, ")")
                 } else {
                     fam      <- gaussian(link="identity")
-                    fam_name <- "gaussian (identity link) -- not count data"
+                    fam_name <- "gaussian (identity link) -- continuous, unbounded"
                 }
 
                 # Fit the model
@@ -6056,8 +6077,16 @@ def test_negbinom_lick_analysis(
                                  if c in fixef_df_py.columns), None)
                 _p_col_f = next((c for c in ['Pr(>|z|)', 'Pr(>|t|)', 'p.value']
                                  if c in fixef_df_py.columns), None)
+                _is_beta = 'beta_family' in _fam
+                _is_nb   = 'nbinom2' in _fam
+                if _is_beta:
+                    _fixef_note = "log-odds scale; exp(Est)/(1+exp(Est)) = predicted proportion"
+                elif _is_nb:
+                    _fixef_note = "log scale; exp(Estimate) = rate ratio"
+                else:
+                    _fixef_note = "identity scale"
                 sec += [
-                    "  Fixed Effects  (log-scale for NB; exp(Estimate) = rate ratio)",
+                    f"  Fixed Effects  ({_fixef_note})",
                     f"  {'Term':<42}  {'Estimate':>10}  {'SE':>8}  {'z':>8}  {'p-value':>10}  Sig",
                     "  " + "\u2500" * 86,
                 ]
@@ -6233,6 +6262,335 @@ def test_negbinom_lick_analysis(
         'fdr_pvals' : _anova_pvals,
         'report'    : full_report,
     }
+
+
+# =============================================================================
+# DISTRIBUTION DIAGNOSTICS
+# =============================================================================
+
+def diagnose_dv_distributions(
+    cohorts: Dict[str, pd.DataFrame],
+    measures: Optional[List[str]] = None,
+    save_path: Optional[Path] = None,
+) -> Dict:
+    """
+    Use R (base + MASS + optional fitdistrplus) to diagnose the empirical
+    distribution of each DV and confirm the appropriate model family / link.
+
+    For count DVs (integer, non-negative):
+      - Overdispersion index (Var/Mean); >1.2 suggests NB over Poisson.
+      - AIC comparison: Poisson vs NB via MASS::fitdistr (pooled data).
+    For continuous DVs:
+      - Shapiro-Wilk normality test on pooled values.
+      - Boundary check: if values cluster near 0% or 100%, beta regression
+        is preferred over gaussian.
+    Cullen-Frey diagram saved as PNG if fitdistrplus is installed in R.
+
+    Requires: rpy2  +  R with  MASS (ships with base R)
+    Optional: install.packages('fitdistrplus')  for Cullen-Frey plots
+    """
+    W = 80
+    if not HAS_RPY2:
+        print("[ERROR] rpy2 not installed.")
+        return {'error': 'rpy2 not installed'}
+    _ensure_r_path()
+
+    import rpy2.robjects as ro
+    import tempfile, os
+
+    _DEFAULT_MEASURES = ["Total_Licks", "Fecal_Count", "First_5min_Lick_Pct"]
+    if measures is None:
+        _comb_tmp = combine_lick_cohorts(cohorts)
+        measures = [m for m in _DEFAULT_MEASURES if m in _comb_tmp.columns]
+        if not measures:
+            measures = ["Total_Licks"]
+
+    print("\n" + "=" * W)
+    print("DISTRIBUTION DIAGNOSTICS  (R: base + MASS + optional fitdistrplus)")
+    print("=" * W)
+
+    combined_df = combine_lick_cohorts(cohorts)
+    if 'Week' not in combined_df.columns:
+        combined_df = add_week_column(combined_df)
+
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    n_subj  = combined_df['ID'].nunique() if 'ID' in combined_df.columns else len(combined_df)
+
+    report_base = str(save_path).replace('.txt', '') if save_path else \
+                  f"dv_dist_diag_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    results: Dict[str, Any] = {}
+    lines: List[str] = [
+        "=" * W,
+        "  DISTRIBUTION DIAGNOSTICS  (R: base + MASS + optional fitdistrplus)",
+        "  Purpose: verify the model family / link function is appropriate per DV",
+        "=" * W,
+        f"  Generated          : {now_str}",
+        f"  N animals (total)  : {n_subj}",
+        f"  N observations     : {len(combined_df)}",
+        f"  Dependent variables: {', '.join(measures)}",
+        "",
+        "  For count DVs (integer >= 0):",
+        "    Overdispersion index = Var/Mean; >1.2 suggests NB over Poisson.",
+        "    AIC compared: Poisson vs NB via MASS::fitdistr (pooled data).",
+        "  For continuous DVs:",
+        "    Shapiro-Wilk normality test on pooled values.",
+        "    Boundary check: values near 0%/100% -> beta regression preferred.",
+        "  Cullen-Frey diagram: install.packages('fitdistrplus') to enable.",
+        "=" * W,
+    ]
+
+    _tmpdir = tempfile.gettempdir().replace('\\', '/')
+
+    for measure in measures:
+        if measure not in combined_df.columns:
+            lines += ["", f"  [SKIP] '{measure}' not found in combined data.", ""]
+            results[measure] = {'skipped': True}
+            continue
+
+        vals_series = combined_df[measure].dropna()
+        if len(vals_series) < 3:
+            lines += ["", f"  [SKIP] '{measure}': fewer than 3 non-missing values.", ""]
+            results[measure] = {'skipped': True}
+            continue
+
+        print(f"\n  Diagnosing [{measure}]...")
+
+        _uid     = str(abs(hash(measure)))[-6:]
+        _data_fp = f"{_tmpdir}/diag_data_{measure}_{_uid}.csv"
+        _txt_fp  = f"{_tmpdir}/diag_txt_{measure}_{_uid}.txt"
+        _cf_fp   = (report_base + f"__{measure}_cullen_frey.png").replace('\\', '/')
+
+        # Write pooled values to CSV
+        vals_series.reset_index(drop=True).to_frame(name='val').to_csv(
+            _data_fp.replace('/', os.sep), index=False
+        )
+
+        ro.globalenv['r_data_fp']   = _data_fp
+        ro.globalenv['r_txt_fp']    = _txt_fp
+        ro.globalenv['r_cf_fp']     = _cf_fp
+        ro.globalenv['r_meas_name'] = measure
+
+        try:
+            ro.r("""
+                library(MASS)
+
+                vals <- na.omit(as.numeric(read.csv(r_data_fp,
+                                                    stringsAsFactors=FALSE)$val))
+                n        <- length(vals)
+                is_count <- isTRUE(all(vals %% 1 == 0) && all(vals >= 0))
+                mn  <- mean(vals)
+                vr  <- var(vals)
+                sdv <- sd(vals)
+                sk  <- if (!is.na(sdv) && sdv > 0) mean(((vals - mn)/sdv)^3) else NA
+                ku  <- if (!is.na(sdv) && sdv > 0) mean(((vals - mn)/sdv)^4) else NA
+
+                out <- character(0)
+                out <- c(out, paste0("  Integer-valued (count data) : ",
+                                     as.character(is_count)))
+                out <- c(out, paste0("  N non-missing               : ", n))
+                out <- c(out, paste0("  Range                       : [",
+                                     round(min(vals),3), ", ", round(max(vals),3), "]"))
+                out <- c(out, paste0("  Mean                        : ",
+                                     format(mn,  digits=6, nsmall=2)))
+                out <- c(out, paste0("  Variance                    : ",
+                                     format(vr,  digits=6, nsmall=2)))
+                out <- c(out, paste0("  SD                          : ",
+                                     format(sdv, digits=6, nsmall=2)))
+                out <- c(out, paste0("  Skewness                    : ",
+                                     format(sk,  digits=4)))
+                out <- c(out, paste0("  Kurtosis (raw)              : ",
+                                     format(ku,  digits=4),
+                                     "  (>3 = heavier tails than normal)"))
+
+                if (is_count) {
+                    disp_idx <- vr / mn
+                    out <- c(out, "")
+                    out <- c(out, "  --- COUNT DATA CHECKS ---")
+                    out <- c(out, paste0(
+                        "  Overdispersion index (Var/Mean) : ",
+                        format(disp_idx, digits=5)))
+                    if (disp_idx > 2)
+                        out <- c(out, "  Interpretation : STRONGLY overdispersed -- NB much better than Poisson")
+                    else if (disp_idx > 1.2)
+                        out <- c(out, "  Interpretation : overdispersed -- NB likely better than Poisson")
+                    else
+                        out <- c(out, "  Interpretation : near-equidispersed -- Poisson may be adequate")
+
+                    vals_int <- as.integer(vals)
+                    pois_ll  <- sum(dpois(vals_int, lambda=mn, log=TRUE))
+                    pois_aic <- -2 * pois_ll + 2   # 1 parameter
+
+                    out <- c(out, "")
+                    out <- c(out, "  AIC comparison (marginal distribution, pooled data):")
+                    out <- c(out, paste0(
+                        "    Poisson (lambda = mean)     AIC = ",
+                        format(pois_aic, digits=9, nsmall=2)))
+
+                    fit_nb <- tryCatch(
+                        MASS::fitdistr(vals_int, "negative binomial"),
+                        error = function(e) NULL)
+                    if (!is.null(fit_nb)) {
+                        nb_aic <- -2 * fit_nb$loglik + 2 * 2   # 2 params
+                        delta  <- pois_aic - nb_aic
+                        out <- c(out, paste0(
+                            "    NB (MASS::fitdistr)         AIC = ",
+                            format(nb_aic, digits=9, nsmall=2)))
+                        out <- c(out, paste0(
+                            "    Delta AIC (Poisson - NB)        = ",
+                            format(delta, digits=5)))
+                        out <- c(out, paste0(
+                            "    NB theta (size parameter)       = ",
+                            format(fit_nb$estimate[["size"]], digits=5)))
+                        if (delta > 10)
+                            rec <- "nbinom2 (log link)  [NB strongly preferred, DeltaAIC > 10]"
+                        else if (delta > 2)
+                            rec <- "nbinom2 (log link)  [NB preferred, DeltaAIC > 2]"
+                        else
+                            rec <- "poisson or nbinom2  [similar fit, DeltaAIC <= 2]"
+                    } else {
+                        out <- c(out, "    NB fit did not converge.")
+                        rec <- "nbinom2 (log link)  [NB fit failed; use nbinom2 as safer default]"
+                    }
+                    out <- c(out, "")
+                    out <- c(out, paste0("  RECOMMENDATION : ", rec))
+
+                } else {
+                    out <- c(out, "")
+                    out <- c(out, "  --- CONTINUOUS DATA CHECKS ---")
+                    is_pct100 <- all(vals >= 0) && all(vals <= 100)
+                    is_pct1   <- !is_pct100 && all(vals >= 0) && all(vals <= 1)
+
+                    if (is_pct100) {
+                        out <- c(out, "  Scale : percentage (0 - 100%)")
+                        prop_vals <- vals / 100
+                    } else if (is_pct1) {
+                        out <- c(out, "  Scale : proportion (0 - 1)")
+                        prop_vals <- vals
+                    } else {
+                        out <- c(out, "  Scale : unbounded continuous")
+                        prop_vals <- NULL
+                    }
+
+                    near_bdy_pct <- 0
+                    if (!is.null(prop_vals)) {
+                        p_near0 <- mean(prop_vals < 0.05) * 100
+                        p_near1 <- mean(prop_vals > 0.95) * 100
+                        near_bdy_pct <- p_near0 + p_near1
+                        out <- c(out, paste0(
+                            "  Values near 0 boundary (<5%)  : ",
+                            format(p_near0, digits=3), "%"))
+                        out <- c(out, paste0(
+                            "  Values near 1 boundary (>95%) : ",
+                            format(p_near1, digits=3), "%"))
+                        if (near_bdy_pct > 15)
+                            out <- c(out, "  Interpretation : boundary piling -- beta regression strongly recommended")
+                        else if (near_bdy_pct > 5)
+                            out <- c(out, "  Interpretation : some boundary values -- beta regression preferred")
+                        else
+                            out <- c(out, "  Interpretation : few boundary values -- gaussian may be adequate")
+                    }
+
+                    sw <- NULL
+                    if (n >= 3 && n <= 5000)
+                        sw <- tryCatch(shapiro.test(vals), error = function(e) NULL)
+                    out <- c(out, "")
+                    out <- c(out, "  Shapiro-Wilk normality test:")
+                    if (!is.null(sw)) {
+                        out <- c(out, paste0(
+                            "    W = ", format(sw$statistic, digits=6),
+                            "   p = ", format(sw$p.value, digits=4)))
+                        if (sw$p.value < 0.001)
+                            out <- c(out, "    Interpretation : strongly non-normal")
+                        else if (sw$p.value < 0.05)
+                            out <- c(out, "    Interpretation : significantly non-normal (p < .05)")
+                        else
+                            out <- c(out, "    Interpretation : no significant departure from normality detected")
+                    } else {
+                        out <- c(out, "    [not run: n outside valid range 3-5000]")
+                    }
+
+                    sw_p <- if (!is.null(sw)) sw$p.value else 1.0
+                    if (!is.null(prop_vals) && near_bdy_pct > 5) {
+                        rec <- "beta regression  (glmmTMB beta_family() or betareg package)"
+                    } else if (is.null(prop_vals) && sw_p < 0.05) {
+                        rec <- "transformation or nonparametric; gaussian may be suboptimal"
+                    } else {
+                        rec <- "gaussian (identity link)  [current choice is adequate]"
+                    }
+                    out <- c(out, "")
+                    out <- c(out, paste0("  RECOMMENDATION : ", rec))
+                }
+
+                # Cullen-Frey diagram (requires fitdistrplus)
+                out <- c(out, "")
+                has_fd <- requireNamespace("fitdistrplus", quietly = TRUE)
+                cf_status <- if (has_fd) {
+                    tryCatch({
+                        grDevices::png(r_cf_fp, width=800, height=600, res=100)
+                        fitdistrplus::descdist(vals, discrete=is_count, boot=500)
+                        graphics::title(main=paste0("Cullen-Frey: ", r_meas_name,
+                                                    "  (pooled across all cohorts/weeks)"))
+                        grDevices::dev.off()
+                        paste0("  Cullen-Frey plot saved : ", r_cf_fp)
+                    }, error = function(e) {
+                        tryCatch(grDevices::dev.off(), error = function(e2) NULL)
+                        paste0("  [Cullen-Frey failed: ", conditionMessage(e), "]")
+                    })
+                } else {
+                    paste0("  [fitdistrplus not installed; ",
+                           "install with: install.packages('fitdistrplus')]")
+                }
+                out <- c(out, cf_status)
+
+                writeLines(out, r_txt_fp)
+            """)
+
+            txt_content = (
+                Path(_txt_fp.replace('/', os.sep)).read_text(encoding='utf-8')
+                if Path(_txt_fp.replace('/', os.sep)).exists()
+                else "[R output file not found]"
+            )
+            results[measure] = {'text': txt_content}
+
+        except Exception as e:
+            txt_content = f"  [R error: {e}]"
+            results[measure] = {'error': str(e)}
+
+        finally:
+            for fp in [_data_fp, _txt_fp]:
+                try:
+                    real_fp = fp.replace('/', os.sep)
+                    if os.path.exists(real_fp):
+                        os.unlink(real_fp)
+                except Exception:
+                    pass
+
+        measure_label = measure.replace('_', ' ')
+        lines += [
+            "",
+            "\u2550" * W,
+            f"  DEPENDENT VARIABLE:  {measure_label}  ({measure})",
+            "\u2550" * W,
+            "",
+            txt_content,
+        ]
+
+    lines += [
+        "",
+        "=" * W,
+        "  End of Distribution Diagnostics",
+        "=" * W,
+    ]
+
+    full_report = "\n".join(lines)
+    print("\n" + full_report)
+
+    if save_path is not None:
+        Path(save_path).write_text(full_report, encoding='utf-8')
+        print(f"\n[OK] Report saved -> {save_path}")
+
+    return {'measures': results, 'report': full_report}
 
 
 # =============================================================================
@@ -6702,9 +7060,11 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("                            (requires rpy2 + R with:  install.packages('nparLD'))")
     print(" 17. Negative binomial    -- Neg. binomial GLMM via R's glmmTMB (Cohort \u00d7 Week + random intercepts)")
     print("                            (requires rpy2 + R with:  install.packages(c('glmmTMB','emmeans','car')))")
+    print(" 18. Distribution check   -- Confirm DV distributions (Var/Mean, Poisson vs NB AIC, Shapiro-Wilk)")
+    print("                            (requires rpy2 + R with:  MASS [standard] + optional fitdistrplus)")
     print()
 
-    user_input = input("Select option (1-17) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-18) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -7327,6 +7687,29 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 print(f"  [WARNING] Negative binomial analysis failed: {e}")
                 import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 18: Distribution diagnostics
+    # ------------------------------------------------------------------ #
+    if user_input == '18':
+        print("\n" + "=" * 80)
+        print("RUNNING: Distribution diagnostics (Var/Mean, Poisson vs NB AIC, Shapiro-Wilk)")
+        print("=" * 80)
+        if not HAS_RPY2:
+            print("[WARNING] rpy2 is not installed \u2014 cannot run R-based analysis.")
+            print("  pip install rpy2")
+        else:
+            try:
+                diag_rpt_path = Path(f"0v2_dv_dist_diag_{timestamp}.txt")
+                diag_results = diagnose_dv_distributions(
+                    cohorts,
+                    save_path=diag_rpt_path,
+                )
+                if 'error' not in diag_results:
+                    print(f"\n[OK] Report saved -> {diag_rpt_path}")
+            except Exception as e:
+                print(f"  [WARNING] Distribution diagnostics failed: {e}")
+                import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("0% vs 2% lick analysis complete.")
     print("=" * 80)
@@ -7364,9 +7747,11 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("                            (requires rpy2 + R with:  install.packages('nparLD'))")
     print("  8. Negative binomial    -- Neg. binomial GLMM via R's glmmTMB (Cohort \u00d7 Week + random intercepts)")
     print("                            (requires rpy2 + R with:  install.packages(c('glmmTMB','emmeans','car')))")
+    print("  9. Distribution check   -- Confirm DV distributions (Var/Mean, Poisson vs NB AIC, Shapiro-Wilk)")
+    print("                            (requires rpy2 + R with:  MASS [standard] + optional fitdistrplus)")
     print()
 
-    user_input = input("Select option (1-8) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -7756,6 +8141,29 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 print(f"  [WARNING] Negative binomial analysis failed: {e}")
                 import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 9: Distribution diagnostics
+    # ------------------------------------------------------------------ #
+    if user_input == '9':
+        print("\n" + "=" * 80)
+        print("RUNNING: Distribution diagnostics (Var/Mean, Poisson vs NB AIC, Shapiro-Wilk)")
+        print("=" * 80)
+        if not HAS_RPY2:
+            print("[WARNING] rpy2 is not installed \u2014 cannot run R-based analysis.")
+            print("  pip install rpy2")
+        else:
+            try:
+                diag_rpt_path = Path(f"0vramp_dv_dist_diag_{timestamp}.txt")
+                diag_results = diagnose_dv_distributions(
+                    cohorts,
+                    save_path=diag_rpt_path,
+                )
+                if 'error' not in diag_results:
+                    print(f"\n[OK] Report saved -> {diag_rpt_path}")
+            except Exception as e:
+                print(f"  [WARNING] Distribution diagnostics failed: {e}")
+                import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("0% nonramp vs Ramp lick plots complete.")
     print("=" * 80)
@@ -7795,9 +8203,11 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("                            (requires rpy2 + R with:  install.packages('nparLD'))")
     print(" 10. Negative binomial    -- Neg. binomial GLMM via R's glmmTMB (Cohort \u00d7 Week + random intercepts)")
     print("                            (requires rpy2 + R with:  install.packages(c('glmmTMB','emmeans','car')))")
+    print(" 11. Distribution check   -- Confirm DV distributions (Var/Mean, Poisson vs NB AIC, Shapiro-Wilk)")
+    print("                            (requires rpy2 + R with:  MASS [standard] + optional fitdistrplus)")
     print()
 
-    user_input = input("Select option (1-10) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-11) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -8414,6 +8824,29 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 print(f"  [WARNING] Negative binomial analysis failed: {e}")
                 import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 11: Distribution diagnostics
+    # ------------------------------------------------------------------ #
+    if user_input == '11':
+        print("\n" + "=" * 80)
+        print("RUNNING: Distribution diagnostics (Var/Mean, Poisson vs NB AIC, Shapiro-Wilk)")
+        print("=" * 80)
+        if not HAS_RPY2:
+            print("[WARNING] rpy2 is not installed \u2014 cannot run R-based analysis.")
+            print("  pip install rpy2")
+        else:
+            try:
+                diag_rpt_path = Path(f"2vramp_dv_dist_diag_{timestamp}.txt")
+                diag_results = diagnose_dv_distributions(
+                    cohorts,
+                    save_path=diag_rpt_path,
+                )
+                if 'error' not in diag_results:
+                    print(f"\n[OK] Report saved -> {diag_rpt_path}")
+            except Exception as e:
+                print(f"  [WARNING] Distribution diagnostics failed: {e}")
+                import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("2% nonramp vs Ramp lick plots complete.")
     print("=" * 80)
@@ -8451,9 +8884,11 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("                            (requires rpy2 + R with:  install.packages('nparLD'))")
     print("  8. Negative binomial    -- Neg. binomial GLMM via R's glmmTMB (Cohort \u00d7 Week + random intercepts)")
     print("                            (requires rpy2 + R with:  install.packages(c('glmmTMB','emmeans','car')))")
+    print("  9. Distribution check   -- Confirm DV distributions (Var/Mean, Poisson vs NB AIC, Shapiro-Wilk)")
+    print("                            (requires rpy2 + R with:  MASS [standard] + optional fitdistrplus)")
     print()
 
-    user_input = input("Select option (1-8) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -8839,6 +9274,29 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     print(f"\n[OK] Report saved -> {nb_rpt_path}")
             except Exception as e:
                 print(f"  [WARNING] Negative binomial analysis failed: {e}")
+                import traceback; traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 9: Distribution diagnostics
+    # ------------------------------------------------------------------ #
+    if user_input == '9':
+        print("\n" + "=" * 80)
+        print("RUNNING: Distribution diagnostics (Var/Mean, Poisson vs NB AIC, Shapiro-Wilk)")
+        print("=" * 80)
+        if not HAS_RPY2:
+            print("[WARNING] rpy2 is not installed \u2014 cannot run R-based analysis.")
+            print("  pip install rpy2")
+        else:
+            try:
+                diag_rpt_path = Path(f"all3_dv_dist_diag_{timestamp}.txt")
+                diag_results = diagnose_dv_distributions(
+                    cohorts,
+                    save_path=diag_rpt_path,
+                )
+                if 'error' not in diag_results:
+                    print(f"\n[OK] Report saved -> {diag_rpt_path}")
+            except Exception as e:
+                print(f"  [WARNING] Distribution diagnostics failed: {e}")
                 import traceback; traceback.print_exc()
 
     print("\n" + "=" * 80)
