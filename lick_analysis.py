@@ -6705,59 +6705,120 @@ def _plot_rmcorr_licks_vs_weight_impl(
         print("      Falling back to Spearman scatter (install R package 'rmcorr' for full output).")
 
     # ── matplotlib figure ─────────────────────────────────────────────────
-    fig, ax = plt.subplots()
     _ms = plt.rcParams.get('lines.markersize', 6)
 
-    # scatter points
-    for _, row in _df.iterrows():
-        ax.scatter(row['weight_pct'], row['licks'],
-                   color=animal_color[row['mouse_id']], marker='o',
-                   s=_ms ** 2, edgecolors='black', linewidths=0.5,
-                   alpha=0.8, zorder=4)
-
+    # ── pre-compute annotation text and line data ─────────────────────────
     if _rmcorr_ok:
-        # draw single rmcorr line through the grand mean
-        if not np.isnan(_slope):
-            x_min = _df['weight_pct'].min()
-            x_max = _df['weight_pct'].max()
-            x_pad = (x_max - x_min) * 0.05
-            xs = np.linspace(x_min - x_pad, x_max + x_pad, 200)
-            _grand_intercept = (_df['licks'].mean()
-                                - _slope * _df['weight_pct'].mean())
-            ax.plot(xs, _grand_intercept + _slope * xs,
-                    color='black', linewidth=1.2, zorder=4)
-
         _p_str = f"p = {_p_rm:.4f}" if _p_rm >= 0.0001 else "p < 0.0001"
         _ann = (f"$r_{{rm}}$ = {_r_rm:.3f}\n"
                 f"{_p_str}\n"
                 f"95% CI [{_ci_lo:.3f}, {_ci_hi:.3f}]\n"
                 f"n = {n_animals} mice")
+        if not np.isnan(_slope):
+            _x_lo = _df['weight_pct'].min()
+            _x_hi = _df['weight_pct'].max()
+            _x_pad_w = (_x_hi - _x_lo) * 0.05
+            _line_xs = np.linspace(_x_lo - _x_pad_w, _x_hi + _x_pad_w, 200)
+            _grand_intercept = _df['licks'].mean() - _slope * _df['weight_pct'].mean()
+            _line_ys = _grand_intercept + _slope * _line_xs
+        else:
+            _line_xs = _line_ys = None
+        _line_kw = dict(color='black', linewidth=1.2, zorder=4)
     else:
-        # fallback: Spearman trend line
         _valid = _df[['weight_pct', 'licks']].dropna()
         if len(_valid) >= 3:
             _rho, _pv = stats.spearmanr(_valid['weight_pct'], _valid['licks'])
             _sl, _ic, *_ = stats.linregress(_valid['weight_pct'], _valid['licks'])
-            xs = np.linspace(_valid['weight_pct'].min(), _valid['weight_pct'].max(), 200)
-            ax.plot(xs, _sl * xs + _ic, color='dimgray', linestyle='--', zorder=2)
+            _line_xs = np.linspace(_valid['weight_pct'].min(), _valid['weight_pct'].max(), 200)
+            _line_ys = _sl * _line_xs + _ic
             _p_str = f"p = {_pv:.4f}" if _pv >= 0.0001 else "p < 0.0001"
             _ann = (f"Spearman \u03c1 = {_rho:.3f}\n{_p_str}\nn = {n_animals} mice\n"
                     f"(rmcorr unavailable)")
         else:
+            _line_xs = _line_ys = None
             _ann = f"n = {n_animals} mice\n(rmcorr unavailable)"
+        _line_kw = dict(color='dimgray', linestyle='--', zorder=2)
 
-    ax.text(0.03, 0.97, _ann,
-            transform=ax.transAxes, va='top', ha='left', fontsize=7.5,
-            bbox=dict(boxstyle='round', facecolor='white', alpha=0.75, edgecolor='gray'))
+    def _draw_scatter_and_line(_axx):
+        for _, _row in _df.iterrows():
+            _axx.scatter(_row['weight_pct'], _row['licks'],
+                         color=animal_color[_row['mouse_id']], marker='o',
+                         s=_ms ** 2, edgecolors='black', linewidths=0.5,
+                         alpha=0.8, zorder=4)
+        if _line_xs is not None:
+            _axx.plot(_line_xs, _line_ys, **_line_kw)
 
-    ax.set_xlabel('Total Weight Change (%)', weight='bold')
-    ax.set_ylabel('Total Lick Count', weight='bold')
-    ax.set_title(f'Repeated-Measures Correlation: Licks ~ Weight Change\n({design_label})',
-                 weight='bold')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.tick_params(direction='in', which='both', length=5)
-    plt.tight_layout()
+    # ── decide whether a y-axis break is needed ───────────────────────────
+    _y_vals     = _df['licks'].dropna().values
+    _y_min_data = float(np.nanmin(_y_vals)) if len(_y_vals) else 0.0
+    _y_max_data = float(np.nanmax(_y_vals)) if len(_y_vals) else 1.0
+    _y_range    = _y_max_data - _y_min_data + 1e-9
+    # Break if the gap between 0 and lowest data point is > 25 % of the spread
+    _use_break  = (_y_min_data > 0) and (_y_min_data > 0.25 * _y_range)
+
+    if _use_break:
+        # ── single axis with two angled dashes on the y-axis spine ───────
+        _data_lo = _y_min_data - _y_range * 0.06
+        _data_hi = _y_max_data + _y_range * 0.10
+
+        fig, ax = plt.subplots()
+        _draw_scatter_and_line(ax)
+        ax.set_ylim(_data_lo, _data_hi)
+
+        # two angled dashed slashes ( // ) on the y-axis only
+        import matplotlib.transforms as _mtt
+        _trans = _mtt.blended_transform_factory(ax.transAxes, ax.transData)
+        _h    = _y_range * 0.016   # half-height of each slash in data units
+        _gap  = _y_range * 0.030   # vertical gap between the two slashes
+        _bk_y = _data_lo + _gap    # mid-point of the break-mark pair
+        _w    = 0.038              # half-width of each slash in axes units
+        _bk_kw = dict(color='k', linewidth=0.9, linestyle='--',
+                      clip_on=False, zorder=5)
+        # lower slash
+        ax.plot([-_w, _w],
+                [_bk_y - _gap / 2 - _h, _bk_y - _gap / 2 + _h],
+                transform=_trans, **_bk_kw)
+        # upper slash (right next to lower)
+        ax.plot([-_w, _w],
+                [_bk_y + _gap / 2 - _h, _bk_y + _gap / 2 + _h],
+                transform=_trans, **_bk_kw)
+
+        # "0" label just below the break marks
+        ax.text(-0.07, _data_lo - _y_range * 0.005, '0',
+                transform=_trans, ha='center', va='top',
+                fontsize=plt.rcParams.get('ytick.labelsize', 8))
+
+        ax.text(0.03, 0.97, _ann,
+                transform=ax.transAxes, va='top', ha='left', fontsize=7.5,
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.75,
+                          edgecolor='gray'))
+        ax.set_xlabel('Total Weight Change (%)', weight='bold')
+        ax.set_ylabel('Total Lick Count', weight='bold')
+        ax.set_title(
+            f'Repeated-Measures Correlation: Licks ~ Weight Change\n({design_label})',
+            weight='bold')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.tick_params(direction='in', which='both', length=5)
+        plt.tight_layout()
+
+    else:
+        # ── single axis, y starts at 0 ────────────────────────────────────
+        fig, ax = plt.subplots()
+        _draw_scatter_and_line(ax)
+        ax.set_ylim(bottom=0)
+        ax.text(0.03, 0.97, _ann,
+                transform=ax.transAxes, va='top', ha='left', fontsize=7.5,
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.75, edgecolor='gray'))
+        ax.set_xlabel('Total Weight Change (%)', weight='bold')
+        ax.set_ylabel('Total Lick Count', weight='bold')
+        ax.set_title(
+            f'Repeated-Measures Correlation: Licks ~ Weight Change\n({design_label})',
+            weight='bold')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.tick_params(direction='in', which='both', length=5)
+        plt.tight_layout()
 
     # ── save ──────────────────────────────────────────────────────────────
     if save_path is not None:

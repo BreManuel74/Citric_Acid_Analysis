@@ -1136,6 +1136,7 @@ def plot_single_sensor_deviation_with_events(
 	left, right = ax.get_xlim()
 	ax.set_xlim(left=0, right=right)
 	ax.margins(x=0)
+	ax.set_ylim(bottom=0)
 	for side in ("top", "right"):
 		ax.spines[side].set_visible(False)
 	ax.tick_params(direction="in", which="both", length=5)
@@ -1204,8 +1205,12 @@ def plot_deviations_with_events_grid(
 	axes = axes.reshape(nrows, ncols)
 
 	# Determine common y-limits (either provided or computed from the deviation columns)
+	# Always start at 0; use top of computed range as the upper bound
 	if y_limits is None:
-		y_limits = compute_y_limits(df, deviation_cols)
+		_, _auto_top = compute_y_limits(df, deviation_cols)
+		y_limits = (0, _auto_top)
+	else:
+		y_limits = (0, y_limits[1])
 
 	# Plot each deviation in its subplot with events and threshold highlighted
 	for i, col in enumerate(sensor_cols):
