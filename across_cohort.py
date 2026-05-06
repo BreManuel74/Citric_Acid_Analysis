@@ -82,7 +82,7 @@ try:
         "figure.titlesize": 10,
         "lines.linewidth": 0.9,
         "lines.markersize": 3,
-        "figure.figsize": (4, 2.5),
+        "figure.figsize": (3, 2.5),
     })
 except ImportError:
     HAS_MATPLOTLIB = False
@@ -10641,7 +10641,14 @@ def _detect_comparison_type(cohorts: Dict[str, pd.DataFrame]) -> str:
     has_two   = any('2%' in l and 'ramp' not in l for l in labels_lower)
     has_ramp  = any('ramp' in l for l in labels_lower)
 
+    _TWOWK_KW = ('2wk', '2_wk', '2week', '2 wk', '2-wk', '2-week', '2 week')
+    # A "2wk" label may not contain the word "ramp" (e.g. label == '2wk')
+    has_twowk = any(any(kw in l for kw in _TWOWK_KW) for l in labels_lower)
+
     n = len(cohorts)
+    # rampramp: one regular ramp label and one 2-week-ramp label (no CA% nonramp cohorts)
+    if n == 2 and has_twowk and (has_ramp or has_twowk) and not has_zero and not has_two:
+        return 'rampramp'
     if n == 3 and has_zero and has_two and has_ramp:
         return 'all3'
     if n == 2 and has_zero and has_two and not has_ramp:
@@ -12536,6 +12543,331 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("=" * 80)
 
 
+def _run_rampramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
+    """
+    Interactive analysis menu for the Ramp vs 2-Week Ramp comparison.
+    Compares Daily Change at the CA% transition days:
+      - Ramp cohort   : Day 8 (0%->1%) and Day 15 (1%->2%)
+      - 2-Week Ramp   : Day 4 (0%->1%) and Day  7 (1%->2%)
+    Plots: bar (mean +/- SEM) + individual animal points per cohort.
+    Stats: Mann-Whitney U, Holm-Bonferroni corrected across 2 comparisons.
+    """
+    from datetime import datetime
+    import numpy as _np
+    from scipy import stats as _stats
+
+    _TWOWK_KW = ('2wk', '2_wk', '2week', '2 wk', '2-wk', '2-week', '2 week')
+
+    # Identify which label is the regular ramp and which is the 2wk ramp
+    twowk_label = next(
+        (lbl for lbl in cohorts if any(kw in lbl.lower() for kw in _TWOWK_KW)),
+        None,
+    )
+    ramp_label = next(
+        (lbl for lbl in cohorts if lbl != twowk_label),
+        None,
+    )
+    if twowk_label is None or ramp_label is None:
+        labels = list(cohorts.keys())
+        ramp_label, twowk_label = labels[0], labels[1]
+
+    # CA% transition days for each cohort (Day 1 = first measurement day)
+    TRANSITION_DAYS = {
+        ramp_label:  {'0%->1%': 8,  '1%->2%': 15},
+        twowk_label: {'0%->1%': 4,  '1%->2%': 7},
+    }
+    TRANSITIONS = ['0%->1%', '1%->2%']
+
+    RAMP_COLOR  = _COLOR_RAMP   # "#2da048" green
+    TWOWK_COLOR = _COLOR_OTHER  # "#7f3f98" purple
+
+    COLOR_MAP = {
+        ramp_label:  {'face': RAMP_COLOR,  'edge': '#155224'},
+        twowk_label: {'face': TWOWK_COLOR, 'edge': '#3f1f6e'},
+    }
+
+    print("\n" + "=" * 80)
+    print("RAMP vs 2-WEEK RAMP \u2014 ANALYSIS MENU")
+    print("=" * 80)
+    print(f"\n  Ramp cohort   : {ramp_label}")
+    print(f"  2-Week Ramp   : {twowk_label}")
+    print(f"\n  Transition days (Ramp)       : Day 8 (0%\u21921%), Day 15 (1%\u21922%)")
+    print(f"  Transition days (2-Wk Ramp)  : Day 4 (0%\u21921%), Day  7 (1%\u21922%)")
+    print()
+    print("  1. Transition-day Daily Change bar plots + Mann-Whitney U (Holm-Bonferroni)")
+    print()
+
+    user_input = input("Select option (1) or 'n' to skip: ").strip()
+    if user_input.lower() == 'n':
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    plot_dir = Path(f"rampramp_plots_{timestamp}")
+
+    if user_input == '1':
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available \u2014 cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Transition-day Daily Change bar plots")
+            print("=" * 80)
+            try:
+                # --- Per-animal values at each transition day per cohort ---
+                # per_cohort_data[transition][label] = 1-D array of per-animal means
+                per_cohort_data = {t: {} for t in TRANSITIONS}
+
+                for label, df in cohorts.items():
+                    cdf = clean_cohort(df.copy())
+                    if 'Date' in cdf.columns:
+                        cdf['Date'] = pd.to_datetime(cdf['Date'], errors='coerce')
+                    if 'Day' not in cdf.columns:
+                        cdf = cdf.sort_values(['ID', 'Date']).reset_index(drop=True)
+                        first_dates = cdf.groupby('ID')['Date'].transform('min')
+                        # Both cohorts in this menu are ramp-type (no Day 0 baseline);
+                        # always offset by 1 so the first measurement is Day 1.
+                        cdf['Day'] = (cdf['Date'] - first_dates).dt.days + 1
+                    cdf = cdf[cdf['Day'] >= 1].copy()
+
+                    if 'Daily Change' not in cdf.columns:
+                        print(f"  [WARNING] 'Daily Change' not in {label} \u2014 skipping")
+                        for t in TRANSITIONS:
+                            per_cohort_data[t][label] = _np.array([])
+                        continue
+
+                    for transition, tday in TRANSITION_DAYS[label].items():
+                        day_df = cdf[cdf['Day'] == tday]
+                        if day_df.empty:
+                            print(
+                                f"  [WARNING] No data for {label} Day {tday} "
+                                f"({transition}) \u2014 skipping"
+                            )
+                            per_cohort_data[transition][label] = _np.array([])
+                            continue
+                        animal_vals = day_df.groupby('ID')['Daily Change'].mean().values
+                        per_cohort_data[transition][label] = animal_vals
+
+                # --- Helper functions ---
+                def _fmt_p(p):
+                    if _np.isnan(p):
+                        return 'N/A'
+                    if p < 0.001:
+                        return '< 0.001'
+                    return f'{p:.4f}'
+
+                def _sig(p):
+                    if _np.isnan(p):
+                        return ''
+                    if p < 0.001:
+                        return '***'
+                    if p < 0.01:
+                        return '**'
+                    if p < 0.05:
+                        return '*'
+                    return 'ns'
+
+                # --- Pre-compute MWU + Holm-Bonferroni before drawing ---
+                stat_results = []
+                for transition in TRANSITIONS:
+                    ramp_vals  = per_cohort_data[transition].get(ramp_label,  _np.array([]))
+                    twowk_vals = per_cohort_data[transition].get(twowk_label, _np.array([]))
+                    sr = {
+                        'transition':  transition,
+                        'ramp_label':  ramp_label,
+                        'twowk_label': twowk_label,
+                        'ramp_day':    TRANSITION_DAYS[ramp_label][transition],
+                        'twowk_day':   TRANSITION_DAYS[twowk_label][transition],
+                        'ramp_n':      len(ramp_vals),
+                        'twowk_n':     len(twowk_vals),
+                        'ramp_mean':   float(_np.mean(ramp_vals))  if len(ramp_vals)  > 0 else float('nan'),
+                        'ramp_sem':    float(_np.std(ramp_vals,  ddof=1) / _np.sqrt(len(ramp_vals)))  if len(ramp_vals)  > 1 else float('nan'),
+                        'twowk_mean':  float(_np.mean(twowk_vals)) if len(twowk_vals) > 0 else float('nan'),
+                        'twowk_sem':   float(_np.std(twowk_vals, ddof=1) / _np.sqrt(len(twowk_vals))) if len(twowk_vals) > 1 else float('nan'),
+                        'ramp_vals':   ramp_vals,
+                        'twowk_vals':  twowk_vals,
+                        'U':           float('nan'),
+                        'p_raw':       float('nan'),
+                        'p_adj':       float('nan'),
+                    }
+                    if len(ramp_vals) >= 2 and len(twowk_vals) >= 2:
+                        U, p_raw = _stats.mannwhitneyu(ramp_vals, twowk_vals, alternative='two-sided')
+                        sr['U']     = float(U)
+                        sr['p_raw'] = float(p_raw)
+                    stat_results.append(sr)
+
+                # Holm-Bonferroni
+                valid = [sr for sr in stat_results if not _np.isnan(sr['p_raw'])]
+                k = len(valid)
+                if k > 0:
+                    valid_sorted = sorted(valid, key=lambda x: x['p_raw'])
+                    for rank, sr in enumerate(valid_sorted):
+                        sr['p_adj'] = min(sr['p_raw'] * (k - rank), 1.0)
+                    for i in range(1, len(valid_sorted)):
+                        valid_sorted[i]['p_adj'] = max(
+                            valid_sorted[i]['p_adj'],
+                            valid_sorted[i - 1]['p_adj'],
+                        )
+
+                # --- Bar plot: 2 panels, 2 bars each, with sig brackets ---
+                fig, axes = plt.subplots(1, 2, sharey=True)
+                fig.suptitle(
+                    'Daily Weight Change at CA% Transition Days\n'
+                    'Ramp (Day 8, 15) vs 2-Week Ramp (Day 4, 7)',
+                )
+                rng = _np.random.default_rng(42)
+                bar_width = 0.5
+                cohort_order = [ramp_label, twowk_label]
+                x_pos = _np.arange(len(cohort_order))
+
+                # Pre-compute global y-range across both panels for shared axis
+                _global_plotted = [0.0]
+                for sr in stat_results:
+                    for vals in [sr['ramp_vals'], sr['twowk_vals']]:
+                        if len(vals) == 0:
+                            continue
+                        mean_val = float(_np.mean(vals))
+                        sem_val  = float(_np.std(vals, ddof=1) / _np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+                        _global_plotted.extend(vals.tolist())
+                        _global_plotted.append(mean_val + sem_val)
+                        _global_plotted.append(mean_val - sem_val)
+
+                _g_max   = float(_np.max(_global_plotted))
+                _g_min   = float(_np.min(_global_plotted))
+                _g_span  = max(_g_max - _g_min, 0.1)
+                _bkt_y   = _g_max + 0.10 * _g_span
+                _tick_h  = 0.04 * _g_span
+                _ylim_bot = _g_min - 0.05 * _g_span
+                _ylim_top = _bkt_y + _tick_h * 3.5
+
+                for ax_idx, (ax, sr) in enumerate(zip(axes, stat_results)):
+                    transition = sr['transition']
+                    vals_list  = [sr['ramp_vals'], sr['twowk_vals']]
+
+                    for i, (lbl, vals) in enumerate(zip(cohort_order, vals_list)):
+                        if len(vals) == 0:
+                            continue
+                        mean_val = float(_np.mean(vals))
+                        sem_val  = float(_np.std(vals, ddof=1) / _np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+                        c = COLOR_MAP[lbl]
+                        ax.bar(x_pos[i], mean_val, width=bar_width,
+                               color=c['face'], edgecolor=c['edge'], linewidth=0.9, zorder=2)
+                        ax.errorbar(x_pos[i], mean_val, yerr=sem_val,
+                                    fmt='none', color='black',
+                                    capsize=6, capthick=0.8, linewidth=1.0, zorder=3)
+                        jitter = rng.uniform(-0.12, 0.12, size=len(vals))
+                        ax.scatter(x_pos[i] + jitter, vals,
+                                   color='black', s=30, alpha=0.7, zorder=4, linewidths=0)
+
+                    ax.axhline(0, color='black', linewidth=0.6, linestyle='--', zorder=1)
+                    ax.set_xticks(x_pos)
+                    ax.set_xticklabels([
+                        f"Ramp\n(Day {TRANSITION_DAYS[ramp_label][transition]})",
+                        f"2-Wk Ramp\n(Day {TRANSITION_DAYS[twowk_label][transition]})",
+                    ])
+                    # Only the left panel gets a y-axis label
+                    if ax_idx == 0:
+                        ax.set_ylabel('Daily Change (%) (mean \u00b1 SEM)')
+                    ax.set_title(f'Transition {transition}')
+                    ax.spines['top'].set_visible(False)
+                    ax.spines['right'].set_visible(False)
+                    ax.tick_params(direction='in', which='both', length=5)
+
+                    # significance bracket (globally positioned, same height both panels)
+                    ax.plot([x_pos[0], x_pos[1]], [_bkt_y, _bkt_y],
+                            color='black', lw=0.8, zorder=5)
+                    ax.plot([x_pos[0], x_pos[0]], [_bkt_y - _tick_h, _bkt_y],
+                            color='black', lw=0.8, zorder=5)
+                    ax.plot([x_pos[1], x_pos[1]], [_bkt_y - _tick_h, _bkt_y],
+                            color='black', lw=0.8, zorder=5)
+                    ax.text(0.5 * (x_pos[0] + x_pos[1]), _bkt_y + _tick_h * 0.3,
+                            _sig(sr['p_adj']), ha='center', va='bottom', fontsize=8, zorder=6)
+
+                # Apply shared y limits once (sharey=True means this covers both panels)
+                axes[0].set_ylim(bottom=_ylim_bot, top=_ylim_top)
+                fig.subplots_adjust(wspace=0.05)
+                fig.tight_layout()
+                plot_dir.mkdir(exist_ok=True)
+                bar_svg = plot_dir / "transition_day_daily_change_bar.svg"
+                fig.savefig(bar_svg, format='svg', dpi=200)
+                plt.close(fig)
+                print(f"[OK] Saved bar plot -> {bar_svg}")
+
+                # --- Print and save stats report ---
+                print("\n" + "=" * 80)
+                print("MANN-WHITNEY U TESTS \u2014 Transition Day Daily Change")
+                print("Correction: Holm-Bonferroni (family = 2 comparisons)")
+                print("=" * 80)
+
+                W = 74
+                report_lines = [
+                    "=" * W,
+                    "RAMP vs 2-WEEK RAMP \u2014 CA% TRANSITION DAY DAILY CHANGE",
+                    f"Cohorts: {ramp_label}  vs  {twowk_label}",
+                    "",
+                    f"Transition days  \u2014  Ramp    : Day  8 (0%\u21921%),  Day 15 (1%\u21922%)",
+                    f"                   2-Wk Ramp: Day  4 (0%\u21921%),  Day  7 (1%\u21922%)",
+                    "",
+                    "Statistical test  : Mann-Whitney U (two-sided)",
+                    "Correction        : Holm-Bonferroni (k=2 comparisons)",
+                    "",
+                    f"{'Transition':<10}  {'n_Ramp':>6}  {'n_2Wk':>6}  {'U':>8}  {'p_raw':>9}  {'p_adj':>9}  sig",
+                    "-" * W,
+                ]
+                for sr in stat_results:
+                    U_str = f"{sr['U']:.1f}" if not _np.isnan(sr['U']) else 'N/A'
+                    report_lines.append(
+                        f"{sr['transition']:<10}  {sr['ramp_n']:>6}  {sr['twowk_n']:>6}  "
+                        f"{U_str:>8}  {_fmt_p(sr['p_raw']):>9}  {_fmt_p(sr['p_adj']):>9}  {_sig(sr['p_adj'])}"
+                    )
+                    print(
+                        f"\n  Transition {sr['transition']}:"
+                        f"\n    {ramp_label}: n={sr['ramp_n']}, "
+                        f"mean={sr['ramp_mean']:.4f} \u00b1 {sr['ramp_sem']:.4f} SEM"
+                        f"\n    {twowk_label}: n={sr['twowk_n']}, "
+                        f"mean={sr['twowk_mean']:.4f} \u00b1 {sr['twowk_sem']:.4f} SEM"
+                        f"\n    U={U_str}, p_raw={_fmt_p(sr['p_raw'])}, "
+                        f"p_adj (Holm)={_fmt_p(sr['p_adj'])}  {_sig(sr['p_adj'])}"
+                    )
+
+                report_lines += [
+                    "-" * W,
+                    "",
+                    "Descriptive statistics:",
+                    "",
+                    f"{'Transition':<10}  {'Cohort':<28}  {'n':>4}  {'Mean (%/day)':>13}  {'SEM':>8}",
+                    "-" * W,
+                ]
+                for sr in stat_results:
+                    report_lines.append(
+                        f"{sr['transition']:<10}  {sr['ramp_label']:<28}  {sr['ramp_n']:>4}  "
+                        f"{sr['ramp_mean']:>13.4f}  {sr['ramp_sem']:>8.4f}"
+                    )
+                    report_lines.append(
+                        f"{'':10}  {sr['twowk_label']:<28}  {sr['twowk_n']:>4}  "
+                        f"{sr['twowk_mean']:>13.4f}  {sr['twowk_sem']:>8.4f}"
+                    )
+                report_lines.append("=" * W)
+
+                report_text = "\n".join(report_lines)
+                print("\n" + report_text)
+                rpt_path = plot_dir / f"transition_day_mwu_{timestamp}.txt"
+                rpt_path.write_text(report_text, encoding='utf-8')
+                print(f"\n[OK] Saved report -> {rpt_path}")
+
+            except Exception as e:
+                print(f"  [WARNING] Transition-day analysis failed: {e}")
+                import traceback; traceback.print_exc()
+
+            show_now = input("\nDisplay plots now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                plt.show()
+            else:
+                plt.close('all')
+
+    print("\n" + "=" * 80)
+    print("Ramp vs 2-Week Ramp analysis complete.")
+    print("=" * 80)
+
+
 def _run_unknown_menu(cohorts: Dict[str, pd.DataFrame], comparison: str) -> None:
     """Placeholder menu for comparison types not yet implemented."""
     label_map = {
@@ -12587,11 +12919,12 @@ if __name__ == "__main__":
     comparison = _detect_comparison_type(cohorts)
 
     label_map = {
-        '0v2':    '0% nonramp  vs  2% nonramp',
-        '0vramp': '0% nonramp  vs  Ramp',
-        '2vramp': '2% nonramp  vs  Ramp',
-        'all3':   '0% nonramp  vs  2% nonramp  vs  Ramp',
-        'unknown': 'Unknown combination',
+        '0v2':      '0% nonramp  vs  2% nonramp',
+        '0vramp':   '0% nonramp  vs  Ramp',
+        '2vramp':   '2% nonramp  vs  Ramp',
+        'all3':     '0% nonramp  vs  2% nonramp  vs  Ramp',
+        'rampramp': 'Ramp  vs  2-Week Ramp',
+        'unknown':  'Unknown combination',
     }
     print("\n" + "=" * 80)
     print(f"Detected comparison type: {label_map.get(comparison, comparison)}")
@@ -12620,5 +12953,7 @@ if __name__ == "__main__":
         _run_2vramp_menu(cohorts)
     elif comparison == 'all3':
         _run_all3_menu(cohorts)
+    elif comparison == 'rampramp':
+        _run_rampramp_menu(cohorts)
     else:
         _run_unknown_menu(cohorts, comparison)
