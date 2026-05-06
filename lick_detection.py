@@ -77,7 +77,8 @@ def sensors_only_mode(csv_path: Path, df: pd.DataFrame, sensor_cols: List[str], 
 	print("\n" + "=" * 60)
 	print("KDE VALUES FOR EACH SENSOR")
 	print("=" * 60)
-	sensor_kdes = compute_sensor_KDE(df, sensor_cols)
+	_kde_cache_file = csv_path.parent / 'kde_cache' / (csv_path.stem + '_kde_cache.csv')
+	sensor_kdes = compute_sensor_KDE(df, sensor_cols, cache_file=_kde_cache_file, verbose=True)
 	for sensor, kde_val in sensor_kdes.items():
 		print(f"{sensor:12s} : {kde_val}")
 	print("=" * 60 + "\n")
@@ -563,12 +564,34 @@ def get_sensor_columns(df: pd.DataFrame) -> List[str]:
 	return sensor_cols
 
 
-def compute_sensor_KDE(df: pd.DataFrame, sensor_cols: List[str]) -> pd.Series:
+def compute_sensor_KDE(df: pd.DataFrame, sensor_cols: List[str], cache_file: Path = None, verbose: bool = False) -> pd.Series:
 	"""Compute the KDE (Kernel Density Estimation) peak for each sensor column.
 	
 	Returns a Series indexed by sensor column names with their KDE peak values.
 	The KDE peak represents the most probable value in the distribution.
+
+	Parameters:
+		df: DataFrame containing sensor data
+		sensor_cols: List of sensor column names
+		cache_file: Optional path to save/load cached KDE values (speeds up subsequent runs)
+		verbose: Whether to print detailed processing info
 	"""
+	# Try to load from cache if available
+	if cache_file and cache_file.exists():
+		try:
+			cached_df = pd.read_csv(cache_file, index_col=0)
+			cached_kdes = cached_df['KDE_Peak']
+			if all(col in cached_kdes.index for col in sensor_cols):
+				if verbose:
+					print(f"  ✓ Loaded KDE values from cache: {cache_file.name}")
+				return cached_kdes[sensor_cols]
+			else:
+				if verbose:
+					print(f"  ⚠ Cache incomplete, recomputing KDE values")
+		except Exception as e:
+			if verbose:
+				print(f"  ⚠ Error loading cache ({e}), recomputing KDE values")
+
 	kdes = {}
 	for col in sensor_cols:
 		series = pd.to_numeric(df[col], errors="coerce")
@@ -585,12 +608,33 @@ def compute_sensor_KDE(df: pd.DataFrame, sensor_cols: List[str]) -> pd.Series:
 				density = kde(x_eval)
 				peak_idx = np.argmax(density)
 				kdes[col] = x_eval[peak_idx]
+				if verbose:
+					print(f"  {col}: KDE={kdes[col]:.2f}, mean={series.mean():.2f}, "
+					      f"std={series.std():.2f}, min={min_val:.2f}, max={max_val:.2f}")
 			except Exception:
 				# Fall back to mean if KDE fails
 				kdes[col] = series.mean()
+				if verbose:
+					print(f"  {col}: KDE failed, using mean={kdes[col]:.2f}")
 		else:
 			kdes[col] = series.iloc[0] if len(series) == 1 else None
-	return pd.Series(kdes)
+			if verbose:
+				print(f"  {col}: Insufficient data, KDE={kdes[col]}")
+
+	result = pd.Series(kdes)
+
+	# Save to cache if path provided
+	if cache_file:
+		try:
+			cache_file.parent.mkdir(parents=True, exist_ok=True)
+			result.to_csv(cache_file, header=['KDE_Peak'])
+			if verbose:
+				print(f"  ✓ Saved KDE values to cache: {cache_file.name}")
+		except Exception as e:
+			if verbose:
+				print(f"  ⚠ Could not save cache: {e}")
+
+	return result
 
 
 def compute_KDE_normalizations(df: pd.DataFrame, sensor_cols: List[str], sensor_kdes: pd.Series) -> pd.DataFrame:
@@ -1116,25 +1160,29 @@ def plot_single_sensor_deviation_with_events(
 
 	fig, ax = plt.subplots()
 
-	ax.plot(events_df["Time_sec"], events_df[dev_col],
+	# Filter to time window before plotting so only those points are in the SVG
+	_t_min, _t_max = 0, 5
+	_mask = (events_df["Time_sec"] >= _t_min) & (events_df["Time_sec"] <= _t_max)
+	_df_win = events_df.loc[_mask]
+
+	ax.plot(_df_win["Time_sec"], _df_win[dev_col],
 	        color="#1f77b4", linewidth=0.8, label="Deviation")
 
 	if event_col in events_df.columns:
-		event_mask = events_df[event_col].astype(bool)
-		event_times = events_df.loc[event_mask, "Time_sec"]
-		event_values = events_df.loc[event_mask, dev_col]
+		event_mask = _df_win[event_col].astype(bool)
+		event_times = _df_win.loc[event_mask, "Time_sec"]
+		event_values = _df_win.loc[event_mask, dev_col]
 		ax.scatter(event_times, event_values, color="red", s=15, zorder=5, label="Detected events")
 
 	ax.axhline(y=threshold, color="orange", linestyle="--", linewidth=0.8, label=f"Threshold ({threshold:.3f})")
 
 	ax.set_xlabel("Time (s)")
-	ax.set_ylabel("Deviation (a.u.)")
+	ax.set_ylabel("Capacitance (a.u.)")
 	if title:
 		ax.set_title(title)
 	ax.legend(loc="best", frameon=False)
 
-	left, right = ax.get_xlim()
-	ax.set_xlim(left=0, right=right)
+	ax.set_xlim(left=_t_min, right=_t_max)
 	ax.margins(x=0)
 	ax.set_ylim(bottom=0)
 	for side in ("top", "right"):
@@ -2639,7 +2687,8 @@ def main() -> None:
 	print("\n" + "=" * 60)
 	print("KDE VALUES FOR EACH SENSOR")
 	print("=" * 60)
-	sensor_kdes = compute_sensor_KDE(df, sensor_cols)
+	_kde_cache_file = csv_path.parent / 'kde_cache' / (csv_path.stem + '_kde_cache.csv')
+	sensor_kdes = compute_sensor_KDE(df, sensor_cols, cache_file=_kde_cache_file, verbose=True)
 	for sensor, kde_val in sensor_kdes.items():
 		print(f"{sensor:12s} : {kde_val}")
 	print("=" * 60 + "\n")

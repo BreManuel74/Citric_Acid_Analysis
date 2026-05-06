@@ -46,7 +46,7 @@ except ImportError:
 #   'ramp'    → CA% increases each week; within-subjects factor = CA_Percent
 #   'nonramp' → CA% is constant across weeks; within-subjects factor = Week
 # ─────────────────────────────────────────────────────────────────────────────
-EXPERIMENT_MODE = 'nonramp'  # << CHANGE THIS: 'ramp' or 'nonramp'
+EXPERIMENT_MODE = 'ramp'  # << CHANGE THIS: 'ramp' or 'nonramp'
 # ─────────────────────────────────────────────────────────────────────────────
 
 _MODE_LABELS: dict = {
@@ -5660,9 +5660,6 @@ def plot_licks_vs_weight_correlation(
     mean_licks = {aid: np.nanmean(animal_licks_all[aid]) for aid in unique_animals}
     mean_wt    = {aid: np.nanmean(animal_wt_all[aid])    for aid in unique_animals}
 
-    cmap = plt.cm.tab20
-    animal_color = {aid: cmap(i % 20) for i, aid in enumerate(unique_animals)}
-
     print(f"Found {n_animals} unique animals across {len(sorted_dates)} weeks "
           f"({len(records)} total observations → 1 mean point per animal)")
 
@@ -5716,7 +5713,7 @@ def plot_licks_vs_weight_correlation(
         if not (np.isfinite(r['weight_pct']) and np.isfinite(r['licks'])):
             continue
         ax_all.scatter(r['weight_pct'], r['licks'],
-                       color=animal_color[r['animal_id']], marker='o',
+                       color=COHORT_COLOR, marker='o',
                        s=_ms ** 2, edgecolors='black', linewidths=0.6, zorder=4)
 
     if _has_corr_all:
@@ -5755,11 +5752,9 @@ def plot_licks_vs_weight_correlation(
                 linestyle='--', zorder=2, label='Linear fit')
 
     for animal_id in unique_animals:
-        color = animal_color[animal_id]
         ax.scatter(mean_wt[animal_id], mean_licks[animal_id],
-                   color=color, marker='o', s=_ms ** 2,
-                   edgecolors='black', linewidths=0.6, zorder=4,
-                   label=animal_id)
+                   color=COHORT_COLOR, marker='o', s=_ms ** 2,
+                   edgecolors='black', linewidths=0.6, zorder=4)
 
     if has_corr:
         p_str = f"p = {p_val:.4f}" if p_val >= 0.0001 else "p < 0.0001"
@@ -5775,22 +5770,6 @@ def plot_licks_vs_weight_correlation(
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.tick_params(direction='in', which='both', length=5)
-
-    handles, labels = ax.get_legend_handles_labels()
-    trend_handles  = [h for h, l in zip(handles, labels) if l == 'Linear fit']
-    animal_handles = [h for h, l in zip(handles, labels) if l != 'Linear fit']
-    animal_labels  = [l for l in labels if l != 'Linear fit']
-
-    legend_kwargs = dict(framealpha=0.7, ncol=max(1, n_animals // 12 + 1))
-    if trend_handles:
-        ax.legend(trend_handles + animal_handles,
-                  ['Linear fit'] + animal_labels,
-                  loc='upper right' if n_animals <= 10 else 'lower left',
-                  **legend_kwargs)
-    else:
-        ax.legend(animal_handles, animal_labels,
-                  loc='upper right' if n_animals <= 10 else 'lower left',
-                  **legend_kwargs)
 
     plt.tight_layout()
 
@@ -6488,7 +6467,7 @@ if (is.null(.model_lme)) stop("All glmer.nb fitting strategies failed.")
         if _rows.empty:
             continue
         ax2.scatter(_rows['weight_pct'], _rows['licks'],
-                    color=animal_color[_aid], marker='o', s=_ms2 ** 2,
+                    color=COHORT_COLOR, marker='o', s=_ms2 ** 2,
                     edgecolors='black', linewidths=0.4, alpha=0.5, zorder=3)
 
     ax2.plot(_wt_grid, _fit_line, color='black', zorder=5)
@@ -6577,8 +6556,10 @@ def _plot_rmcorr_licks_vs_weight_impl(
         wt_arr   = np.asarray(data['avg_total_weight_per_animal'], dtype=float)
         ids      = data.get('animal_ids',
                             [f"Animal_{j+1}" for j in range(len(lick_arr))])
+        ca_pct_val = data.get('ca_percent', np.nan)
         for aid, lk, wt in zip(ids, lick_arr, wt_arr):
-            records.append({'mouse_id': str(aid), 'licks': lk, 'weight_pct': wt})
+            records.append({'mouse_id': str(aid), 'licks': lk, 'weight_pct': wt,
+                             'ca_percent': ca_pct_val})
 
     if not records:
         print("ERROR: No per-animal data for rmcorr.")
@@ -6591,8 +6572,6 @@ def _plot_rmcorr_licks_vs_weight_impl(
 
     unique_animals = list(_df['mouse_id'].unique())
     n_animals      = len(unique_animals)
-    cmap           = plt.cm.tab20
-    animal_color   = {aid: cmap(i % 20) for i, aid in enumerate(unique_animals)}
     design_label   = _MLB['plot_suffix']
 
     # ── attempt rmcorr via rpy2 ──────────────────────────────────────────
@@ -6742,7 +6721,7 @@ def _plot_rmcorr_licks_vs_weight_impl(
     def _draw_scatter_and_line(_axx):
         for _, _row in _df.iterrows():
             _axx.scatter(_row['weight_pct'], _row['licks'],
-                         color=animal_color[_row['mouse_id']], marker='o',
+                         color=COHORT_COLOR, marker='o',
                          s=_ms ** 2, edgecolors='black', linewidths=0.5,
                          alpha=0.8, zorder=4)
         if _line_xs is not None:
@@ -6857,6 +6836,82 @@ def _plot_rmcorr_licks_vs_weight_impl(
         plt.show()
     else:
         plt.close(fig)
+
+    # ── Ramp-only variant: colour each dot by CA% (blue → red) ────────────
+    if EXPERIMENT_MODE == 'ramp' and 'ca_percent' in _df.columns:
+        # Discrete colour lookup: blue → yellow → orange → red-orange → dark red
+        def _ca_to_color(ca):
+            if ca == 0:       return 'dodgerblue'
+            elif ca <= 1.0:   return 'gold'
+            elif ca <= 2.0:   return 'orange'
+            elif ca <= 3.0:   return 'orangered'
+            else:             return 'darkred'
+
+        def _draw_ca_colored(_axx):
+            for _, _row in _df.iterrows():
+                if not (np.isfinite(_row['weight_pct']) and np.isfinite(_row['licks'])):
+                    continue
+                _axx.scatter(_row['weight_pct'], _row['licks'],
+                             color=_ca_to_color(_row['ca_percent']),
+                             marker='o', s=_ms ** 2,
+                             edgecolors='black', linewidths=0.5,
+                             alpha=0.85, zorder=4)
+            if _line_xs is not None:
+                _axx.plot(_line_xs, _line_ys, **_line_kw)
+
+        if _use_break:
+            fig_ca, ax_ca = plt.subplots()
+            _draw_ca_colored(ax_ca)
+            ax_ca.set_ylim(_data_lo, _data_hi)
+            # reuse the same break-mark slashes
+            _trans_ca = _mtt.blended_transform_factory(ax_ca.transAxes, ax_ca.transData)
+            ax_ca.plot([-_w, _w], [_bk_y - _gap/2 - _h, _bk_y - _gap/2 + _h],
+                       transform=_trans_ca, **_bk_kw)
+            ax_ca.plot([-_w, _w], [_bk_y + _gap/2 - _h, _bk_y + _gap/2 + _h],
+                       transform=_trans_ca, **_bk_kw)
+            ax_ca.text(-0.07, _data_lo - _y_range * 0.005, '0',
+                       transform=_trans_ca, ha='center', va='top',
+                       fontsize=plt.rcParams.get('ytick.labelsize', 8))
+        else:
+            fig_ca, ax_ca = plt.subplots()
+            _draw_ca_colored(ax_ca)
+            ax_ca.set_ylim(bottom=0)
+
+        ax_ca.text(0.03, 0.97, _ann,
+                   transform=ax_ca.transAxes, va='top', ha='left', fontsize=7.5,
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.75,
+                             edgecolor='gray'))
+        ax_ca.set_xlabel('Total Weight Change (%)', weight='bold')
+        ax_ca.set_ylabel('Total Lick Count', weight='bold')
+        ax_ca.set_title(
+            f'Repeated-Measures Correlation: Licks ~ Weight Change\n({design_label})',
+            weight='bold')
+        ax_ca.spines['top'].set_visible(False)
+        ax_ca.spines['right'].set_visible(False)
+        ax_ca.tick_params(direction='in', which='both', length=5)
+
+        # Discrete legend, one patch per CA% level present in the data
+        from matplotlib.patches import Patch
+        _ca_ticks = sorted(_df['ca_percent'].dropna().unique())
+        _legend_handles = [
+            Patch(facecolor=_ca_to_color(v), edgecolor='black',
+                  linewidth=0.6, label=f'{v:g}% CA')
+            for v in _ca_ticks
+        ]
+        ax_ca.legend(handles=_legend_handles, title='CA%', framealpha=0.75,
+                     fontsize=7, title_fontsize=7.5, loc='upper right')
+
+        plt.tight_layout()
+
+        if save_path is not None:
+            _ca_svg = save_path.parent / (save_path.stem + '_rmcorr_by_ca.svg')
+            fig_ca.savefig(_ca_svg, format='svg', dpi=200, bbox_inches='tight')
+            print(f"CA%-coloured rmcorr figure saved -> {_ca_svg}")
+
+        if show:
+            plt.show()
+        else:
+            plt.close(fig_ca)
 
     return fig
 

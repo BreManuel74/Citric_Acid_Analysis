@@ -5901,6 +5901,7 @@ def test_negbinom_lick_analysis(
         _pairs_grp_fp = f"{_tmpdir}/negbinom_pairs_grp_{measure}_{_uid}.csv"
         _pairs_wk_fp  = f"{_tmpdir}/negbinom_pairs_wk_{measure}_{_uid}.csv"
         _txt_fp       = f"{_tmpdir}/negbinom_txt_{measure}_{_uid}.txt"
+        _disp_fp      = f"{_tmpdir}/negbinom_disp_{measure}_{_uid}.csv"
 
         try:
             ro.globalenv['r_df']            = _to_r(adf)
@@ -5912,6 +5913,7 @@ def test_negbinom_lick_analysis(
             ro.globalenv['r_pairs_grp_fp']  = _pairs_grp_fp
             ro.globalenv['r_pairs_wk_fp']   = _pairs_wk_fp
             ro.globalenv['r_txt_fp']        = _txt_fp
+            ro.globalenv['r_disp_fp']       = _disp_fp
             ro.globalenv['r_posthoc_adjust'] = posthoc_adjust
 
             ro.r("""
@@ -5957,30 +5959,97 @@ def test_negbinom_lick_analysis(
                     fam_name <- "gaussian (identity link) -- continuous, unbounded"
                 }
 
-                # Fit the model
-                model <- glmmTMB(
-                    formula(paste0(r_measure, " ~ CA_group * Week + (1 | ID)")),
-                    data   = df_r,
-                    family = fam
-                )
+                # ---- Dispformula comparison + model selection ----
+                # For count families: fit base + 3 dispformula variants; auto-select
+                # the winner if ΔAIC(base vs best) > 10 (strong evidence for heterogeneity).
+                # For non-count families: fit base directly (dispformula N/A).
+                refit_disp <- ""   # empty = homogeneous dispersion (base)
+                if (is_count) {
+                    cand_mods <- list()
+                    cand_labs <- character(0)
+                    for (clab in c("base (~1)", "~CA_group", "~Week", "~CA_group+Week")) {
+                        dform <- if (clab == "base (~1)") ~1 else formula(clab)
+                        cm <- tryCatch(
+                            glmmTMB(
+                                formula(paste0(r_measure, " ~ CA_group * Week + (1 | ID)")),
+                                data        = df_r,
+                                family      = fam,
+                                dispformula = dform
+                            ),
+                            error = function(e) NULL
+                        )
+                        aic_ok <- !is.null(cm) &&
+                                  !is.na(tryCatch(AIC(cm), error=function(e) NA_real_))
+                        if (aic_ok) {
+                            cand_mods <- c(cand_mods, list(cm))
+                            cand_labs <- c(cand_labs, clab)
+                        }
+                    }
+                    if (length(cand_mods) > 0) {
+                        aic_v    <- sapply(cand_mods, AIC)
+                        df_v     <- sapply(cand_mods, function(m) attr(logLik(m), "df"))
+                        delta    <- aic_v - min(aic_v)
+                        disp_tbl <- data.frame(
+                            model     = cand_labs,
+                            df        = df_v,
+                            AIC       = aic_v,
+                            delta_AIC = delta,
+                            stringsAsFactors = FALSE
+                        )
+                        best_i <- which.min(delta)
+                        base_i <- which(cand_labs == "base (~1)")
+                        if (length(best_i) > 0 && length(base_i) > 0 &&
+                            cand_labs[best_i] != "base (~1)" &&
+                            !is.na(delta[base_i]) && delta[base_i] > 10) {
+                            refit_disp <- cand_labs[best_i]
+                            model      <- cand_mods[[best_i]]
+                        } else if (length(base_i) > 0) {
+                            model <- cand_mods[[base_i]]
+                        } else {
+                            model <- cand_mods[[which.min(aic_v)]]
+                        }
+                    } else {
+                        # All dispformula fits failed; fall back to plain base fit
+                        model    <- glmmTMB(
+                            formula(paste0(r_measure, " ~ CA_group * Week + (1 | ID)")),
+                            data=df_r, family=fam
+                        )
+                        disp_tbl <- data.frame(
+                            model="ERROR", df=NA, AIC=NA, delta_AIC=NA,
+                            note="all dispformula candidates failed",
+                            stringsAsFactors=FALSE
+                        )
+                    }
+                } else {
+                    model    <- glmmTMB(
+                        formula(paste0(r_measure, " ~ CA_group * Week + (1 | ID)")),
+                        data=df_r, family=fam
+                    )
+                    disp_tbl <- data.frame(
+                        model="N/A", df=NA, AIC=NA, delta_AIC=NA,
+                        stringsAsFactors=FALSE
+                    )
+                }
 
                 # Full summary text
                 model_txt <- capture.output(summary(model))
                 writeLines(model_txt, r_txt_fp)
 
-                # Model fit statistics
+                # Model fit statistics (includes which dispformula was selected)
                 ll      <- logLik(model)
                 nb_disp <- tryCatch(sigma(model), error=function(e) NA_real_)
                 fit_df  <- data.frame(
-                    family     = fam_name,
-                    AIC        = AIC(model),
-                    BIC        = BIC(model),
-                    logLik     = as.numeric(ll),
-                    df_used    = attr(ll, "df"),
-                    nobs       = nobs(model),
-                    dispersion = nb_disp
+                    family            = fam_name,
+                    AIC               = AIC(model),
+                    BIC               = BIC(model),
+                    logLik            = as.numeric(ll),
+                    df_used           = attr(ll, "df"),
+                    nobs              = nobs(model),
+                    dispersion        = nb_disp,
+                    refit_dispformula = refit_disp
                 )
                 write.csv(fit_df, r_fit_fp, row.names=FALSE)
+                write.csv(disp_tbl, r_disp_fp, row.names=FALSE)
 
                 # Type III Wald chi-square
                 anova_res        <- Anova(model, type=3)
@@ -6019,9 +6088,10 @@ def test_negbinom_lick_analysis(
             pairs_grp_df = pd.read_csv(_pairs_grp_fp) if os.path.exists(_pairs_grp_fp) else pd.DataFrame()
             pairs_wk_df  = pd.read_csv(_pairs_wk_fp)  if os.path.exists(_pairs_wk_fp)  else pd.DataFrame()
             r_text       = Path(_txt_fp).read_text(encoding='utf-8') if os.path.exists(_txt_fp) else ''
+            disp_df_py   = pd.read_csv(_disp_fp, keep_default_na=False) if os.path.exists(_disp_fp) else pd.DataFrame()
 
             for _fp in [_fit_fp, _anova_fp, _fixef_fp, _ranef_fp,
-                        _pairs_grp_fp, _pairs_wk_fp, _txt_fp]:
+                        _pairs_grp_fp, _pairs_wk_fp, _txt_fp, _disp_fp]:
                 try:    os.unlink(_fp)
                 except Exception: pass
 
@@ -6046,8 +6116,16 @@ def test_negbinom_lick_analysis(
             _ll_v = float(fit_df_py['logLik'].iloc[0])  if not fit_df_py.empty else np.nan
             _df_u = int(fit_df_py['df_used'].iloc[0])   if not fit_df_py.empty else 0
             _nobs = int(fit_df_py['nobs'].iloc[0])      if not fit_df_py.empty else n_obs
-            _disp_val = fit_df_py['dispersion'].iloc[0] if not fit_df_py.empty else np.nan
-            _disp_str = f"{float(_disp_val):.4f}" if pd.notna(_disp_val) else "\u2014"
+            _disp_val  = fit_df_py['dispersion'].iloc[0] if not fit_df_py.empty else np.nan
+            _disp_str  = f"{float(_disp_val):.4f}" if pd.notna(_disp_val) else "\u2014"
+            _refit_disp = str(fit_df_py['refit_dispformula'].iloc[0]) \
+                if not fit_df_py.empty and 'refit_dispformula' in fit_df_py.columns \
+                else ''
+            _refit_disp = '' if _refit_disp in ('', 'nan', 'NA') else _refit_disp
+
+            _formula_str = f"{measure} ~ CA_group * Week + (1 | ID)"
+            if _refit_disp:
+                _formula_str += f", dispformula = {_refit_disp}"
 
             sec += [
                 "",
@@ -6056,7 +6134,7 @@ def test_negbinom_lick_analysis(
                 "\u2550" * W,
                 "",
                 "  Model Information",
-                f"    {'Formula':<40} {measure} ~ CA_group * Week + (1 | ID)",
+                f"    {'Formula':<40} {_formula_str}",
                 f"    {'Family':<40} {_fam}",
                 f"    {'Between-subjects factor':<40} Cohort  ({', '.join(ca_groups)})",
                 f"    {'Within-subjects factor':<40} Week    ({', '.join(str(int(w)) for w in weeks)})",
@@ -6068,6 +6146,68 @@ def test_negbinom_lick_analysis(
                 f"    {'Dispersion parameter':<40} {_disp_str}",
                 "",
             ]
+
+            # Dispformula AIC comparison (count families only)
+            _disp_first = str(disp_df_py['model'].iloc[0]) if not disp_df_py.empty and 'model' in disp_df_py.columns else ''
+            if _disp_first not in ('', 'N/A', 'ERROR'):
+                sec += [
+                    "  dispformula AIC Comparison  (heterogeneous dispersion across cohorts/weeks?)",
+                    f"  {'Model':<22}  {'df':>5}  {'AIC':>10}  {'ΔAIC':>8}  Verdict",
+                    "  " + "\u2500" * 60,
+                ]
+                _disp_valid = disp_df_py['delta_AIC'].notna() \
+                    if 'delta_AIC' in disp_df_py.columns else pd.Series([False] * len(disp_df_py))
+                best_model = disp_df_py.loc[
+                    disp_df_py.loc[_disp_valid, 'delta_AIC'].idxmin(), 'model'
+                ] if _disp_valid.any() else 'base (~1)'
+                for _, drow in disp_df_py.iterrows():
+                    dmod  = str(drow.get('model', ''))
+                    ddf   = drow.get('df', np.nan)
+                    daic  = drow.get('AIC', np.nan)
+                    ddiff = drow.get('delta_AIC', np.nan)
+                    if ddiff != ddiff:  # NaN
+                        verdict = '—'
+                    elif dmod == best_model:
+                        verdict = '\u2605 best'
+                    elif ddiff < 2:
+                        verdict = 'comparable'
+                    elif ddiff < 4:
+                        verdict = 'marginally worse'
+                    elif ddiff < 10:
+                        verdict = 'notably worse'
+                    else:
+                        verdict = 'strongly worse'
+                    ddf_s  = f"{int(ddf)}" if pd.notna(ddf) else '—'
+                    daic_s = f"{float(daic):.2f}" if pd.notna(daic) else '—'
+                    ddiff_s = f"{float(ddiff):.2f}" if pd.notna(ddiff) else '—'
+                    sec.append(f"  {dmod:<22}  {ddf_s:>5}  {daic_s:>10}  {ddiff_s:>8}  {verdict}")
+                if best_model != 'base (~1)':
+                    base_row   = disp_df_py[disp_df_py['model'] == 'base (~1)']
+                    base_delta = float(base_row['delta_AIC'].iloc[0]) if not base_row.empty else 0.0
+                    strength   = "strongly" if base_delta > 10 else ("moderately" if base_delta > 4 else "marginally")
+                    if _refit_disp:
+                        sec += [
+                            "",
+                            f"  NOTE: '{best_model}' dispformula {strength} preferred over base"
+                            f" (\u0394AIC(base vs best) = {base_delta:.2f})",
+                            "        Model was automatically re-fit with this dispformula."
+                            "  All results above use the re-fit model.",
+                        ]
+                    else:
+                        sec += [
+                            "",
+                            f"  NOTE: '{best_model}' dispformula {strength} preferred over base"
+                            f" (\u0394AIC(base vs best) = {base_delta:.2f})",
+                            "        Consider re-fitting with this dispformula for final inference.",
+                        ]
+                else:
+                    sec += ["", "  NOTE: Homogeneous dispersion (base model) is adequate."]
+                sec.append("")
+            elif _disp_first == 'N/A':
+                sec += [f"  dispformula comparison: not applicable ({_fam.split('(')[0].strip()})", ""]
+            elif _disp_first == 'ERROR':
+                note = disp_df_py.get('note', pd.Series(['unknown'])).iloc[0]
+                sec += [f"  dispformula comparison: failed \u2014 {note}", ""]
 
             # Type III Wald chi-square table
             if not anova_df_py.empty:

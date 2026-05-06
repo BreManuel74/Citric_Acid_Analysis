@@ -88,6 +88,13 @@ except ImportError:
     HAS_MATPLOTLIB = False
     print("Warning: matplotlib not installed. Plotting will not be available.")
 
+# Try to import rpy2 for R-based distribution diagnostics and assumption tests
+try:
+    import rpy2.robjects as _rpy2_probe
+    HAS_RPY2 = True
+except ImportError:
+    HAS_RPY2 = False
+
 # Canonical cohort colours
 _COLOR_0PCT  = "#1f77b4"   # 0% CA
 _COLOR_2PCT  = "#f79520"   # 2% CA
@@ -105,6 +112,26 @@ def _cohort_label_to_color(label: str) -> str:
     if "ramp" in lo:
         return _COLOR_RAMP
     return _COLOR_OTHER
+
+
+def _ensure_r_path() -> None:
+    """Ensure R's bin/x64 directory is in PATH before any rpy2 call (Windows only)."""
+    import os, sys
+    if sys.platform != 'win32':
+        return
+    r_home = os.environ.get('R_HOME', '')
+    if not r_home:
+        try:
+            import rpy2.situation as _sit
+            r_home = _sit.get_r_home() or ''
+        except Exception:
+            pass
+    if not r_home:
+        return
+    for _sub in (os.path.join(r_home, 'bin', 'x64'),
+                 os.path.join(r_home, 'bin')):
+        if os.path.isdir(_sub) and _sub.lower() not in os.environ.get('PATH', '').lower():
+            os.environ['PATH'] = _sub + os.pathsep + os.environ['PATH']
 
 
 # Cache for loaded cohorts
@@ -8254,10 +8281,485 @@ def generate_omnibus_weight_report_2way(
 
 
 # =============================================================================
-
-
+# DISTRIBUTION DIAGNOSTICS + MIXED-MODEL ASSUMPTION CHECKS (R-BASED)
 # =============================================================================
-# SLOPE ANALYSIS: COMPARING RATE OF WEIGHT CHANGE ACROSS COHORTS
+
+def diagnose_weight_distributions(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    measure: str = "Total Change",
+    weeks: Optional[List[int]] = None,
+    save_path: Optional[Path] = None,
+) -> Dict:
+    """
+    Distribution diagnostics and mixed-model assumption checks for a continuous
+    weight-change DV in a Cohort (between-subjects) × Week (within-subjects) design.
+
+    All inference is run in R via rpy2.  Seven checks are reported:
+
+      1. Overall distribution: N, range, mean, SD, skewness, kurtosis, Shapiro-Wilk
+      2. Per-cell normality  : Shapiro-Wilk within each Cohort × Week cell
+      3. Homogeneity of variance: Levene's test (car pkg) across cohorts; Bartlett fallback
+      4. Sphericity          : Mauchly's W on the subject × week covariance matrix
+      5. LMM residual normality: Shapiro-Wilk on lme4::lmer residuals (if lme4 available)
+      6. Outlier detection   : IQR-based flagging (> Q3 + 1.5·IQR or < Q1 - 1.5·IQR)
+      7. Cullen-Frey diagram : saved as PNG if fitdistrplus is installed in R
+
+    Input data are aggregated to weekly means per animal before all tests.
+
+    Parameters
+    ----------
+    cohort_dfs : dict
+        Loaded cohort DataFrames (from load_cohorts).
+    measure : str
+        Column name for the weight-change DV. Default: 'Total Change'.
+    weeks : list of int, optional
+        Restrict to these Week indices (1-based). None = all weeks.
+    save_path : Path, optional
+        Write the full plain-text report here.
+
+    Returns
+    -------
+    dict  with keys 'text' (full report string) and optional 'error'.
+    """
+    W = 80
+    if not HAS_RPY2:
+        print("[ERROR] rpy2 is not installed — cannot run R-based diagnostics.\n"
+              "  pip install rpy2\n  Also requires R with: install.packages('car')")
+        return {'error': 'rpy2 not installed'}
+
+    _ensure_r_path()
+    import rpy2.robjects as ro
+    import tempfile, os
+
+    print("\n" + "=" * W)
+    print("DISTRIBUTION DIAGNOSTICS + MIXED-MODEL ASSUMPTION CHECKS  (R-based)")
+    print("=" * W)
+
+    # ── Build weekly-mean aggregate dataframe ───────────────────────────
+    try:
+        combined_df = combine_cohorts_for_analysis(cohort_dfs)
+        combined_df = clean_cohort(combined_df)
+        if 'Day' not in combined_df.columns:
+            combined_df = add_day_column_across_cohorts(combined_df)
+        combined_df = combined_df[combined_df['Day'] >= 1].copy()
+        combined_df = _add_week_column_across_cohorts(combined_df)
+    except Exception as _e:
+        print(f"[ERROR] Could not prepare data: {_e}")
+        return {'error': str(_e)}
+
+    if weeks is not None:
+        combined_df = combined_df[combined_df['Week'].isin(weeks)].copy()
+
+    if measure not in combined_df.columns:
+        print(f"[ERROR] Measure '{measure}' not found in combined data.")
+        return {'error': f"measure '{measure}' not found"}
+
+    req_cols = ['ID', 'Cohort', 'Week', measure]
+    agg_df = (
+        combined_df
+        .dropna(subset=req_cols)
+        .groupby(['ID', 'Cohort', 'Week'], as_index=False)[measure]
+        .mean()
+        .rename(columns={measure: 'DV'})
+    )
+    agg_df = _filter_complete_subjects_weekly(agg_df, 'ID', 'Week')
+    agg_df['Week']   = agg_df['Week'].astype(int)
+    agg_df['ID']     = agg_df['ID'].astype(str)
+    agg_df['Cohort'] = agg_df['Cohort'].astype(str)
+
+    cohort_labels = sorted(agg_df['Cohort'].unique())
+    week_vals     = sorted(agg_df['Week'].unique())
+    n_subj        = agg_df['ID'].nunique()
+    n_obs         = len(agg_df)
+
+    print(f"  Cohorts : {cohort_labels}")
+    print(f"  Weeks   : {week_vals}")
+    print(f"  Subjects: {n_subj}  |  Observations: {n_obs}")
+
+    _tmpdir  = tempfile.gettempdir().replace('\\', '/')
+    _uid     = str(abs(hash(measure + str(week_vals))))[-6:]
+    _data_fp = f"{_tmpdir}/wt_diag_data_{_uid}.csv"
+    _txt_fp  = f"{_tmpdir}/wt_diag_txt_{_uid}.txt"
+    _cf_base = str(save_path).replace('.txt', '') if save_path else \
+               f"wt_diag_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    _cf_fp   = (_cf_base + f"__{measure.replace(' ', '_')}_cullen_frey.png").replace('\\', '/')
+
+    agg_df.to_csv(_data_fp.replace('/', os.sep), index=False)
+
+    ro.globalenv['r_data_fp']    = _data_fp
+    ro.globalenv['r_txt_fp']     = _txt_fp
+    ro.globalenv['r_cf_fp']      = _cf_fp
+    ro.globalenv['r_meas_name']  = measure
+
+    try:
+        ro.r(r"""
+            suppressPackageStartupMessages(library(MASS))
+
+            df_r        <- read.csv(r_data_fp, stringsAsFactors = FALSE)
+            df_r$DV     <- as.numeric(df_r$DV)
+            df_r$Cohort <- as.factor(df_r$Cohort)
+            df_r$Week   <- as.integer(df_r$Week)
+            df_r$ID     <- as.factor(df_r$ID)
+
+            vals    <- na.omit(df_r$DV)
+            n       <- length(vals)
+            mn      <- mean(vals)
+            vr      <- var(vals)
+            sdv     <- sd(vals)
+            sk      <- if (sdv > 0) mean(((vals - mn)/sdv)^3) else NA
+            ku      <- if (sdv > 0) mean(((vals - mn)/sdv)^4) else NA
+            cohorts <- levels(df_r$Cohort)
+            weeks   <- sort(unique(df_r$Week))
+
+            out <- character(0)
+            hr  <- paste0("  ", paste(rep("\u2500", 76), collapse = ""))
+
+            # ── 1. Overall distribution ────────────────────────────────
+            out <- c(out,
+                "  1. OVERALL DISTRIBUTION SUMMARY",
+                hr,
+                paste0("  Measure                       : ", r_meas_name),
+                paste0("  N observations (weekly means) : ", n),
+                paste0("  Cohorts                       : ", paste(cohorts, collapse = ", ")),
+                paste0("  Weeks                         : ", paste(weeks, collapse = ", ")),
+                paste0("  Range                         : [",
+                       round(min(vals), 3), ",  ", round(max(vals), 3), "]"),
+                paste0("  Mean  (pooled)                : ", format(mn,  digits = 5, nsmall = 2)),
+                paste0("  SD    (pooled)                : ", format(sdv, digits = 5, nsmall = 2)),
+                paste0("  Skewness                      : ", format(sk,  digits = 4),
+                       "  (0 = symmetric)"),
+                paste0("  Kurtosis (raw)                : ", format(ku,  digits = 4),
+                       "  (3 = normal tails)")
+            )
+
+            sw_all <- tryCatch(shapiro.test(vals), error = function(e) NULL)
+            if (!is.null(sw_all)) {
+                sw_interp <- if (sw_all$p.value < 0.001) "strongly non-normal (p < .001)" else
+                             if (sw_all$p.value < 0.050) "significantly non-normal (p < .05)" else
+                             "no significant departure from normality"
+                out <- c(out,
+                    "",
+                    "  Shapiro-Wilk (pooled data):",
+                    paste0("    W = ", format(sw_all$statistic, digits = 6),
+                           "   p = ", format(sw_all$p.value, digits = 4)),
+                    paste0("    Interpretation : ", sw_interp)
+                )
+            }
+            out <- c(out, "")
+
+            # ── 2. Per-cell normality ──────────────────────────────────
+            out <- c(out,
+                "  2. PER-CELL NORMALITY  (Shapiro-Wilk per Cohort \u00d7 Week cell)",
+                hr,
+                sprintf("  %-28s  %5s  %8s  %8s  %9s  %8s  %s",
+                        "Cell", "n", "Mean", "SD", "W", "p", "Normal?"),
+                paste0("  ", paste(rep("-", 78), collapse = ""))
+            )
+            for (coh in cohorts) {
+                for (wk in weeks) {
+                    sub <- df_r$DV[df_r$Cohort == coh & df_r$Week == wk]
+                    sub <- na.omit(sub)
+                    cell_lbl <- paste0(coh, " W", wk)
+                    if (length(sub) >= 3) {
+                        sw_c <- tryCatch(shapiro.test(sub), error = function(e) NULL)
+                        if (!is.null(sw_c)) {
+                            norm_tag <- if (sw_c$p.value >= 0.05) "yes" else
+                                        if (sw_c$p.value >= 0.01) "marginal" else "NO"
+                            out <- c(out, sprintf(
+                                "  %-28s  %5d  %8.3f  %8.3f  %9.5f  %8.4f  %s",
+                                cell_lbl, length(sub),
+                                mean(sub), sd(sub),
+                                sw_c$statistic, sw_c$p.value, norm_tag))
+                        }
+                    } else {
+                        out <- c(out, sprintf(
+                            "  %-28s  %5d  [too few for S-W test]", cell_lbl, length(sub)))
+                    }
+                }
+            }
+            out <- c(out, "")
+
+            # ── 3. Homogeneity of variance ─────────────────────────────
+            out <- c(out,
+                "  3. HOMOGENEITY OF VARIANCE ACROSS COHORTS",
+                hr
+            )
+            # Levene's test (car) if available; Bartlett fallback
+            has_car <- requireNamespace("car", quietly = TRUE)
+            if (has_car) {
+                lev_res <- tryCatch(
+                    car::leveneTest(DV ~ Cohort, data = df_r, center = median),
+                    error = function(e) NULL)
+                if (!is.null(lev_res)) {
+                    lev_p  <- lev_res[1, "Pr(>F)"]
+                    lev_f  <- lev_res[1, "F value"]
+                    lev_df1 <- lev_res[1, "Df"]
+                    lev_df2 <- lev_res[2, "Df"]
+                    hom_tag <- if (lev_p >= 0.05) "homogeneous (p >= .05)" else
+                               if (lev_p >= 0.01) "marginally heterogeneous (p < .05)" else
+                               "HETEROGENEOUS (p < .01)"
+                    out <- c(out,
+                        paste0("  Levene's test  (car::leveneTest, center = median)"),
+                        paste0("    F(", lev_df1, ", ", lev_df2, ") = ",
+                               format(lev_f, digits = 5),
+                               "   p = ", format(lev_p, digits = 4)),
+                        paste0("    Interpretation : ", hom_tag)
+                    )
+                } else {
+                    out <- c(out, "  Levene's test failed; trying Bartlett's test.")
+                    has_car <- FALSE
+                }
+            }
+            if (!has_car) {
+                bart_res <- tryCatch(
+                    bartlett.test(DV ~ Cohort, data = df_r),
+                    error = function(e) NULL)
+                if (!is.null(bart_res)) {
+                    hom_tag <- if (bart_res$p.value >= 0.05) "homogeneous (p >= .05)" else "HETEROGENEOUS"
+                    out <- c(out,
+                        paste0("  Bartlett's test:"),
+                        paste0("    K-sq = ", format(bart_res$statistic, digits = 5),
+                               "   df = ", bart_res$parameter,
+                               "   p = ", format(bart_res$p.value, digits = 4)),
+                        paste0("    Interpretation : ", hom_tag)
+                    )
+                } else {
+                    out <- c(out, "  [Homogeneity test failed to run]")
+                }
+            }
+            out <- c(out, "",
+                "  Note: if HETEROGENEOUS, use a heteroscedastic LMM",
+                "        (glmmTMB with dispformula, or lme with weights = varIdent(~1|Cohort)).",
+                ""
+            )
+
+            # ── 4. Sphericity (Mauchly's W) ────────────────────────────
+            out <- c(out,
+                "  4. SPHERICITY  (Mauchly's W test)",
+                hr
+            )
+            if (length(weeks) < 3) {
+                out <- c(out, "  [Sphericity test requires >= 3 time points; skipped]", "")
+            } else {
+                # Need wide format with complete subjects
+                wide_df <- reshape(df_r[, c("ID", "Week", "DV")],
+                                   idvar   = "ID",
+                                   timevar = "Week",
+                                   direction = "wide")
+                dv_cols <- grep("^DV\\.", names(wide_df), value = TRUE)
+                Y <- as.matrix(wide_df[, dv_cols])
+                Y <- Y[complete.cases(Y), ]
+                if (nrow(Y) >= ncol(Y) + 1) {
+                    idata <- data.frame(Week = factor(seq_len(ncol(Y))))
+                    mauch <- tryCatch({
+                        fit_mlm <- lm(Y ~ 1)
+                        mauchly.test(fit_mlm, idata = idata,
+                                     X = ~ 1)
+                    }, error = function(e) NULL)
+                    if (!is.null(mauch)) {
+                        sph_tag <- if (mauch$p.value >= 0.05) "sphericity not violated (p >= .05)" else
+                                   if (mauch$p.value >= 0.01) "marginal violation (p < .05) -- use GG/HF correction" else
+                                   "VIOLATED (p < .01) -- Greenhouse-Geisser correction required"
+                        out <- c(out,
+                            paste0("  Mauchly's W = ", format(mauch$statistic, digits = 5),
+                                   "   p = ", format(mauch$p.value, digits = 4),
+                                   "   df = ", mauch$parameter),
+                            paste0("  Interpretation : ", sph_tag),
+                            ""
+                        )
+                    } else {
+                        out <- c(out, "  [Mauchly's test failed to run]", "")
+                    }
+                } else {
+                    out <- c(out, "  [Insufficient complete subjects for Mauchly's test]", "")
+                }
+            }
+
+            # ── 5. LMM residual normality ──────────────────────────────
+            out <- c(out,
+                "  5. LMM RESIDUAL NORMALITY  (lme4::lmer, if available)",
+                hr
+            )
+            has_lme4 <- requireNamespace("lme4", quietly = TRUE)
+            if (has_lme4) {
+                lmm_res <- tryCatch(
+                    lme4::lmer(DV ~ Cohort + Week + (1 | ID),
+                               data = df_r, REML = TRUE,
+                               control = lme4::lmerControl(optimizer = "bobyqa")),
+                    error   = function(e) NULL,
+                    warning = function(w) {
+                        tryCatch(
+                            lme4::lmer(DV ~ Cohort + Week + (1 | ID),
+                                       data = df_r, REML = TRUE),
+                            error = function(e2) NULL)
+                    }
+                )
+                if (!is.null(lmm_res)) {
+                    res_vals <- residuals(lmm_res)
+                    sw_res   <- tryCatch(shapiro.test(res_vals), error = function(e) NULL)
+                    if (!is.null(sw_res)) {
+                        res_interp <- if (sw_res$p.value >= 0.05) "residuals appear normally distributed" else
+                                      if (sw_res$p.value >= 0.01) "marginal non-normality of residuals" else
+                                      "NON-NORMAL residuals -- consider transformation"
+                        out <- c(out,
+                            paste0("  Model: DV ~ Cohort + Week + (1 | ID)  [main-effects LMM]"),
+                            paste0("  Residual Shapiro-Wilk:"),
+                            paste0("    W = ", format(sw_res$statistic, digits = 6),
+                                   "   p = ", format(sw_res$p.value, digits = 4),
+                                   "   n_res = ", length(res_vals)),
+                            paste0("    Interpretation : ", res_interp)
+                        )
+                    } else {
+                        out <- c(out, "  [Residual S-W test failed]")
+                    }
+                } else {
+                    out <- c(out, "  [lme4::lmer failed to converge; residuals not evaluated]")
+                }
+            } else {
+                out <- c(out,
+                    "  [lme4 not installed; install with: install.packages('lme4')]",
+                    "  Skipping LMM residual check."
+                )
+            }
+            out <- c(out, "")
+
+            # ── 6. Outlier detection (IQR-based, per cell) ─────────────
+            out <- c(out,
+                "  6. OUTLIER DETECTION  (IQR-based, per Cohort \u00d7 Week cell)",
+                hr,
+                sprintf("  %-28s  %-10s  %8s  %8s  %8s  %s",
+                        "Cell", "ID", "Value", "Q1", "Q3", "Flag")
+            )
+            n_outliers <- 0L
+            for (coh in cohorts) {
+                for (wk in weeks) {
+                    mask <- df_r$Cohort == coh & df_r$Week == wk
+                    sub  <- df_r[mask, ]
+                    sub  <- sub[!is.na(sub$DV), ]
+                    if (nrow(sub) < 4) next
+                    q1  <- quantile(sub$DV, 0.25)
+                    q3  <- quantile(sub$DV, 0.75)
+                    iqr <- q3 - q1
+                    lo  <- q1 - 1.5 * iqr
+                    hi  <- q3 + 1.5 * iqr
+                    hits <- sub[sub$DV < lo | sub$DV > hi, ]
+                    if (nrow(hits) > 0) {
+                        cell_lbl <- paste0(coh, " W", wk)
+                        for (i in seq_len(nrow(hits))) {
+                            flag <- if (hits$DV[i] > hi) "HIGH" else "LOW"
+                            out <- c(out, sprintf(
+                                "  %-28s  %-10s  %8.3f  %8.3f  %8.3f  %s",
+                                cell_lbl, as.character(hits$ID[i]),
+                                hits$DV[i], q1, q3, flag))
+                            n_outliers <- n_outliers + 1L
+                        }
+                    }
+                }
+            }
+            if (n_outliers == 0L) {
+                out <- c(out, "  No IQR-based outliers detected in any cell.")
+            } else {
+                out <- c(out, "",
+                    paste0("  Total outlier observations: ", n_outliers),
+                    "  Consider reviewing these points before fitting the model."
+                )
+            }
+            out <- c(out, "")
+
+            # ── 7. Cullen-Frey diagram ──────────────────────────────────
+            out <- c(out,
+                "  7. CULLEN-FREY DIAGRAM  (fitdistrplus optional)",
+                hr
+            )
+            has_fd <- requireNamespace("fitdistrplus", quietly = TRUE)
+            cf_status <- if (has_fd) {
+                tryCatch({
+                    grDevices::png(r_cf_fp, width = 900, height = 700, res = 110)
+                    fitdistrplus::descdist(vals, discrete = FALSE, boot = 500)
+                    graphics::title(main = paste0("Cullen-Frey: ", r_meas_name,
+                                                  "  (weekly means, pooled across cohorts)"))
+                    grDevices::dev.off()
+                    paste0("  Cullen-Frey plot saved : ", r_cf_fp)
+                }, error = function(e) {
+                    tryCatch(grDevices::dev.off(), error = function(e2) NULL)
+                    paste0("  [Cullen-Frey failed: ", conditionMessage(e), "]")
+                })
+            } else {
+                "  [fitdistrplus not installed -- install with: install.packages('fitdistrplus')]"
+            }
+            out <- c(out, cf_status, "")
+
+            # ── Overall recommendation ─────────────────────────────────
+            sw_ok  <- is.null(sw_all) || sw_all$p.value >= 0.05
+            res_ok <- !has_lme4 || TRUE   # assessed above individually
+            out <- c(out,
+                "  RECOMMENDATION",
+                hr,
+                if (sw_ok)
+                    "  Pooled data appear normally distributed."
+                else
+                    "  Pooled data depart from normality -- inspect per-cell results.",
+                "  For a Cohort x Week repeated-measures design with continuous unbounded DV:",
+                "    Primary model : gaussian LMM  (lme4::lmer or nlme::lme)",
+                "                    DV ~ Cohort * Week + (1 | ID)",
+                "    If residuals non-normal : consider log(DV + offset) or sqrt transformation",
+                "    If heteroscedastic      : add dispformula or varIdent weights by Cohort",
+                "    For sphericity violation: Greenhouse-Geisser or Huynh-Feldt correction",
+                "                             (pingouin / ezANOVA automatically apply GG)",
+                ""
+            )
+
+            con <- file(r_txt_fp, encoding = "UTF-8")
+            writeLines(out, con)
+            close(con)
+        """)
+
+        txt_content = (
+            Path(_txt_fp.replace('/', os.sep)).read_text(encoding='utf-8', errors='replace')
+            if Path(_txt_fp.replace('/', os.sep)).exists()
+            else "[R output file not found]"
+        )
+        result = {'text': txt_content}
+
+    except Exception as _e:
+        txt_content = f"  [R error: {_e}]"
+        result = {'error': str(_e)}
+
+    finally:
+        for _fp in [_data_fp, _txt_fp]:
+            try:
+                real = _fp.replace('/', os.sep)
+                if os.path.exists(real):
+                    os.unlink(real)
+            except Exception:
+                pass
+
+    W2 = 80
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    header_lines = [
+        "=" * W2,
+        "  DISTRIBUTION DIAGNOSTICS + MIXED-MODEL ASSUMPTION CHECKS",
+        f"  Measure : {measure}",
+        "  Design  : Cohort (between-subjects) \u00d7 Week (within-subjects)",
+        "=" * W2,
+        f"  Generated  : {now_str}",
+        f"  Cohorts    : {', '.join(cohort_labels)}",
+        f"  Weeks      : {', '.join(str(w) for w in week_vals)}",
+        f"  N subjects : {n_subj}  |  N obs (weekly means) : {n_obs}",
+        "=" * W2,
+        "",
+    ]
+    full_report = "\n".join(header_lines) + "\n" + txt_content
+
+    print("\n" + full_report)
+
+    if save_path is not None:
+        Path(save_path).write_text(full_report, encoding='utf-8')
+        print(f"\n[OK] Diagnostics report saved -> {save_path}")
+
+    return result
+
+
 # =============================================================================
 
 def calculate_animal_slopes(
@@ -10498,15 +11000,16 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  6. Behavioral stats     -- Cohort x Week analysis of binary behavioral metrics")
     print("  7. BH-FDR 2-way omnibus -- CA% x Week for all measures, BH-FDR corrected across measures")
     print("  8. Statistical registry -- Print/save methods documentation for all tests used")
-    print("  9. Run all (1-8)")
+    print("  9. Distribution + assumption checks -- R-based: normality, homogeneity, sphericity, LMM residuals")
+    print(" 10. Run all (1-9)")
     print()
 
-    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-10) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '9')
+    run_all = (user_input == '10')
 
     # ------------------------------------------------------------------ #
     # Option 1: OLS assumption diagnostics
@@ -10802,6 +11305,24 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             print(f"  [WARNING] Registry generation failed: {e}")
             import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 9: Distribution + assumption checks
+    # ------------------------------------------------------------------ #
+    if user_input == '9' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: Distribution diagnostics + mixed-model assumption checks (R)")
+        print("=" * 80)
+        try:
+            diag_path = Path(f"0v2_weight_dist_diag_{timestamp}.txt")
+            diagnose_weight_distributions(
+                cohort_dfs=cohorts,
+                measure="Total Change",
+                save_path=diag_path,
+            )
+        except Exception as e:
+            print(f"  [WARNING] Distribution diagnostics failed: {e}")
+            import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("0% vs 2% analysis complete.")
     print("=" * 80)
@@ -10864,15 +11385,16 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  4. Behavioral plots       -- Nesting, Lethargy, Anxiety prevalence across weeks")
     print("  5. Cohort-avg plots       -- Total/Daily Change averaged by cohort (CA%-agnostic)")
     print("  6. Slope analysis         -- Per-animal fitted slopes within cohorts + between-cohort comparison")
-    print("  7. Run all (1-6)")
+    print("  7. Distribution + assumption checks -- R-based: normality, homogeneity, sphericity, LMM residuals")
+    print("  8. Run all (1-7)")
     print()
 
-    user_input = input("Select option (1-7) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-8) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '7')
+    run_all = (user_input == '8')
 
     plot_dir = Path(f"0vramp_plots_{timestamp}")
 
@@ -11092,6 +11614,24 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
 
             print(f"\n[OK] Slope analysis outputs saved -> {plot_dir}")
 
+    # ------------------------------------------------------------------ #
+    # Option 7: Distribution + assumption checks
+    # ------------------------------------------------------------------ #
+    if user_input == '7' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: Distribution diagnostics + mixed-model assumption checks (R)")
+        print("=" * 80)
+        try:
+            diag_path = Path(f"0vramp_weight_dist_diag_{timestamp}.txt")
+            diagnose_weight_distributions(
+                cohort_dfs=cohorts,
+                measure="Total Change",
+                save_path=diag_path,
+            )
+        except Exception as e:
+            print(f"  [WARNING] Distribution diagnostics failed: {e}")
+            import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("0% vs Ramp analysis complete.")
     print("=" * 80)
@@ -11157,15 +11697,16 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  6. Slope analysis         -- Per-animal fitted slopes within cohorts + between-cohort comparison")
     print("  7. Week 3 weight bar      -- Bar plot of average Total Change at Week 3 per cohort (mean \u00b1 SEM + individual points)")
     print("  8. Week 3 behavioral bars -- Bar plots of % observations for No Nest / Anxious / Lethargy at Week 3")
-    print("  9. Run all (1-8)")
+    print("  9. Distribution + assumption checks -- R-based: normality, homogeneity, sphericity, LMM residuals")
+    print(" 10. Run all (1-9)")
     print()
 
-    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-10) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '9')
+    run_all = (user_input == '10')
 
     plot_dir = Path(f"2vramp_plots_{timestamp}")
 
@@ -11617,6 +12158,24 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             else:
                 plt.close('all')
 
+    # ------------------------------------------------------------------ #
+    # Option 9: Distribution + assumption checks
+    # ------------------------------------------------------------------ #
+    if user_input == '9' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: Distribution diagnostics + mixed-model assumption checks (R)")
+        print("=" * 80)
+        try:
+            diag_path = Path(f"2vramp_weight_dist_diag_{timestamp}.txt")
+            diagnose_weight_distributions(
+                cohort_dfs=cohorts,
+                measure="Total Change",
+                save_path=diag_path,
+            )
+        except Exception as e:
+            print(f"  [WARNING] Distribution diagnostics failed: {e}")
+            import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("2% vs Ramp analysis complete.")
     print("=" * 80)
@@ -11687,15 +12246,16 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  4. Behavioral plots       -- Nesting, Lethargy, Anxiety prevalence across weeks")
     print("  5. Cohort-avg plots       -- Total/Daily Change averaged by cohort (CA%-agnostic)")
     print("  6. Slope analysis         -- Per-animal fitted slopes within cohorts + between-cohort comparison")
-    print("  7. Run all (1-6)")
+    print("  7. Distribution + assumption checks -- R-based: normality, homogeneity, sphericity, LMM residuals")
+    print("  8. Run all (1-7)")
     print()
 
-    user_input = input("Select option (1-7) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-8) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '7')
+    run_all = (user_input == '8')
 
     plot_dir = Path(f"all3_plots_{timestamp}")
 
@@ -11952,6 +12512,24 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 import traceback; traceback.print_exc()
 
             print(f"\n[OK] Slope analysis outputs saved -> {plot_dir}")
+
+    # ------------------------------------------------------------------ #
+    # Option 7: Distribution + assumption checks
+    # ------------------------------------------------------------------ #
+    if user_input == '7' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: Distribution diagnostics + mixed-model assumption checks (R)")
+        print("=" * 80)
+        try:
+            diag_path = Path(f"all3_weight_dist_diag_{timestamp}.txt")
+            diagnose_weight_distributions(
+                cohort_dfs=cohorts,
+                measure="Total Change",
+                save_path=diag_path,
+            )
+        except Exception as e:
+            print(f"  [WARNING] Distribution diagnostics failed: {e}")
+            import traceback; traceback.print_exc()
 
     print("\n" + "=" * 80)
     print("0% vs 2% vs Ramp analysis complete.")
