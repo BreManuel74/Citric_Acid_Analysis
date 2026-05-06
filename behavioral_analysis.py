@@ -47,7 +47,7 @@ plt.rcParams["svg.fonttype"] = "none"
 # ═══════════════════════════════════════════════════════════════════════════════
 #  EXPERIMENT MODE — change this single value to switch between designs
 # ═══════════════════════════════════════════════════════════════════════════════
-EXPERIMENT_MODE = 'ramp'   # 'ramp' or 'nonramp'
+EXPERIMENT_MODE = 'nonramp'   # 'ramp' or 'nonramp'
 
 _MODE_LABELS = {
     'ramp': {
@@ -3231,7 +3231,11 @@ def generate_descriptive_stats_report(
 		print(f"  Column '{wc}' not found in data.")
 		return {}
 
-	weeks = sorted(w for w in cdf[wc].dropna().unique() if w > 0)
+	# In nonramp mode exclude Week 0 (baseline); in ramp mode include 0% CA
+	weeks = sorted(
+		w for w in cdf[wc].dropna().unique()
+		if (EXPERIMENT_MODE != 'nonramp' or w > 0)
+	)
 
 	# ── Helper: 95% CI of the mean (t-distribution) ───────────────────────────
 	def _ci95(arr):
@@ -3412,6 +3416,66 @@ def generate_descriptive_stats_report(
 			print(f"  {'-'*58}")
 			print(f"  {'All':>8}  {_apn:>4}  {_ap_nt:>7}  {_ap_pct:>6.1f}%  {_ap_ci_str:>22}")
 
+	# ── Starting weights by sex ─────────────────────────────────────────────────
+	results_start_wt: dict = {}
+	if 'Weight' in cdf.columns and 'ID' in cdf.columns and 'Sex' in cdf.columns:
+		# First non-null Weight per animal (sorted by date)
+		_sw_rows = []
+		for _sw_id, _sw_grp in cdf.sort_values(['ID', 'Date']).groupby('ID'):
+			_sw_valid = _sw_grp.dropna(subset=['Weight'])
+			if _sw_valid.empty:
+				continue
+			_sw_first = _sw_valid.iloc[0]
+			_sw_sex = str(_sw_first.get('Sex', '')).strip().upper()
+			_sw_sex = _sw_sex[0] if _sw_sex else 'U'
+			_sw_rows.append({
+				'ID': str(_sw_id),
+				'Sex': _sw_sex,
+				'Weight': float(_sw_first['Weight']),
+			})
+		_sw_df = pd.DataFrame(_sw_rows) if _sw_rows else pd.DataFrame(columns=['ID', 'Sex', 'Weight'])
+
+		print(f"\n{'─'*60}")
+		print("  STARTING WEIGHT BY SEX")
+		print(f"{'─'*60}")
+		print(f"  {'ID':<16}  {'Sex':>4}  {'Starting Weight (g)':>20}")
+		print(f"  {'-'*44}")
+		for _, _sw_row in _sw_df.sort_values(['Sex', 'ID']).iterrows():
+			print(f"  {str(_sw_row['ID']):<16}  {_sw_row['Sex']:>4}  {_sw_row['Weight']:>20.2f}")
+
+		print(f"\n  {'Sex':>4}  {'n':>4}  {'Mean (g)':>10}  {'SD':>8}  {'95% CI':>22}")
+		print(f"  {'-'*54}")
+		for _sw_sex in sorted(_sw_df['Sex'].unique()):
+			_sw_arr = _sw_df.loc[_sw_df['Sex'] == _sw_sex, 'Weight'].values.astype(float)
+			_sw_n   = len(_sw_arr)
+			_sw_mean = float(np.mean(_sw_arr)) if _sw_n > 0 else float('nan')
+			_sw_sd   = float(np.std(_sw_arr, ddof=1)) if _sw_n >= 2 else float('nan')
+			_sw_ci_lo, _sw_ci_hi = _ci95(_sw_arr)
+			_sw_ci_str = (f"[{_sw_ci_lo:.2f}, {_sw_ci_hi:.2f}]"
+			              if not np.isnan(_sw_ci_lo) else "N/A")
+			results_start_wt[_sw_sex] = {
+				'n': _sw_n, 'mean': _sw_mean, 'sd': _sw_sd,
+				'ci_lo': _sw_ci_lo, 'ci_hi': _sw_ci_hi,
+				'ids': _sw_df.loc[_sw_df['Sex'] == _sw_sex, 'ID'].tolist(),
+				'weights': _sw_arr.tolist(),
+			}
+			print(f"  {_sw_sex:>4}  {_sw_n:>4}  {_sw_mean:>10.2f}  {_sw_sd:>8.3f}  {_sw_ci_str:>22}")
+		# Collapsed All row
+		_sw_all_arr = _sw_df['Weight'].values.astype(float)
+		_sw_all_n   = len(_sw_all_arr)
+		if _sw_all_n > 0:
+			_sw_all_mean = float(np.mean(_sw_all_arr))
+			_sw_all_sd   = float(np.std(_sw_all_arr, ddof=1)) if _sw_all_n >= 2 else float('nan')
+			_sw_all_ci_lo, _sw_all_ci_hi = _ci95(_sw_all_arr)
+			_sw_all_ci_str = (f"[{_sw_all_ci_lo:.2f}, {_sw_all_ci_hi:.2f}]"
+			                  if not np.isnan(_sw_all_ci_lo) else "N/A")
+			results_start_wt['_all'] = {
+				'n': _sw_all_n, 'mean': _sw_all_mean, 'sd': _sw_all_sd,
+				'ci_lo': _sw_all_ci_lo, 'ci_hi': _sw_all_ci_hi,
+			}
+			print(f"  {'-'*54}")
+			print(f"  {'All':>4}  {_sw_all_n:>4}  {_sw_all_mean:>10.2f}  {_sw_all_sd:>8.3f}  {_sw_all_ci_str:>22}")
+
 	# ── Save report ───────────────────────────────────────────────────────────
 	rpt_path = None
 	if save_report:
@@ -3524,6 +3588,53 @@ def generate_descriptive_stats_report(
 					f"  {'All':>8}  {s['n']:>4}  {s['n_true']:>7}  {s['prev']:>6.1f}%  {ci_str:>22}"
 				)
 			lines.append("")
+		# Starting weight by sex section
+		if results_start_wt:
+			lines += [
+				"",
+				"="*80,
+				"STARTING WEIGHT BY SEX",
+				"="*80,
+				"Note: starting weight = first recorded weight per animal (earliest date)",
+				"",
+				"Individual starting weights:",
+				"-"*44,
+				f"  {'ID':<16}  {'Sex':>4}  {'Starting Weight (g)':>20}",
+				"-"*44,
+			]
+			# rebuild _sw_df from stored results for the report
+			_rpt_sw_rows = []
+			for _rpt_sex, _rpt_rec in results_start_wt.items():
+				if _rpt_sex == '_all':
+					continue
+				for _rpt_id, _rpt_wt in zip(_rpt_rec.get('ids', []), _rpt_rec.get('weights', [])):
+					_rpt_sw_rows.append((_rpt_sex, str(_rpt_id), float(_rpt_wt)))
+			for _rpt_sex_s, _rpt_id_s, _rpt_wt_s in sorted(_rpt_sw_rows, key=lambda x: (x[0], x[1])):
+				lines.append(f"  {_rpt_id_s:<16}  {_rpt_sex_s:>4}  {_rpt_wt_s:>20.2f}")
+			lines += [
+				"",
+				"Summary statistics by sex:",
+				"-"*54,
+				f"  {'Sex':>4}  {'n':>4}  {'Mean (g)':>10}  {'SD':>8}  {'95% CI':>22}",
+				"-"*54,
+			]
+			for _rpt_sex in sorted(k for k in results_start_wt if k != '_all'):
+				s = results_start_wt[_rpt_sex]
+				_rpt_ci_str = (f"[{s['ci_lo']:.2f}, {s['ci_hi']:.2f}]"
+				               if not np.isnan(s['ci_lo']) else "N/A")
+				lines.append(
+					f"  {_rpt_sex:>4}  {s['n']:>4}  {s['mean']:>10.2f}  {s['sd']:>8.3f}  {_rpt_ci_str:>22}"
+				)
+			if '_all' in results_start_wt:
+				s = results_start_wt['_all']
+				_rpt_ci_str = (f"[{s['ci_lo']:.2f}, {s['ci_hi']:.2f}]"
+				               if not np.isnan(s['ci_lo']) else "N/A")
+				lines.append("-"*54)
+				lines.append(
+					f"  {'All':>4}  {s['n']:>4}  {s['mean']:>10.2f}  {s['sd']:>8.3f}  {_rpt_ci_str:>22}"
+				)
+			lines.append("")
+
 		lines += ["="*80, "END OF REPORT", "="*80, ""]
 		_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 		rpt_path = Path.cwd() / f"descriptive_stats_report_{_ts}.txt"
@@ -3537,6 +3648,7 @@ def generate_descriptive_stats_report(
 		'continuous': results_cont,
 		'behavioral': results_beh,
 		'prevalence': results_prev,
+		'starting_weight': results_start_wt,
 		'weeks': weeks,
 		'report_path': rpt_path,
 	}
