@@ -187,7 +187,7 @@ plt.rcParams.update({
     "figure.titlesize": 10,
     "lines.linewidth": 0.5,
     "lines.markersize": 1.5,
-    "figure.figsize": (3.5, 3.5), #4.5 by 2.5 for larger plot
+    "figure.figsize": (3, 2.5), #4.5 by 2.5 for larger plot
     "axes.xmargin": 0,
     "savefig.dpi": 200,
 })
@@ -5891,73 +5891,6 @@ def plot_daily_change_milestone_days(
         ax.set_yticks(np.arange(_ymin, _ymax + _step, _step))
         ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.0f'))
 
-    # ── significance brackets ─────────────────────────────────────────────────
-    # Only draw brackets for significant pairs (p_adj < 0.05).
-    # Brackets are stacked above the highest data point to avoid overlap.
-    def _sig_label(p):
-        if np.isnan(p):  return None
-        if p < 0.001:    return '***'
-        if p < 0.01:     return '**'
-        if p < 0.05:     return '*'
-        return 'ns'
-
-    _sig_pairs = [
-        r for r in _pw_results
-        if _sig_label(r.get('p_adj', np.nan)) is not None
-    ]
-    if _sig_pairs:
-        # Determine the baseline clearance level (above the highest bar+SEM+scatter)
-        _all_tops = [
-            data_by_day[d]['mean'] + data_by_day[d]['sem']
-            for d in _days if data_by_day[d]['n'] > 0
-        ]
-        _scatter_max = float(np.nanmax(all_vals)) if len(all_vals) else 0.0
-        _plot_top = max(max(_all_tops), _scatter_max)
-        _y_range  = _plot_top - float(np.nanmin(all_vals)) if len(all_vals) else 1.0
-        _gap  = _y_range * 0.08   # vertical gap between stacked brackets
-        _tick = _y_range * 0.03   # small downward tick at each end of bracket
-        _font = plt.rcParams.get('font.size', 8) * 0.85
-
-        # Sort significant pairs by span width so shorter spans sit lower
-        _sig_pairs_sorted = sorted(
-            _sig_pairs,
-            key=lambda r: abs(_days.index(r['pair'][1]) - _days.index(r['pair'][0]))
-        )
-        # Track per-column occupancy to stack non-overlapping brackets
-        _col_level = {i: _plot_top + _gap * 0.5 for i in range(n_bars)}
-
-        for _r in _sig_pairs_sorted:
-            _d1, _d2 = _r['pair']
-            _xi = _days.index(_d1)
-            _xj = _days.index(_d2)
-            # bracket base height = max occupancy across spanned columns
-            _base = max(_col_level[k] for k in range(_xi, _xj + 1))
-            _base += _gap * 0.5
-            _top  = _base + _tick
-            # horizontal bar
-            ax.plot([_xi, _xj], [_base, _base], color='black', linewidth=0.8,
-                    clip_on=False, zorder=6)
-            # left tick
-            ax.plot([_xi, _xi], [_base - _tick, _base], color='black',
-                    linewidth=0.8, clip_on=False, zorder=6)
-            # right tick
-            ax.plot([_xj, _xj], [_base - _tick, _base], color='black',
-                    linewidth=0.8, clip_on=False, zorder=6)
-            # significance label
-            ax.text((_xi + _xj) / 2, _base + _tick * 0.4,
-                    _sig_label(_r['p_adj']),
-                    ha='center', va='bottom', fontsize=_font, zorder=7)
-            # update column occupancy
-            _new_level = _base + _gap
-            for k in range(_xi, _xj + 1):
-                _col_level[k] = max(_col_level[k], _new_level)
-
-        # Extend y-limit to accommodate brackets
-        _new_ymax = max(_col_level.values()) + _gap
-        _cur_ymin, _cur_ymax = ax.get_ylim()
-        if _new_ymax > _cur_ymax:
-            ax.set_ylim(_cur_ymin, _new_ymax)
-
     plt.tight_layout()
 
     # ── save figure ───────────────────────────────────────────────────────────
@@ -6051,6 +5984,199 @@ def plot_daily_change_milestone_days(
         plt.close(fig)
 
     return {'figure': fig, 'data': data_by_day, 'report_path': _report_path}
+
+
+def run_friedman_milestone_days_r(
+    df: pd.DataFrame,
+    *,
+    days: Optional[list] = None,
+    save_report: bool = True,
+) -> dict:
+    """Run a Friedman test in R on Daily Weight Change at milestone days.
+
+    Uses R's built-in ``friedman.test()`` with mouse ID as the blocking
+    (repeated-measures) factor and Day as the categorical time factor.
+    Post-hoc pairwise Wilcoxon signed-rank tests with Holm-Bonferroni
+    correction are run automatically.
+
+    Only mice with complete data at *all* specified days are included.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Master DataFrame.
+    days : list[int], optional
+        Milestone days to test.  Default: [8, 15, 22, 29].
+    save_report : bool
+        Write a .txt report to the current working directory.
+
+    Returns
+    -------
+    dict
+        ``{'r_output': str, 'report_path': Path | None,
+           'complete_ids': list, 'n_subjects': int}``
+    """
+    import subprocess
+    import tempfile
+
+    _days = list(days) if days is not None else [8, 15, 22, 29]
+
+    cdf = clean_master_dataframe(df)
+    cdf = _add_day_number_column(cdf)
+
+    if 'Day' not in cdf.columns or 'Daily Change' not in cdf.columns:
+        print("ERROR: 'Day' or 'Daily Change' column not found after processing.")
+        return {}
+
+    # Build long-format table: ID, Day, DailyChange
+    records = []
+    for d in _days:
+        sub = cdf[cdf['Day'] == d][['ID', 'Daily Change']].dropna(subset=['Daily Change'])
+        for _, row in sub.iterrows():
+            records.append({
+                'ID': str(row['ID']),
+                'Day': d,
+                'DailyChange': float(row['Daily Change']),
+            })
+
+    if not records:
+        print("ERROR: No data found for the specified days.")
+        return {}
+
+    long_df = pd.DataFrame(records)
+
+    # Keep only IDs present at ALL days (complete cases required for Friedman)
+    id_counts = long_df.groupby('ID')['Day'].nunique()
+    complete_ids = sorted(id_counts[id_counts == len(_days)].index.tolist())
+    if len(complete_ids) < 3:
+        print(
+            f"ERROR: Only {len(complete_ids)} subject(s) have complete data at "
+            f"all {len(_days)} days. Friedman test requires ≥ 3."
+        )
+        return {}
+
+    long_df = long_df[long_df['ID'].isin(complete_ids)].copy()
+
+    print(f"\nFriedman test: {len(complete_ids)} subjects × {len(_days)} days")
+    print(f"  Subjects : {', '.join(complete_ids)}")
+    print(f"  Days     : {_days}")
+
+    # Write long-format data to a temp CSV
+    tmp_csv = Path(tempfile.mktemp(suffix='.csv'))
+    long_df.to_csv(str(tmp_csv), index=False)
+
+    # Build R script (forward-slashes for R on Windows)
+    _csv_r = str(tmp_csv).replace('\\', '/')
+    _day_levels = ', '.join(str(d) for d in _days)
+    r_script = (
+        'options(warn=1)\n'
+        f'data <- read.csv("{_csv_r}")\n'
+        f'data$Day <- factor(data$Day, levels = c({_day_levels}))\n'
+        'data$ID  <- factor(data$ID)\n'
+        '\n'
+        'cat("\\n========================================\\n")\n'
+        'cat("FRIEDMAN TEST - DAILY WEIGHT CHANGE\\n")\n'
+        'cat("========================================\\n")\n'
+        f'cat("Days tested : {_days}\\n")\n'
+        'cat("N subjects  :", nlevels(data$ID), "(complete cases)\\n\\n")\n'
+        '\n'
+        '# Friedman rank-sum test\n'
+        'fr <- friedman.test(DailyChange ~ Day | ID, data = data)\n'
+        'print(fr)\n'
+        '\n'
+        'cat("\\n----------------------------------------\\n")\n'
+        'cat("POST-HOC: Pairwise Wilcoxon signed-rank\\n")\n'
+        'cat("(Holm-Bonferroni correction)\\n")\n'
+        'cat("----------------------------------------\\n")\n'
+        'ph <- pairwise.wilcox.test(\n'
+        '  data$DailyChange, data$Day,\n'
+        '  p.adjust.method = "holm",\n'
+        '  paired = TRUE,\n'
+        '  exact = FALSE\n'
+        ')\n'
+        'print(ph)\n'
+        'cat("\\n========================================\\n")\n'
+        'cat("END\\n")\n'
+    )
+
+    tmp_r = Path(tempfile.mktemp(suffix='.R'))
+    tmp_r.write_text(r_script, encoding='utf-8')
+
+    # Run Rscript
+    r_output = ''
+    try:
+        result = subprocess.run(
+            ['Rscript', '--vanilla', str(tmp_r)],
+            capture_output=True, text=True, timeout=120,
+        )
+        r_output = result.stdout
+        r_stderr = result.stderr.strip()
+        if result.returncode != 0:
+            print(f"R exited with code {result.returncode}.")
+        if r_stderr:
+            # filter out benign R warnings/messages
+            non_trivial = [
+                ln for ln in r_stderr.splitlines()
+                if not ln.startswith('Loading') and ln.strip()
+            ]
+            if non_trivial:
+                print("R messages:\n" + '\n'.join(non_trivial))
+    except FileNotFoundError:
+        print(
+            "ERROR: 'Rscript' not found. "
+            "Install R and ensure Rscript is on the system PATH."
+        )
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+        return {}
+    except subprocess.TimeoutExpired:
+        print("ERROR: R script timed out after 120 s.")
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+        return {}
+    finally:
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+
+    print(r_output)
+
+    # Save text report
+    _report_path: Optional[Path] = None
+    if save_report:
+        _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _report_path = Path.cwd() / f"friedman_milestone_days_report_{_ts}.txt"
+        _lines = [
+            "=" * 72,
+            "FRIEDMAN TEST — DAILY WEIGHT CHANGE AT MILESTONE DAYS",
+            "=" * 72,
+            f"Generated : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Mode      : {EXPERIMENT_MODE}",
+            f"Days      : {_days}",
+            f"N subjects: {len(complete_ids)} (complete cases only)",
+            f"Subjects  : {', '.join(complete_ids)}",
+            "",
+            "Test       : Friedman rank-sum test (non-parametric repeated measures)",
+            "Factor     : Day (time, categorical within-subjects)",
+            "Block      : Animal ID (repeated measures)",
+            "Post-hoc   : Pairwise Wilcoxon signed-rank, Holm-Bonferroni correction",
+            "",
+            "R OUTPUT",
+            "-" * 72,
+            r_output,
+            "",
+            "=" * 72,
+            "END OF REPORT",
+            "=" * 72,
+        ]
+        _report_path.write_text('\n'.join(_lines), encoding='utf-8')
+        print(f"Report saved -> {_report_path}")
+
+    return {
+        'r_output': r_output,
+        'report_path': _report_path,
+        'complete_ids': complete_ids,
+        'n_subjects': len(complete_ids),
+    }
 
 
 def main() -> None:
@@ -6318,6 +6444,20 @@ def main() -> None:
 				cdf, days=_ms_days, show=True, save_svg=_save_svg16,
 			)
 
+		elif task == 17:
+			print("\n[R Friedman] Friedman test on Daily Weight Change — milestone days...")
+			try:
+				day_input17 = input(
+					"  Days to test (comma-separated, default 8,15,22,29): "
+				).strip()
+			except (KeyboardInterrupt, EOFError):
+				day_input17 = ''
+			_fr_days = (
+				[int(x.strip()) for x in day_input17.split(',') if x.strip().isdigit()]
+				if day_input17 else [8, 15, 22, 29]
+			)
+			_cache['friedman'] = run_friedman_milestone_days_r(cdf, days=_fr_days)
+
 		else:
 			print(f"  Unknown task: {task}")
 
@@ -6339,6 +6479,7 @@ def main() -> None:
 		14: f"Descriptive statistics (per {fl}): weight changes + behavior %",
 		15: f"R: Total Change scatterplot \u2014 linear vs quadratic fit (per {fl})",
 		16: "Daily weight change \u2014 milestone days bar chart (days 8,15,22,29) + report",
+		17: "R: Friedman test \u2014 Daily Weight Change at milestone days (repeated measures)",
 	}
 
 	while True:
@@ -6362,7 +6503,7 @@ def main() -> None:
 			print(f"    [{t:>2}] {_LABELS[t]}")
 		print()
 		print("  R ANALYSIS")
-		for t in [15]:
+		for t in [15, 17]:
 			print(f"    [{t:>2}] {_LABELS[t]}")
 		print()
 		print("  WEIGHT CHANGE BARS")
