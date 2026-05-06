@@ -30,6 +30,9 @@ import pandas as pd
 import numpy as np
 import re
 import math
+import subprocess
+import shutil
+import tempfile
 from datetime import datetime
 from scipy import stats
 
@@ -11008,15 +11011,16 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  7. BH-FDR 2-way omnibus -- CA% x Week for all measures, BH-FDR corrected across measures")
     print("  8. Statistical registry -- Print/save methods documentation for all tests used")
     print("  9. Distribution + assumption checks -- R-based: normality, homogeneity, sphericity, LMM residuals")
-    print(" 10. Run all (1-9)")
+    print(" 10. R: nparLD Cohort x Week -- nonparametric two-way ANOVA (Cohort between, Week within) on weekly means")
+    print(" 11. Run all (1-10)")
     print()
 
-    user_input = input("Select option (1-10) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-11) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '10')
+    run_all = (user_input == '11')
 
     # ------------------------------------------------------------------ #
     # Option 1: OLS assumption diagnostics
@@ -11330,6 +11334,24 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             print(f"  [WARNING] Distribution diagnostics failed: {e}")
             import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 10: R nparLD -- Cohort x Week nonparametric two-way ANOVA
+    # ------------------------------------------------------------------ #
+    if user_input == '10' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: R nparLD -- Cohort x Week nonparametric two-way ANOVA")
+        print("=" * 80)
+        try:
+            run_nparld_cohort_week_r(
+                cohort_dfs=cohorts,
+                measure="Total Change",
+                save_report=True,
+                prefix="0v2",
+            )
+        except Exception as e:
+            print(f"  [WARNING] nparLD analysis failed: {e}")
+            import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("0% vs 2% analysis complete.")
     print("=" * 80)
@@ -11393,15 +11415,16 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  5. Cohort-avg plots       -- Total/Daily Change averaged by cohort (CA%-agnostic)")
     print("  6. Slope analysis         -- Per-animal fitted slopes within cohorts + between-cohort comparison")
     print("  7. Distribution + assumption checks -- R-based: normality, homogeneity, sphericity, LMM residuals")
-    print("  8. Run all (1-7)")
+    print("  8. R: nparLD Cohort x Week -- nonparametric two-way ANOVA (Cohort between, Week within) on weekly means")
+    print("  9. Run all (1-8)")
     print()
 
-    user_input = input("Select option (1-8) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '8')
+    run_all = (user_input == '9')
 
     plot_dir = Path(f"0vramp_plots_{timestamp}")
 
@@ -11639,6 +11662,24 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             print(f"  [WARNING] Distribution diagnostics failed: {e}")
             import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 8: R nparLD -- Cohort x Week nonparametric two-way ANOVA
+    # ------------------------------------------------------------------ #
+    if user_input == '8' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: R nparLD -- Cohort x Week nonparametric two-way ANOVA")
+        print("=" * 80)
+        try:
+            run_nparld_cohort_week_r(
+                cohort_dfs=cohorts,
+                measure="Total Change",
+                save_report=True,
+                prefix="0vramp",
+            )
+        except Exception as e:
+            print(f"  [WARNING] nparLD analysis failed: {e}")
+            import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("0% vs Ramp analysis complete.")
     print("=" * 80)
@@ -11705,15 +11746,16 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  7. Week 3 weight bar      -- Bar plot of average Total Change at Week 3 per cohort (mean \u00b1 SEM + individual points)")
     print("  8. Week 3 behavioral bars -- Bar plots of % observations for No Nest / Anxious / Lethargy at Week 3")
     print("  9. Distribution + assumption checks -- R-based: normality, homogeneity, sphericity, LMM residuals")
-    print(" 10. Run all (1-9)")
+    print(" 10. R: nparLD Cohort x Week -- nonparametric two-way ANOVA (Cohort between, Week within) on weekly means")
+    print(" 11. Run all (1-10)")
     print()
 
-    user_input = input("Select option (1-10) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-11) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '10')
+    run_all = (user_input == '11')
 
     plot_dir = Path(f"2vramp_plots_{timestamp}")
 
@@ -12183,6 +12225,24 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             print(f"  [WARNING] Distribution diagnostics failed: {e}")
             import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 10: R nparLD -- Cohort x Week nonparametric two-way ANOVA
+    # ------------------------------------------------------------------ #
+    if user_input == '10' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: R nparLD -- Cohort x Week nonparametric two-way ANOVA")
+        print("=" * 80)
+        try:
+            run_nparld_cohort_week_r(
+                cohort_dfs=cohorts,
+                measure="Total Change",
+                save_report=True,
+                prefix="2vramp",
+            )
+        except Exception as e:
+            print(f"  [WARNING] nparLD analysis failed: {e}")
+            import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("2% vs Ramp analysis complete.")
     print("=" * 80)
@@ -12254,15 +12314,16 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  5. Cohort-avg plots       -- Total/Daily Change averaged by cohort (CA%-agnostic)")
     print("  6. Slope analysis         -- Per-animal fitted slopes within cohorts + between-cohort comparison")
     print("  7. Distribution + assumption checks -- R-based: normality, homogeneity, sphericity, LMM residuals")
-    print("  8. Run all (1-7)")
+    print("  8. R: nparLD Cohort x Week -- nonparametric two-way ANOVA (Cohort between, Week within) on weekly means")
+    print("  9. Run all (1-8)")
     print()
 
-    user_input = input("Select option (1-8) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '8')
+    run_all = (user_input == '9')
 
     plot_dir = Path(f"all3_plots_{timestamp}")
 
@@ -12536,6 +12597,24 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             )
         except Exception as e:
             print(f"  [WARNING] Distribution diagnostics failed: {e}")
+            import traceback; traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 8: R nparLD -- Cohort x Week nonparametric two-way ANOVA
+    # ------------------------------------------------------------------ #
+    if user_input == '8' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: R nparLD -- Cohort x Week nonparametric two-way ANOVA")
+        print("=" * 80)
+        try:
+            run_nparld_cohort_week_r(
+                cohort_dfs=cohorts,
+                measure="Total Change",
+                save_report=True,
+                prefix="all3",
+            )
+        except Exception as e:
+            print(f"  [WARNING] nparLD analysis failed: {e}")
             import traceback; traceback.print_exc()
 
     print("\n" + "=" * 80)
@@ -12866,6 +12945,282 @@ def _run_rampramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("\n" + "=" * 80)
     print("Ramp vs 2-Week Ramp analysis complete.")
     print("=" * 80)
+
+
+# =============================================================================
+# R-BASED nparLD: NONPARAMETRIC TWO-WAY REPEATED-MEASURES ANOVA
+# Design: F1-LD-F1 (Cohort = between-subjects, Week = within-subjects)
+# =============================================================================
+
+def run_nparld_cohort_week_r(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    measure: str = "Total Change",
+    weeks: Optional[List[int]] = None,
+    save_report: bool = True,
+    prefix: str = "nparld",
+) -> dict:
+    """
+    Nonparametric equivalent of a two-way repeated-measures ANOVA via R nparLD.
+
+    Design  : F1-LD-F1 (one between-subjects factor x one within-subjects factor)
+    Between : Cohort  (CA% schedule label)
+    Within  : Week    (1-indexed chronological week)
+    Response: per-animal per-week mean of ``measure``
+
+    Requires R with the nparLD package installed.
+
+    Returns
+    -------
+    dict with keys: 'r_output', 'report_path', 'n_subjects', 'cohorts', 'weeks'
+    """
+    # ── Build combined weekly-mean dataset ────────────────────────────────────
+    frames = []
+    for label, df in cohort_dfs.items():
+        d = df.copy()
+        d = clean_cohort(d)
+        if 'Day' not in d.columns:
+            d = add_day_column_across_cohorts(d)
+        d = d[d['Day'] >= 1].copy()
+        d = _add_week_column_across_cohorts(d)
+        if measure not in d.columns:
+            print(f"  [WARNING] '{measure}' not found in cohort '{label}' — skipping")
+            continue
+        d['_Cohort'] = label
+        sub = d[['ID', '_Cohort', 'Week', measure]].dropna(subset=[measure])
+        frames.append(sub)
+
+    if not frames:
+        print(f"  [ERROR] No data available for measure '{measure}'.")
+        return {}
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.rename(columns={measure: 'TotalChange', '_Cohort': 'Cohort'})
+
+    # Per-animal per-week mean
+    weekly = (
+        combined
+        .groupby(['ID', 'Cohort', 'Week'], as_index=False)['TotalChange']
+        .mean()
+    )
+
+    if weeks is not None:
+        weekly = weekly[weekly['Week'].isin(weeks)].copy()
+
+    # Complete-case filter: keep only animals present in every Week
+    week_counts = weekly.groupby('ID')['Week'].nunique()
+    all_weeks_n = weekly['Week'].nunique()
+    complete_ids = week_counts[week_counts == all_weeks_n].index
+    n_dropped = weekly['ID'].nunique() - len(complete_ids)
+    if n_dropped:
+        print(f"  [NOTE] Dropped {n_dropped} animal(s) with incomplete weekly records; "
+              f"{len(complete_ids)} retained")
+    weekly = weekly[weekly['ID'].isin(complete_ids)].copy()
+
+    if weekly.empty or len(complete_ids) < 3:
+        print(f"  [ERROR] Insufficient complete-case animals ({len(complete_ids)}) for nparLD.")
+        return {}
+
+    week_levels = sorted(weekly['Week'].unique())
+    cohort_levels = sorted(weekly['Cohort'].unique())
+    n_subjects = int(weekly['ID'].nunique())
+
+    print(f"\nnparLD: {n_subjects} subjects x {len(week_levels)} weeks x {len(cohort_levels)} cohorts")
+    print(f"  Cohorts : {cohort_levels}")
+    print(f"  Weeks   : {week_levels}")
+
+    # ── Write temp CSV ──────────────────────────────────────────────────────
+    tmp_csv = Path(tempfile.mktemp(suffix='.csv'))
+    weekly[['ID', 'Cohort', 'Week', 'TotalChange']].to_csv(str(tmp_csv), index=False)
+
+    _csv_r     = str(tmp_csv).replace('\\', '/')
+    _wk_levels = ', '.join(str(w) for w in week_levels)
+    _co_levels = ', '.join(f'"{c}"' for c in cohort_levels)
+
+    r_script = (
+        'options(warn=1)\n'
+        'if (!require("nparLD", quietly=TRUE, warn.conflicts=FALSE)) {\n'
+        '  install.packages("nparLD", repos="https://cran.r-project.org", quiet=TRUE)\n'
+        '  library(nparLD)\n'
+        '}\n'
+        '\n'
+        f'data <- read.csv("{_csv_r}")\n'
+        f'data$Week   <- factor(data$Week,   levels=c({_wk_levels}))\n'
+        f'data$Cohort <- factor(data$Cohort, levels=c({_co_levels}))\n'
+        'data$ID     <- factor(data$ID)\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        f'cat("nparLD: {measure} -- Cohort x Week (F1-LD-F1 design)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'cat("N subjects :", nlevels(data$ID), "\\n")\n'
+        'cat("Cohorts    :", paste(levels(data$Cohort), collapse=", "), "\\n")\n'
+        'cat("Weeks      :", paste(levels(data$Week),  collapse=", "), "\\n\\n")\n'
+        '\n'
+        'result <- f1.ld.f1(\n'
+        '  y          = data$TotalChange,\n'
+        '  time       = data$Week,\n'
+        '  group      = data$Cohort,\n'
+        '  subject    = data$ID,\n'
+        '  time.name  = "Week",\n'
+        '  group.name = "Cohort",\n'
+        '  description = FALSE\n'
+        ')\n'
+        '\n'
+        'cat("\\n--- ANOVA-Type Statistic (ATS) ---\\n")\n'
+        'print(result$ANOVA.test)\n'
+        '\n'
+        'cat("\\n--- ATS with Box approximation ---\\n")\n'
+        'print(result$ANOVA.test.mod.Box)\n'
+        '\n'
+        'cat("\\n--- Wald-Type Statistic (WTS) ---\\n")\n'
+        'print(result$Wald.test)\n'
+        '\n'
+        'cat("\\n--- Relative Treatment Effects (RTE) ---\\n")\n'
+        'print(result$RTE)\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("POST-HOC: Between-cohort (Mann-Whitney U, Holm corrected)\\n")\n'
+        'cat("  (per-animal mean across all weeks)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'per_animal <- aggregate(TotalChange ~ ID + Cohort, data=data, FUN=mean)\n'
+        'ph_grp <- pairwise.wilcox.test(\n'
+        '  per_animal$TotalChange, per_animal$Cohort,\n'
+        '  p.adjust.method="holm", exact=FALSE\n'
+        ')\n'
+        'print(ph_grp)\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("POST-HOC: Between-cohort comparisons at each week\\n")\n'
+        'cat("  (Mann-Whitney U, Holm corrected within each week)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'for (wk in levels(data$Week)) {\n'
+        '  sub <- data[data$Week == wk, ]\n'
+        '  cat("\\nWeek:", wk, "\\n")\n'
+        '  cohs <- levels(sub$Cohort)\n'
+        '  if (length(cohs) < 2) { cat("  (only 1 cohort -- no pairwise test)\\n"); next }\n'
+        '  pairs_idx <- combn(length(cohs), 2)\n'
+        '  p_raw <- apply(pairs_idx, 2, function(idx) {\n'
+        '    x <- sub$TotalChange[sub$Cohort == cohs[idx[1]]]\n'
+        '    y <- sub$TotalChange[sub$Cohort == cohs[idx[2]]]\n'
+        '    if (length(x) < 1 || length(y) < 1) return(NA_real_)\n'
+        '    tryCatch(\n'
+        '      wilcox.test(x, y, exact=FALSE)$p.value,\n'
+        '      error = function(e) NA_real_\n'
+        '    )\n'
+        '  })\n'
+        '  p_holm <- p.adjust(p_raw, method="holm")\n'
+        '  n_pairs <- ncol(pairs_idx)\n'
+        '  for (k in seq_len(n_pairs)) {\n'
+        '    ca <- cohs[pairs_idx[1, k]]\n'
+        '    cb <- cohs[pairs_idx[2, k]]\n'
+        '    na_ca <- sum(!is.na(sub$TotalChange[sub$Cohort == ca]))\n'
+        '    nb_cb <- sum(!is.na(sub$TotalChange[sub$Cohort == cb]))\n'
+        '    if (is.na(p_raw[k])) {\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : NA\\n", ca, na_ca, cb, nb_cb))\n'
+        '    } else {\n'
+        '      sig <- ifelse(p_holm[k] < 0.001, "***",\n'
+        '               ifelse(p_holm[k] < 0.01, "**",\n'
+        '                 ifelse(p_holm[k] < 0.05, "*", "ns")))\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : p_raw=%.4f  p_holm=%.4f  %s\\n",\n'
+        '                  ca, na_ca, cb, nb_cb, p_raw[k], p_holm[k], sig))\n'
+        '    }\n'
+        '  }\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("END\\n")\n'
+    )
+
+    tmp_r = Path(tempfile.mktemp(suffix='.R'))
+    tmp_r.write_text(r_script, encoding='utf-8')
+
+    # ── Locate Rscript ─────────────────────────────────────────────────────
+    import glob as _glob
+    rscript = shutil.which('Rscript') or shutil.which('Rscript.exe')
+    if rscript is None:
+        for _pat in (
+            r'C:\Program Files\R\R-*\bin\Rscript.exe',
+            r'C:\Program Files\R\R-*\bin\x64\Rscript.exe',
+        ):
+            _m = sorted(_glob.glob(_pat))
+            if _m:
+                rscript = _m[-1]
+                break
+
+    if rscript is None:
+        print("ERROR: 'Rscript' not found. Install R and add to PATH.")
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+        return {}
+
+    r_output = ''
+    try:
+        proc = subprocess.run(
+            [rscript, '--vanilla', str(tmp_r)],
+            capture_output=True, text=True, timeout=300,
+        )
+        r_output = proc.stdout
+        r_stderr = proc.stderr.strip()
+        if proc.returncode != 0:
+            print(f"R exited with code {proc.returncode}.")
+        if r_stderr:
+            non_trivial = [
+                ln for ln in r_stderr.splitlines()
+                if not ln.startswith('Loading') and ln.strip()
+            ]
+            if non_trivial:
+                print("R messages:\n" + '\n'.join(non_trivial))
+    except FileNotFoundError:
+        print("ERROR: 'Rscript' not found. Install R and add to the system PATH.")
+        return {}
+    except subprocess.TimeoutExpired:
+        print("ERROR: R script timed out after 300 s.")
+        return {}
+    finally:
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+
+    print(r_output)
+
+    # ── Save report ────────────────────────────────────────────────────────
+    report_path: Optional[Path] = None
+    if save_report and r_output.strip():
+        _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = Path.cwd() / f"{prefix}_nparld_cohort_week_{_ts}.txt"
+        header_lines = [
+            "=" * 72,
+            f"nparLD: {measure} -- Cohort x Week (F1-LD-F1 nonparametric ANOVA)",
+            "=" * 72,
+            f"Generated   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Measure     : {measure}",
+            f"Cohorts     : {', '.join(cohort_levels)}",
+            f"Weeks       : {week_levels}",
+            f"N subjects  : {n_subjects} (complete cases across all weeks)",
+            "",
+            "Design      : F1-LD-F1 (one between-subjects x one within-subjects factor)",
+            "Between     : Cohort  (CA% schedule)",
+            "Within      : Week    (1-indexed chronological week)",
+            "Response    : Per-animal per-week mean of measure",
+            "",
+            "Statistics  : ANOVA-Type Statistic (ATS, chi-sq approx.) -- primary",
+            "              Box approximation of ATS -- secondary",
+            "              Wald-Type Statistic (WTS) -- reference only",
+            "Post-hoc    : Between-cohort: pairwise Mann-Whitney U, Holm corrected",
+            "              Per-week     : pairwise Mann-Whitney U between cohorts at each week, Holm corrected",
+            "",
+            "R output:",
+            "-" * 72,
+            "",
+        ]
+        report_path.write_text('\n'.join(header_lines) + r_output, encoding='utf-8')
+        print(f"\n[OK] Report saved -> {report_path}")
+
+    return {
+        'r_output': r_output,
+        'report_path': report_path,
+        'n_subjects': n_subjects,
+        'cohorts': cohort_levels,
+        'weeks': week_levels,
+    }
 
 
 def _run_unknown_menu(cohorts: Dict[str, pd.DataFrame], comparison: str) -> None:
