@@ -85,7 +85,7 @@ try:
         "figure.titlesize": 10,
         "lines.linewidth": 0.9,
         "lines.markersize": 3,
-        "figure.figsize": (3, 2.5),
+        "figure.figsize": (4, 2.5),
     })
 except ImportError:
     HAS_MATPLOTLIB = False
@@ -3477,7 +3477,7 @@ def plot_behavioral_metrics_by_cohort(
 
     all_weeks_sorted = sorted(all_weeks_set)
     x_pos = {w: i for i, w in enumerate(all_weeks_sorted)}
-    x_labels = [f"Week {w}" for w in all_weeks_sorted]
+    x_labels = [str(w) for w in all_weeks_sorted]
 
     # Determine shared y-axis upper limit from the highest pct+sem across all behaviors/cohorts
     _all_tops: List[float] = []
@@ -3496,7 +3496,7 @@ def plot_behavioral_metrics_by_cohort(
 
     for ax, (col, _, panel_title) in zip(axes, BEHAVIORS):
         for i, (label, data) in enumerate(cohort_data.items()):
-            color = _COLORS[i % len(_COLORS)]
+            color = _cohort_label_to_color(label)
             xs = [x_pos[w] for w in data['weeks']]
             ys = data['pcts'][col]
             sems = data['sems'][col]
@@ -11012,15 +11012,17 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  8. Statistical registry -- Print/save methods documentation for all tests used")
     print("  9. Distribution + assumption checks -- R-based: normality, homogeneity, sphericity, LMM residuals")
     print(" 10. R: nparLD Cohort x Week -- nonparametric two-way ANOVA (Cohort between, Week within) on weekly means")
-    print(" 11. Run all (1-10)")
+    print(" 11. R: ART Cohort x Week  -- behavioral metrics (No Nest, Anxious, Lethargy) via Aligned Ranks Transformation")
+    print(" 12. R: nparLD behavioral  -- nparLD F1-LD-F1 for No Nest / Anxious / Lethargy (comparison to ART)")
+    print(" 13. Run all (1-12)")
     print()
 
-    user_input = input("Select option (1-11) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-13) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '11')
+    run_all = (user_input == '13')
 
     # ------------------------------------------------------------------ #
     # Option 1: OLS assumption diagnostics
@@ -11352,6 +11354,40 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             print(f"  [WARNING] nparLD analysis failed: {e}")
             import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 11: R ART -- Cohort x Week ART ANOVA for behavioral metrics
+    # ------------------------------------------------------------------ #
+    if user_input == '11' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: R ART -- Behavioral metrics Cohort x Week (No Nest, Anxious, Lethargy)")
+        print("=" * 80)
+        try:
+            run_art_behavior_r(
+                cohort_dfs=cohorts,
+                save_report=True,
+                prefix="0v2",
+            )
+        except Exception as e:
+            print(f"  [WARNING] ART analysis failed: {e}")
+            import traceback; traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 12: R nparLD -- Behavioral metrics (comparison to ART)
+    # ------------------------------------------------------------------ #
+    if user_input == '12' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: R nparLD -- Behavioral metrics Cohort x Week (No Nest, Anxious, Lethargy)")
+        print("=" * 80)
+        try:
+            run_nparld_behavior_r(
+                cohort_dfs=cohorts,
+                save_report=True,
+                prefix="0v2",
+            )
+        except Exception as e:
+            print(f"  [WARNING] nparLD behavior analysis failed: {e}")
+            import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("0% vs 2% analysis complete.")
     print("=" * 80)
@@ -11416,15 +11452,17 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  6. Slope analysis         -- Per-animal fitted slopes within cohorts + between-cohort comparison")
     print("  7. Distribution + assumption checks -- R-based: normality, homogeneity, sphericity, LMM residuals")
     print("  8. R: nparLD Cohort x Week -- nonparametric two-way ANOVA (Cohort between, Week within) on weekly means")
-    print("  9. Run all (1-8)")
+    print("  9. R: ART Cohort x Week  -- behavioral metrics (No Nest, Anxious, Lethargy) via Aligned Ranks Transformation")
+    print(" 10. R: nparLD behavioral  -- nparLD F1-LD-F1 for No Nest / Anxious / Lethargy (comparison to ART)")
+    print(" 11. Run all (1-10)")
     print()
 
-    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-11) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '9')
+    run_all = (user_input == '11')
 
     plot_dir = Path(f"0vramp_plots_{timestamp}")
 
@@ -11680,6 +11718,40 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             print(f"  [WARNING] nparLD analysis failed: {e}")
             import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 9: R ART -- Cohort x Week ART ANOVA for behavioral metrics
+    # ------------------------------------------------------------------ #
+    if user_input == '9' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: R ART -- Behavioral metrics Cohort x Week (No Nest, Anxious, Lethargy)")
+        print("=" * 80)
+        try:
+            run_art_behavior_r(
+                cohort_dfs=cohorts,
+                save_report=True,
+                prefix="0vramp",
+            )
+        except Exception as e:
+            print(f"  [WARNING] ART analysis failed: {e}")
+            import traceback; traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 10: R nparLD -- Behavioral metrics (comparison to ART)
+    # ------------------------------------------------------------------ #
+    if user_input == '10' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: R nparLD -- Behavioral metrics Cohort x Week (No Nest, Anxious, Lethargy)")
+        print("=" * 80)
+        try:
+            run_nparld_behavior_r(
+                cohort_dfs=cohorts,
+                save_report=True,
+                prefix="0vramp",
+            )
+        except Exception as e:
+            print(f"  [WARNING] nparLD behavior analysis failed: {e}")
+            import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("0% vs Ramp analysis complete.")
     print("=" * 80)
@@ -11747,15 +11819,17 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  8. Week 3 behavioral bars -- Bar plots of % observations for No Nest / Anxious / Lethargy at Week 3")
     print("  9. Distribution + assumption checks -- R-based: normality, homogeneity, sphericity, LMM residuals")
     print(" 10. R: nparLD Cohort x Week -- nonparametric two-way ANOVA (Cohort between, Week within) on weekly means")
-    print(" 11. Run all (1-10)")
+    print(" 11. R: ART Cohort x Week  -- behavioral metrics (No Nest, Anxious, Lethargy) via Aligned Ranks Transformation")
+    print(" 12. R: nparLD behavioral  -- nparLD F1-LD-F1 for No Nest / Anxious / Lethargy (comparison to ART)")
+    print(" 13. Run all (1-12)")
     print()
 
-    user_input = input("Select option (1-11) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-13) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '11')
+    run_all = (user_input == '13')
 
     plot_dir = Path(f"2vramp_plots_{timestamp}")
 
@@ -12243,6 +12317,40 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             print(f"  [WARNING] nparLD analysis failed: {e}")
             import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 11: R ART -- Cohort x Week ART ANOVA for behavioral metrics
+    # ------------------------------------------------------------------ #
+    if user_input == '11' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: R ART -- Behavioral metrics Cohort x Week (No Nest, Anxious, Lethargy)")
+        print("=" * 80)
+        try:
+            run_art_behavior_r(
+                cohort_dfs=cohorts,
+                save_report=True,
+                prefix="2vramp",
+            )
+        except Exception as e:
+            print(f"  [WARNING] ART analysis failed: {e}")
+            import traceback; traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 12: R nparLD -- Behavioral metrics (comparison to ART)
+    # ------------------------------------------------------------------ #
+    if user_input == '12' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: R nparLD -- Behavioral metrics Cohort x Week (No Nest, Anxious, Lethargy)")
+        print("=" * 80)
+        try:
+            run_nparld_behavior_r(
+                cohort_dfs=cohorts,
+                save_report=True,
+                prefix="2vramp",
+            )
+        except Exception as e:
+            print(f"  [WARNING] nparLD behavior analysis failed: {e}")
+            import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("2% vs Ramp analysis complete.")
     print("=" * 80)
@@ -12315,15 +12423,17 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  6. Slope analysis         -- Per-animal fitted slopes within cohorts + between-cohort comparison")
     print("  7. Distribution + assumption checks -- R-based: normality, homogeneity, sphericity, LMM residuals")
     print("  8. R: nparLD Cohort x Week -- nonparametric two-way ANOVA (Cohort between, Week within) on weekly means")
-    print("  9. Run all (1-8)")
+    print("  9. R: ART Cohort x Week  -- behavioral metrics (No Nest, Anxious, Lethargy) via Aligned Ranks Transformation")
+    print(" 10. R: nparLD behavioral  -- nparLD F1-LD-F1 for No Nest / Anxious / Lethargy (comparison to ART)")
+    print(" 11. Run all (1-10)")
     print()
 
-    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-11) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '9')
+    run_all = (user_input == '11')
 
     plot_dir = Path(f"all3_plots_{timestamp}")
 
@@ -12615,6 +12725,40 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             )
         except Exception as e:
             print(f"  [WARNING] nparLD analysis failed: {e}")
+            import traceback; traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 9: R ART -- Cohort x Week ART ANOVA for behavioral metrics
+    # ------------------------------------------------------------------ #
+    if user_input == '9' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: R ART -- Behavioral metrics Cohort x Week (No Nest, Anxious, Lethargy)")
+        print("=" * 80)
+        try:
+            run_art_behavior_r(
+                cohort_dfs=cohorts,
+                save_report=True,
+                prefix="all3",
+            )
+        except Exception as e:
+            print(f"  [WARNING] ART analysis failed: {e}")
+            import traceback; traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 10: R nparLD -- Behavioral metrics (comparison to ART)
+    # ------------------------------------------------------------------ #
+    if user_input == '10' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: R nparLD -- Behavioral metrics Cohort x Week (No Nest, Anxious, Lethargy)")
+        print("=" * 80)
+        try:
+            run_nparld_behavior_r(
+                cohort_dfs=cohorts,
+                save_report=True,
+                prefix="all3",
+            )
+        except Exception as e:
+            print(f"  [WARNING] nparLD behavior analysis failed: {e}")
             import traceback; traceback.print_exc()
 
     print("\n" + "=" * 80)
@@ -13127,6 +13271,21 @@ def run_nparld_cohort_week_r(
         '}\n'
         '\n'
         'cat("\\n================================================================\\n")\n'
+        'cat("OMNIBUS SUMMARY -- ATS (single DV; BH-FDR across DVs not applicable)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'sig_fn3 <- function(p) { if(is.na(p)) return(""); if(p<0.001) return("***"); if(p<0.01) return("**"); if(p<0.05) return("*"); if(p<0.1) return("."); return("") }\n'
+        'fmt_p3  <- function(p) { if(is.na(p)) return("     NA"); if(p<0.0001) return("< .0001"); sprintf("%.4f", p) }\n'
+        'cat(sprintf("  %-20s  %10s  %8s  %12s  %s\\n", "Effect", "ATS", "df", "p-value", "Sig"))\n'
+        'cat("  ", strrep("-", 57), "\\n", sep="")\n'
+        'ats_df3 <- result$ANOVA.test\n'
+        'for (i3 in seq_len(nrow(ats_df3))) {\n'
+        '  eff3 <- rownames(ats_df3)[i3]\n'
+        '  pv3  <- ats_df3[i3, ncol(ats_df3)]\n'
+        '  cat(sprintf("  %-20s  %10.4f  %8.4f  %12s  %s\\n",\n'
+        '    eff3, ats_df3[i3,1], ats_df3[i3,2], fmt_p3(pv3), sig_fn3(pv3)))\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
         'cat("END\\n")\n'
     )
 
@@ -13206,6 +13365,623 @@ def run_nparld_cohort_week_r(
             "              Wald-Type Statistic (WTS) -- reference only",
             "Post-hoc    : Between-cohort: pairwise Mann-Whitney U, Holm corrected",
             "              Per-week     : pairwise Mann-Whitney U between cohorts at each week, Holm corrected",
+            "",
+            "R output:",
+            "-" * 72,
+            "",
+        ]
+        report_path.write_text('\n'.join(header_lines) + r_output, encoding='utf-8')
+        print(f"\n[OK] Report saved -> {report_path}")
+
+    return {
+        'r_output': r_output,
+        'report_path': report_path,
+        'n_subjects': n_subjects,
+        'cohorts': cohort_levels,
+        'weeks': week_levels,
+    }
+
+
+# =============================================================================
+# R-BASED ART: NONPARAMETRIC REPEATED-MEASURES ANOVA FOR BEHAVIORAL METRICS
+# Design: Cohort (between-subjects) x Week (within-subjects)
+# Response: per-animal per-week % of aberrant binary observations
+# Metrics: No Nest, Anxious Behaviors, Lethargy
+# =============================================================================
+
+def run_art_behavior_r(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    weeks: Optional[List[int]] = None,
+    save_report: bool = True,
+    prefix: str = "art",
+) -> dict:
+    """
+    Aligned Ranks Transformation (ART) nonparametric two-way ANOVA for
+    behavioral metrics: No Nest, Anxious Behaviors, Lethargy.
+
+    Design  : Cohort (between-subjects) x Week (within-subjects)
+    Response: per-animal per-week % of aberrant binary observations:
+                No Nest   = % days Nest Made? == No
+                Anxious   = % days Anxious Behaviors? == Yes
+                Lethargy  = % days Lethargy? == Yes
+    Model   : art(Value ~ Cohort * Week + (1|ID), data = ...)
+    Post-hoc: art.con() pairwise contrasts, Holm corrected
+                -- Cohort main effect
+                -- Cohort x Week interaction (cohort comparisons at each week)
+
+    Requires R with ARTool and emmeans packages installed.
+
+    Returns
+    -------
+    dict with keys: 'r_output', 'report_path', 'n_subjects', 'cohorts', 'weeks'
+    """
+    BEHAVIORS = [
+        ('Nest Made?',         False, 'No Nest',  'NoNest'),
+        ('Anxious Behaviors?', True,  'Anxious Behaviors', 'Anxious'),
+        ('Lethargy?',          True,  'Lethargy', 'Lethargy'),
+    ]
+
+    def _to_bool_series(s: pd.Series) -> pd.Series:
+        T = {'yes', 'true', '1', 'y'}
+        F = {'no', 'false', '0', 'n'}
+        def _cv(v):
+            if isinstance(v, bool): return v
+            if isinstance(v, (int, float)) and not pd.isna(v): return bool(v)
+            if isinstance(v, str):
+                ls = v.strip().lower()
+                if ls in T: return True
+                if ls in F: return False
+            return None
+        return s.map(_cv)
+
+    # ── Build per-animal per-week records ────────────────────────────────
+    frames = []
+    for label, df in cohort_dfs.items():
+        cdf = clean_cohort(df.copy())
+        if 'Day' not in cdf.columns:
+            cdf = add_day_column_across_cohorts(cdf)
+        cdf = cdf[cdf['Day'] >= 1].copy()
+        cdf = _add_week_column_across_cohorts(cdf)
+
+        for col, aberrant_val, _, col_key in BEHAVIORS:
+            if col in cdf.columns:
+                cdf[f'_bin_{col_key}'] = _to_bool_series(cdf[col])
+
+        for (animal_id, week_num), grp in cdf.groupby(['ID', 'Week']):
+            row: dict = {'ID': str(animal_id), 'Cohort': label, 'Week': int(week_num)}
+            for col, aberrant_val, _, col_key in BEHAVIORS:
+                bcol = f'_bin_{col_key}'
+                if bcol not in grp.columns:
+                    row[col_key] = float('nan')
+                    continue
+                valid = grp[bcol].dropna()
+                if len(valid) == 0:
+                    row[col_key] = float('nan')
+                else:
+                    row[col_key] = 100.0 * (valid == aberrant_val).sum() / len(valid)
+            frames.append(row)
+
+    if not frames:
+        print("  [ERROR] No behavioral data found in any cohort.")
+        return {}
+
+    weekly = pd.DataFrame(frames)
+
+    if weeks is not None:
+        weekly = weekly[weekly['Week'].isin(weeks)].copy()
+
+    # Complete-case filter: animals observed in every week
+    week_counts = weekly.groupby('ID')['Week'].nunique()
+    all_weeks_n = weekly['Week'].nunique()
+    complete_ids = week_counts[week_counts == all_weeks_n].index
+    n_dropped = weekly['ID'].nunique() - len(complete_ids)
+    if n_dropped:
+        print(f"  [NOTE] Dropped {n_dropped} animal(s) with incomplete weekly records; "
+              f"{len(complete_ids)} retained")
+    weekly = weekly[weekly['ID'].isin(complete_ids)].copy()
+
+    if weekly.empty or len(complete_ids) < 3:
+        print(f"  [ERROR] Insufficient complete-case animals ({len(complete_ids)}) for ART.")
+        return {}
+
+    week_levels   = sorted(weekly['Week'].unique())
+    cohort_levels = sorted(weekly['Cohort'].unique())
+    n_subjects    = int(weekly['ID'].nunique())
+
+    print(f"\nART behavior: {n_subjects} subjects x {len(week_levels)} weeks "
+          f"x {len(cohort_levels)} cohorts")
+    print(f"  Cohorts : {cohort_levels}")
+    print(f"  Weeks   : {week_levels}")
+
+    # ── Write temp CSV ───────────────────────────────────────────────────
+    tmp_csv = Path(tempfile.mktemp(suffix='.csv'))
+    col_keys = [ck for _, _, _, ck in BEHAVIORS]
+    weekly[['ID', 'Cohort', 'Week'] + col_keys].to_csv(str(tmp_csv), index=False)
+
+    _csv_r     = str(tmp_csv).replace('\\', '/')
+    _wk_levels = ', '.join(str(w) for w in week_levels)
+    _co_levels = ', '.join(f'"{c}"' for c in cohort_levels)
+
+    r_script = (
+        'suppressPackageStartupMessages({\n'
+        '  for (pkg in c("ARTool", "emmeans")) {\n'
+        '    if (!require(pkg, quietly=TRUE, warn.conflicts=FALSE, character.only=TRUE)) {\n'
+        '      install.packages(pkg, repos="https://cran.r-project.org", quiet=TRUE)\n'
+        '      library(pkg, character.only=TRUE)\n'
+        '    }\n'
+        '  }\n'
+        '})\n'
+        '\n'
+        f'data <- read.csv("{_csv_r}")\n'
+        f'data$Week   <- factor(data$Week,   levels=c({_wk_levels}))\n'
+        f'data$Cohort <- factor(data$Cohort, levels=c({_co_levels}))\n'
+        'data$ID     <- factor(data$ID)\n'
+        '\n'
+        'metrics <- list(\n'
+        '  list(col="NoNest",   label="No Nest (% days nest absent)"),\n'
+        '  list(col="Anxious",  label="Anxious Behaviors (% days)"),\n'
+        '  list(col="Lethargy", label="Lethargy (% days)")\n'
+        ')\n'
+        '\n'
+        'for (m in metrics) {\n'
+        '  cat("\\n", strrep("=", 72), "\\n", sep="")\n'
+        '  cat("ART: ", m$label, "\\n", sep="")\n'
+        '  cat(strrep("=", 72), "\\n", sep="")\n'
+        '\n'
+        '  sub <- data[!is.na(data[[m$col]]), ]\n'
+        '  sub$Cohort <- droplevels(sub$Cohort)\n'
+        '  sub$Week   <- droplevels(sub$Week)\n'
+        '  sub$ID     <- droplevels(sub$ID)\n'
+        '  cat("N subjects :", nlevels(sub$ID), "\\n")\n'
+        '  cat("Cohorts    :", paste(levels(sub$Cohort), collapse=", "), "\\n")\n'
+        '  cat("Weeks      :", paste(levels(sub$Week),   collapse=", "), "\\n\\n")\n'
+        '\n'
+        '  form <- as.formula(paste(m$col, "~ Cohort * Week + (1|ID)"))\n'
+        '  fit <- tryCatch(\n'
+        '    art(form, data=sub),\n'
+        '    error = function(e) {\n'
+        '      cat("  [ERROR] ART fit failed:", conditionMessage(e), "\\n"); NULL\n'
+        '    }\n'
+        '  )\n'
+        '  if (is.null(fit)) next\n'
+        '\n'
+        '  cat("--- ART ANOVA (omnibus) ---\\n")\n'
+        '  print(anova(fit))\n'
+        '\n'
+        '  cat("\\n--- Post-hoc: Cohort main effect (pairwise, Holm) ---\\n")\n'
+        '  tryCatch({\n'
+        '    con_coh <- art.con(fit, "Cohort", adjust="holm")\n'
+        '    print(summary(con_coh))\n'
+        '  }, error = function(e) cat("  [SKIP cohort post-hoc]", conditionMessage(e), "\\n"))\n'
+        '\n'
+        '  cat("\\n--- Post-hoc: Cohort x Week interaction (pairwise cohorts at each week, Holm) ---\\n")\n'
+        '  tryCatch({\n'
+        '    con_int <- art.con(fit, "Cohort:Week", adjust="holm")\n'
+        '    print(summary(con_int))\n'
+        '  }, error = function(e) cat("  [SKIP interaction post-hoc]", conditionMessage(e), "\\n"))\n'
+        '}\n'
+        '\n'
+        'cat("\\n", strrep("=", 72), "\\n", sep="")\n'
+        'cat("END\\n")\n'
+    )
+
+    tmp_r = Path(tempfile.mktemp(suffix='.R'))
+    tmp_r.write_text(r_script, encoding='utf-8')
+
+    # ── Locate Rscript ───────────────────────────────────────────────────
+    import glob as _glob
+    rscript = shutil.which('Rscript') or shutil.which('Rscript.exe')
+    if rscript is None:
+        for _pat in (
+            r'C:\Program Files\R\R-*\bin\Rscript.exe',
+            r'C:\Program Files\R\R-*\bin\x64\Rscript.exe',
+        ):
+            _m = sorted(_glob.glob(_pat))
+            if _m:
+                rscript = _m[-1]
+                break
+
+    if rscript is None:
+        print("ERROR: 'Rscript' not found. Install R and add to PATH.")
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+        return {}
+
+    r_output = ''
+    try:
+        proc = subprocess.run(
+            [rscript, '--vanilla', str(tmp_r)],
+            capture_output=True, text=True, timeout=300,
+        )
+        r_output = proc.stdout
+        r_stderr = proc.stderr.strip()
+        if proc.returncode != 0:
+            print(f"R exited with code {proc.returncode}.")
+        if r_stderr:
+            non_trivial = [
+                ln for ln in r_stderr.splitlines()
+                if not ln.startswith('Loading') and ln.strip()
+            ]
+            if non_trivial:
+                print("R messages:\n" + '\n'.join(non_trivial))
+    except FileNotFoundError:
+        print("ERROR: 'Rscript' not found. Install R and add to the system PATH.")
+        return {}
+    except subprocess.TimeoutExpired:
+        print("ERROR: R script timed out after 300 s.")
+        return {}
+    finally:
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+
+    print(r_output)
+
+    # ── Save report ──────────────────────────────────────────────────────
+    report_path: Optional[Path] = None
+    if save_report and r_output.strip():
+        _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = Path.cwd() / f"{prefix}_art_behavior_{_ts}.txt"
+        header_lines = [
+            "=" * 72,
+            "ART: Behavioral Metrics -- Cohort x Week",
+            "     Aligned Ranks Transformation (ARTool package)",
+            "=" * 72,
+            f"Generated   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Metrics     : No Nest, Anxious Behaviors, Lethargy",
+            f"Cohorts     : {', '.join(cohort_levels)}",
+            f"Weeks       : {week_levels}",
+            f"N subjects  : {n_subjects} (complete cases across all weeks)",
+            "",
+            "Design      : Cohort (between-subjects) x Week (within-subjects)",
+            "Response    : Per-animal per-week % of aberrant binary observations",
+            "              No Nest   = % days Nest Made? == No",
+            "              Anxious   = % days Anxious Behaviors? == Yes",
+            "              Lethargy  = % days Lethargy? == Yes",
+            "",
+            "Model       : art(Value ~ Cohort * Week + (1|ID))",
+            "Omnibus     : ART ANOVA (F-test on aligned-and-ranked data)",
+            "Post-hoc    : art.con() pairwise contrasts, Holm corrected",
+            "              -- Cohort main effect (overall)",
+            "              -- Cohort x Week interaction (cohort pairs at each week)",
+            "",
+            "R output:",
+            "-" * 72,
+            "",
+        ]
+        report_path.write_text('\n'.join(header_lines) + r_output, encoding='utf-8')
+        print(f"\n[OK] Report saved -> {report_path}")
+
+    return {
+        'r_output': r_output,
+        'report_path': report_path,
+        'n_subjects': n_subjects,
+        'cohorts': cohort_levels,
+        'weeks': week_levels,
+    }
+
+
+# =============================================================================
+# R-BASED nparLD FOR BEHAVIORAL METRICS
+# Same F1-LD-F1 design as the weight nparLD, applied to per-animal per-week
+# % of aberrant binary observations for No Nest, Anxious, Lethargy.
+# Provides ATS / Box / WTS / RTE and between-cohort per-week MWU post-hoc.
+# =============================================================================
+
+def run_nparld_behavior_r(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    weeks: Optional[List[int]] = None,
+    save_report: bool = True,
+    prefix: str = "nparld_behavior",
+) -> dict:
+    """
+    nparLD F1-LD-F1 nonparametric two-way ANOVA for behavioral metrics.
+
+    Design  : Cohort (between-subjects) x Week (within-subjects)
+    Response: per-animal per-week % of aberrant binary observations:
+                No Nest   = % days Nest Made? == No
+                Anxious   = % days Anxious Behaviors? == Yes
+                Lethargy  = % days Lethargy? == Yes
+    Model   : f1.ld.f1() run separately for each metric
+
+    Returns
+    -------
+    dict with keys: 'r_output', 'report_path', 'n_subjects', 'cohorts', 'weeks'
+    """
+    BEHAVIORS = [
+        ('Nest Made?',         False, 'No Nest',            'NoNest'),
+        ('Anxious Behaviors?', True,  'Anxious Behaviors',  'Anxious'),
+        ('Lethargy?',          True,  'Lethargy',           'Lethargy'),
+    ]
+
+    def _to_bool_series(s: pd.Series) -> pd.Series:
+        T = {'yes', 'true', '1', 'y'}
+        F = {'no', 'false', '0', 'n'}
+        def _cv(v):
+            if isinstance(v, bool): return v
+            if isinstance(v, (int, float)) and not pd.isna(v): return bool(v)
+            if isinstance(v, str):
+                ls = v.strip().lower()
+                if ls in T: return True
+                if ls in F: return False
+            return None
+        return s.map(_cv)
+
+    # ── Build per-animal per-week records ────────────────────────────────
+    frames = []
+    for label, df in cohort_dfs.items():
+        cdf = clean_cohort(df.copy())
+        if 'Day' not in cdf.columns:
+            cdf = add_day_column_across_cohorts(cdf)
+        cdf = cdf[cdf['Day'] >= 1].copy()
+        cdf = _add_week_column_across_cohorts(cdf)
+
+        for col, aberrant_val, _, col_key in BEHAVIORS:
+            if col in cdf.columns:
+                cdf[f'_bin_{col_key}'] = _to_bool_series(cdf[col])
+
+        for (animal_id, week_num), grp in cdf.groupby(['ID', 'Week']):
+            row: dict = {'ID': str(animal_id), 'Cohort': label, 'Week': int(week_num)}
+            for col, aberrant_val, _, col_key in BEHAVIORS:
+                bcol = f'_bin_{col_key}'
+                if bcol not in grp.columns:
+                    row[col_key] = float('nan')
+                    continue
+                valid = grp[bcol].dropna()
+                if len(valid) == 0:
+                    row[col_key] = float('nan')
+                else:
+                    row[col_key] = 100.0 * (valid == aberrant_val).sum() / len(valid)
+            frames.append(row)
+
+    if not frames:
+        print("  [ERROR] No behavioral data found in any cohort.")
+        return {}
+
+    weekly = pd.DataFrame(frames)
+
+    if weeks is not None:
+        weekly = weekly[weekly['Week'].isin(weeks)].copy()
+
+    # Complete-case filter
+    week_counts = weekly.groupby('ID')['Week'].nunique()
+    all_weeks_n = weekly['Week'].nunique()
+    complete_ids = week_counts[week_counts == all_weeks_n].index
+    n_dropped = weekly['ID'].nunique() - len(complete_ids)
+    if n_dropped:
+        print(f"  [NOTE] Dropped {n_dropped} animal(s) with incomplete records; "
+              f"{len(complete_ids)} retained")
+    weekly = weekly[weekly['ID'].isin(complete_ids)].copy()
+
+    if weekly.empty or len(complete_ids) < 3:
+        print(f"  [ERROR] Insufficient complete-case animals ({len(complete_ids)}) for nparLD.")
+        return {}
+
+    week_levels   = sorted(weekly['Week'].unique())
+    cohort_levels = sorted(weekly['Cohort'].unique())
+    n_subjects    = int(weekly['ID'].nunique())
+
+    print(f"\nnparLD behavior: {n_subjects} subjects x {len(week_levels)} weeks "
+          f"x {len(cohort_levels)} cohorts")
+    print(f"  Cohorts : {cohort_levels}")
+    print(f"  Weeks   : {week_levels}")
+
+    # ── Write temp CSV ───────────────────────────────────────────────────
+    col_keys = [ck for _, _, _, ck in BEHAVIORS]
+    tmp_csv = Path(tempfile.mktemp(suffix='.csv'))
+    weekly[['ID', 'Cohort', 'Week'] + col_keys].to_csv(str(tmp_csv), index=False)
+
+    _csv_r     = str(tmp_csv).replace('\\', '/')
+    _wk_levels = ', '.join(str(w) for w in week_levels)
+    _co_levels = ', '.join(f'"{c}"' for c in cohort_levels)
+
+    # Build post-hoc block identical to weight nparLD (between-cohort per week, MWU Holm)
+    _posthoc = (
+        'cat("\\n--- POST-HOC: Between-cohort at each week (Mann-Whitney U, Holm) ---\\n")\n'
+        'for (wk in levels(sub$Week)) {\n'
+        '  sw <- sub[sub$Week == wk, ]\n'
+        '  cat("\\nWeek:", wk, "\\n")\n'
+        '  cohs <- levels(sw$Cohort)\n'
+        '  if (length(cohs) < 2) { cat("  (only 1 cohort)\\n"); next }\n'
+        '  pidx <- combn(length(cohs), 2)\n'
+        '  p_raw <- apply(pidx, 2, function(idx) {\n'
+        '    x <- sw$Value[sw$Cohort == cohs[idx[1]]]\n'
+        '    y <- sw$Value[sw$Cohort == cohs[idx[2]]]\n'
+        '    if (length(x) < 1 || length(y) < 1) return(NA_real_)\n'
+        '    tryCatch(wilcox.test(x, y, exact=FALSE)$p.value, error=function(e) NA_real_)\n'
+        '  })\n'
+        '  p_holm <- p.adjust(p_raw, method="holm")\n'
+        '  for (k in seq_len(ncol(pidx))) {\n'
+        '    ca <- cohs[pidx[1, k]]; cb <- cohs[pidx[2, k]]\n'
+        '    na <- sum(!is.na(sw$Value[sw$Cohort == ca]))\n'
+        '    nb <- sum(!is.na(sw$Value[sw$Cohort == cb]))\n'
+        '    if (is.na(p_raw[k])) {\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : NA\\n", ca, na, cb, nb))\n'
+        '    } else {\n'
+        '      sig <- ifelse(p_holm[k]<0.001,"***",ifelse(p_holm[k]<0.01,"**",ifelse(p_holm[k]<0.05,"*","ns")))\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : p_raw=%.4f  p_holm=%.4f  %s\\n",\n'
+        '                  ca, na, cb, nb, p_raw[k], p_holm[k], sig))\n'
+        '    }\n'
+        '  }\n'
+        '}\n'
+    )
+
+    r_script = (
+        'options(warn=1)\n'
+        'if (!require("nparLD", quietly=TRUE, warn.conflicts=FALSE)) {\n'
+        '  install.packages("nparLD", repos="https://cran.r-project.org", quiet=TRUE)\n'
+        '  library(nparLD)\n'
+        '}\n'
+        '\n'
+        f'data <- read.csv("{_csv_r}")\n'
+        f'data$Week   <- factor(data$Week,   levels=c({_wk_levels}))\n'
+        f'data$Cohort <- factor(data$Cohort, levels=c({_co_levels}))\n'
+        'data$ID     <- factor(data$ID)\n'
+        '\n'
+        'metrics <- list(\n'
+        '  list(col="NoNest",   label="No Nest (% days nest absent)"),\n'
+        '  list(col="Anxious",  label="Anxious Behaviors (% days)"),\n'
+        '  list(col="Lethargy", label="Lethargy (% days)")\n'
+        ')\n'
+        '\n'
+        'dv_labels <- character(0)\n'
+        'p_cohort  <- numeric(0)\n'
+        'p_week    <- numeric(0)\n'
+        'p_int     <- numeric(0)\n'
+        '\n'
+        'for (m in metrics) {\n'
+        '  cat("\\n", strrep("=", 72), "\\n", sep="")\n'
+        '  cat("nparLD: ", m$label, "\\n", sep="")\n'
+        '  cat(strrep("=", 72), "\\n", sep="")\n'
+        '\n'
+        '  sub <- data[!is.na(data[[m$col]]), ]\n'
+        '  sub$Cohort <- droplevels(sub$Cohort)\n'
+        '  sub$Week   <- droplevels(sub$Week)\n'
+        '  sub$ID     <- droplevels(sub$ID)\n'
+        '  sub$Value  <- sub[[m$col]]\n'
+        '  cat("N subjects :", nlevels(sub$ID), "\\n")\n'
+        '  cat("Cohorts    :", paste(levels(sub$Cohort), collapse=", "), "\\n")\n'
+        '  cat("Weeks      :", paste(levels(sub$Week),   collapse=", "), "\\n\\n")\n'
+        '\n'
+        '  result <- tryCatch(\n'
+        '    f1.ld.f1(\n'
+        '      y          = sub$Value,\n'
+        '      time       = sub$Week,\n'
+        '      group      = sub$Cohort,\n'
+        '      subject    = sub$ID,\n'
+        '      time.name  = "Week",\n'
+        '      group.name = "Cohort",\n'
+        '      description = FALSE\n'
+        '    ),\n'
+        '    error = function(e) {\n'
+        '      cat("  [ERROR] nparLD fit failed:", conditionMessage(e), "\\n"); NULL\n'
+        '    }\n'
+        '  )\n'
+        '  if (is.null(result)) next\n'
+        '\n'
+        '  cat("\\n--- ANOVA-Type Statistic (ATS) ---\\n")\n'
+        '  print(result$ANOVA.test)\n'
+        '  cat("\\n--- ATS with Box approximation ---\\n")\n'
+        '  print(result$ANOVA.test.mod.Box)\n'
+        '  cat("\\n--- Wald-Type Statistic (WTS) ---\\n")\n'
+        '  print(result$Wald.test)\n'
+        '  cat("\\n--- Relative Treatment Effects (RTE) ---\\n")\n'
+        '  print(result$RTE)\n'
+        '  dv_labels <- c(dv_labels, m$label)\n'
+        '  ats_p <- result$ANOVA.test[, ncol(result$ANOVA.test)]\n'
+        '  p_cohort <- c(p_cohort, ats_p[1])\n'
+        '  p_week   <- c(p_week,   ats_p[2])\n'
+        '  p_int    <- c(p_int,    ats_p[3])\n'
+        + _posthoc +
+        '}\n'
+        '\n'
+        'cat("\\n", strrep("=", 72), "\\n", sep="")\n'
+        'cat("BH-FDR CORRECTION ACROSS BEHAVIORAL METRICS\\n")\n'
+        'cat(strrep("=", 72), "\\n", sep="")\n'
+        'cat("  ATS p-values corrected using Benjamini-Hochberg FDR.\\n")\n'
+        'cat("  Correction applied separately per effect row\\n")\n'
+        'cat("  (one adjusted set for Cohort, Week, and Cohort:Week).\\n\\n")\n'
+        'sig_fn <- function(p) { if(is.na(p)) return(""); if(p<0.001) return("***"); if(p<0.01) return("**"); if(p<0.05) return("*"); return("") }\n'
+        'fmt_p  <- function(p) { if(is.na(p)) return("     NA"); if(p<0.0001) return("< .0001"); sprintf("%.4f", p) }\n'
+        'effects_smry <- list(\n'
+        '  list(name="Cohort",      p_raw=p_cohort),\n'
+        '  list(name="Week",        p_raw=p_week),\n'
+        '  list(name="Cohort:Week", p_raw=p_int)\n'
+        ')\n'
+        'for (eff in effects_smry) {\n'
+        '  cat(sprintf("  Effect: %s\\n", eff$name))\n'
+        '  cat(sprintf("  %-38s  %10s  %10s  %s\\n", "DV", "p (raw)", "p (BH-adj)", "Sig (adj)"))\n'
+        '  cat("  ", strrep("-", 65), "\\n", sep="")\n'
+        '  adj <- p.adjust(eff$p_raw, method="BH")\n'
+        '  for (i in seq_along(dv_labels)) {\n'
+        '    cat(sprintf("  %-38s  %10s  %10s  %s\\n",\n'
+        '      dv_labels[i], fmt_p(eff$p_raw[i]), fmt_p(adj[i]), sig_fn(adj[i])))\n'
+        '  }\n'
+        '  cat("\\n")\n'
+        '}\n'
+        '\n'
+        'cat("\\n", strrep("=", 72), "\\n", sep="")\n'
+        'cat("END\\n")\n'
+    )
+
+    tmp_r = Path(tempfile.mktemp(suffix='.R'))
+    tmp_r.write_text(r_script, encoding='utf-8')
+
+    # ── Locate Rscript ───────────────────────────────────────────────────
+    import glob as _glob
+    rscript = shutil.which('Rscript') or shutil.which('Rscript.exe')
+    if rscript is None:
+        for _pat in (
+            r'C:\Program Files\R\R-*\bin\Rscript.exe',
+            r'C:\Program Files\R\R-*\bin\x64\Rscript.exe',
+        ):
+            _m = sorted(_glob.glob(_pat))
+            if _m:
+                rscript = _m[-1]
+                break
+
+    if rscript is None:
+        print("ERROR: 'Rscript' not found. Install R and add to PATH.")
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+        return {}
+
+    r_output = ''
+    try:
+        proc = subprocess.run(
+            [rscript, '--vanilla', str(tmp_r)],
+            capture_output=True, text=True, timeout=300,
+        )
+        r_output = proc.stdout
+        r_stderr = proc.stderr.strip()
+        if proc.returncode != 0:
+            print(f"R exited with code {proc.returncode}.")
+        if r_stderr:
+            non_trivial = [
+                ln for ln in r_stderr.splitlines()
+                if not ln.startswith('Loading') and ln.strip()
+            ]
+            if non_trivial:
+                print("R messages:\n" + '\n'.join(non_trivial))
+    except FileNotFoundError:
+        print("ERROR: 'Rscript' not found. Install R and add to the system PATH.")
+        return {}
+    except subprocess.TimeoutExpired:
+        print("ERROR: R script timed out after 300 s.")
+        return {}
+    finally:
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+
+    print(r_output)
+
+    # ── Save report ──────────────────────────────────────────────────────
+    report_path: Optional[Path] = None
+    if save_report and r_output.strip():
+        _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = Path.cwd() / f"{prefix}_nparld_behavior_{_ts}.txt"
+        header_lines = [
+            "=" * 72,
+            "nparLD: Behavioral Metrics -- Cohort x Week (F1-LD-F1)",
+            "=" * 72,
+            f"Generated   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Metrics     : No Nest, Anxious Behaviors, Lethargy",
+            f"Cohorts     : {', '.join(cohort_levels)}",
+            f"Weeks       : {week_levels}",
+            f"N subjects  : {n_subjects} (complete cases across all weeks)",
+            "",
+            "Design      : F1-LD-F1 (one between-subjects x one within-subjects factor)",
+            "Between     : Cohort  (CA% schedule)",
+            "Within      : Week    (1-indexed chronological week)",
+            "Response    : Per-animal per-week % of aberrant binary observations",
+            "              No Nest   = % days Nest Made? == No",
+            "              Anxious   = % days Anxious Behaviors? == Yes",
+            "              Lethargy  = % days Lethargy? == Yes",
+            "",
+            "Statistics  : ATS (chi-sq approx.) -- primary",
+            "              Box approx. of ATS   -- secondary (preferred for small N)",
+            "              WTS                  -- reference only",
+            "              RTE                  -- relative treatment effects",
+            "Post-hoc    : Between-cohort at each week: pairwise Mann-Whitney U, Holm corrected",
             "",
             "R output:",
             "-" * 72,
