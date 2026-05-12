@@ -1,7 +1,65 @@
 """
 CAH Cohort Weight Analysis
-Analyzes weight changes across CA% concentrations and sex for the CAH cohort.
-Adapted from ramp_analysis.py structure.
+
+Analyzes body-weight changes across CA% concentrations (0% and 2%) and sex
+for the CAH cohort.  Designed as a standalone menu-driven script.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ HOW TO RUN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  python CAH_weight_analysis.py
+
+  The script automatically loads  CAH_cohort/master_data_CAH.csv  relative
+  to its own location (no file picker needed).  On startup you are asked to
+  choose a time unit (Days or Weeks) and a post-hoc correction method
+  (FDR-BH or Bonferroni), then an interactive text menu is presented.
+
+  Required input: master_data_CAH.csv  (one row per animal per day;
+    columns must include ID, Sex, CA (%), Date, Total Change, Daily Change)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ MENU OPTIONS / ANALYSES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  [1]  Between-subjects 2-way ANOVA: Sex × CA% (grand average across time)
+         Tukey HSD post-hoc for significant main effects
+  [2]  3-way mixed ANOVA: Time × Sex × CA%
+         FDR-BH or Bonferroni pairwise post-hoc for significant effects
+  [3]  Sex-stratified mixed ANOVA: Time × CA% — Males only
+  [4]  Sex-stratified mixed ANOVA: Time × CA% — Females only
+  [5]  CA%-stratified mixed ANOVA: Time × Sex — 0% CA animals
+  [6]  CA%-stratified mixed ANOVA: Time × Sex — 2% CA animals
+  [7]  2-way mixed ANOVA: CA% × Week (sex collapsed; weeks only)
+  [8]  Slope analysis: per-animal linear regression of weight change
+         over time, Mann-Whitney U between CA% groups (Holm-Bonferroni),
+         within-group slope significance; reports + scatter/box plots
+  [9]  Interaction plots for significant effects from [2]
+  [P]  All plots: Total/Daily Change by ID, by Sex, by CA%
+  [N]  Normality & assumption tests: Shapiro-Wilk (residuals), Levene's,
+         Mauchly's W sphericity; Q-Q plots of model residuals
+  [A]  Run all analyses (1–8) and save all reports to disk
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PLOTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  - Total Change by individual animal (lines colored by CA%)
+  - Daily Change by individual animal (lines colored by CA%)
+  - Total Change grouped by sex (mean ± SEM per CA%)
+  - Daily Change grouped by sex (mean ± SEM per CA%)
+  - Total Change grouped by CA% (mean ± SEM)
+  - Daily Change grouped by CA% (mean ± SEM)
+  - Time × Sex interaction line plots
+  - Time × CA% interaction line plots
+  - Sex-stratified Time × CA% plots (males / females separately)
+  - CA%-stratified Time × Sex plots (0% / 2% CA separately)
+  - Slope comparison scatter/box plots between CA% groups
+  - Q-Q normality plots for model residuals
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ DEPENDENCIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Required : pandas, numpy, matplotlib, scipy
+  Optional : pingouin  (mixed ANOVA)
+             statsmodels (Tukey HSD post-hoc)
 """
 
 from pathlib import Path
@@ -46,7 +104,7 @@ plt.rcParams.update({
     "figure.titlesize": 10,
     "lines.linewidth": 0.9,
     "lines.markersize": 3,
-    "figure.figsize": (4, 2.5),
+    "figure.figsize": (3, 2.5),
 })
 # ==============================================================================
 # PLOTTING HELPER FUNCTIONS (adapted from ramp_analysis.py)
@@ -4013,40 +4071,73 @@ def plot_slopes_comparison_cah(
 	print("="*80)
 	
 	ca_groups = sorted(slopes_df['CA (%)'].unique())
-	colors = ['dodgerblue', 'orangered']
+	# Derive colors and markers from _ca_to_style() to enforce CA% color scheme
+	colors = [_ca_to_style(ca)[0] for ca in ca_groups]
+	markers = [_ca_to_style(ca)[1] for ca in ca_groups]
+	_ms = plt.rcParams.get('lines.markersize', 3)
 	figures = {}
 	
 	# Figure 1: Boxplot with individual points
 	fig1, ax1 = plt.subplots()
 	
-	# Create boxplot
 	box_data = [slopes_df[slopes_df['CA (%)'] == ca]['Slope'].values for ca in ca_groups]
 	bp = ax1.boxplot(box_data, positions=range(len(ca_groups)), widths=0.6,
 					 patch_artist=True, showfliers=False)
 	
-	# Color boxes
 	for patch, color in zip(bp['boxes'], colors):
 		patch.set_facecolor(color)
-		patch.set_alpha(0.6)
+		patch.set_alpha(0.7)
+	for element in ('whiskers', 'caps', 'medians'):
+		for line in bp[element]:
+			line.set_linewidth(plt.rcParams.get('lines.linewidth', 0.9))
 	
-	# Overlay individual points (jittered)
+	# Overlay individual points (jittered), seeded for reproducibility
+	rng = np.random.default_rng(42)
 	for i, ca in enumerate(ca_groups):
 		slopes = slopes_df[slopes_df['CA (%)'] == ca]['Slope'].values
-		x = np.random.normal(i, 0.04, size=len(slopes))
-		ax1.scatter(x, slopes, alpha=0.5, color=colors[i], s=50, edgecolors='black', linewidth=0.5)
+		x = rng.normal(i, 0.04, size=len(slopes))
+		ax1.scatter(x, slopes, alpha=0.9, color=colors[i], s=_ms ** 2,
+					marker='o', edgecolors='black', zorder=3,
+					linewidth=plt.rcParams.get('lines.linewidth', 0.9) * 0.5)
 	
+	# -- Mann-Whitney U test annotation --
+	if len(ca_groups) == 2:
+		_s0 = slopes_df[slopes_df['CA (%)'] == ca_groups[0]]['Slope'].values
+		_s1 = slopes_df[slopes_df['CA (%)'] == ca_groups[1]]['Slope'].values
+		_u_stat, _mw_p = stats.mannwhitneyu(_s0, _s1, alternative='two-sided')
+		if _mw_p < 0.001:
+			_p_str = '*** p < 0.001'
+		elif _mw_p < 0.01:
+			_p_str = f'** p = {_mw_p:.3f}'
+		elif _mw_p < 0.05:
+			_p_str = f'* p = {_mw_p:.3f}'
+		else:
+			_p_str = f'ns p = {_mw_p:.3f}'
+		_all = np.concatenate([_s0, _s1])
+		_d_max = np.max(_all)
+		_d_range = np.max(_all) - np.min(_all) if np.max(_all) != np.min(_all) else 1.0
+		_brk_y = _d_max + _d_range * 0.12
+		_tick_h = _d_range * 0.04
+		_p_lw = plt.rcParams.get('lines.linewidth', 0.9)
+		_x0, _x1 = 0, len(ca_groups) - 1
+		ax1.plot([_x0, _x0, _x1, _x1],
+				 [_brk_y - _tick_h, _brk_y, _brk_y, _brk_y - _tick_h],
+				 lw=_p_lw, color='black', clip_on=False)
+		ax1.text((_x0 + _x1) / 2, _brk_y + _d_range * 0.02, _p_str,
+				 ha='center', va='bottom',
+				 fontsize=plt.rcParams.get('font.size', 8))
+
 	ax1.set_xticks(range(len(ca_groups)))
 	ax1.set_xticklabels([f'{ca}% CA' for ca in ca_groups])
 	ax1.set_ylabel(f'Slope ({measure} per {time_unit})')
-	plot_title = f'Slope Distribution by Group'
+	ax1.grid(False)
+	plot_title = 'Slope Distribution by Group'
 	if title:
 		plot_title = f'{title}: {plot_title}'
 	ax1.set_title(plot_title)
-	ax1.grid(False)
-	ax1.spines['top'].set_visible(False)
-	ax1.spines['right'].set_visible(False)
-	plt.tick_params(axis='both', direction='in')
-	plt.tight_layout()
+	apply_common_plot_style(ax1, remove_top_right=True, ticks_in=True,
+							remove_x_margins=False, remove_y_margins=False)
+	fig1.tight_layout()
 	figures['boxplot'] = fig1
 	
 	if save_path is not None:
@@ -4068,20 +4159,21 @@ def plot_slopes_comparison_cah(
 	means = [slopes_df[slopes_df['CA (%)'] == ca]['Slope'].mean() for ca in ca_groups]
 	sems = [slopes_df[slopes_df['CA (%)'] == ca]['Slope'].sem() for ca in ca_groups]
 	
-	bars = ax2.bar(range(len(ca_groups)), means, yerr=sems, capsize=5,
-				   color=colors, alpha=0.6, edgecolor='black', linewidth=1)
+	ax2.bar(range(len(ca_groups)), means, yerr=sems, capsize=4,
+			color=colors, alpha=0.6, edgecolor='black',
+			linewidth=plt.rcParams.get('lines.linewidth', 0.9))
 	
 	ax2.set_xticks(range(len(ca_groups)))
 	ax2.set_xticklabels([f'{ca}% CA' for ca in ca_groups])
-	ax2.set_ylabel(f'Mean Slope +/- SEM ({measure} per {time_unit})')
+	ax2.set_ylabel(f'Mean Slope \u00b1 SEM ({measure} per {time_unit})')
+	ax2.grid(False)
 	plot_title = 'Mean Slopes with Error Bars'
 	if title:
 		plot_title = f'{title}: {plot_title}'
 	ax2.set_title(plot_title)
-	ax2.grid(False)
-	ax2.spines['top'].set_visible(False)
-	ax2.spines['right'].set_visible(False)
-	plt.tight_layout()
+	apply_common_plot_style(ax2, remove_top_right=True, ticks_in=True,
+							remove_x_margins=False, remove_y_margins=True)
+	fig2.tight_layout()
 	figures['barplot'] = fig2
 	
 	if save_path is not None:
@@ -4102,19 +4194,21 @@ def plot_slopes_comparison_cah(
 	
 	for i, ca in enumerate(ca_groups):
 		slopes = slopes_df[slopes_df['CA (%)'] == ca]['Slope'].values
-		ax3.hist(slopes, bins=10, alpha=0.5, color=colors[i], label=f'{ca}% CA', edgecolor='black')
+		ax3.hist(slopes, bins=8, alpha=0.5, color=colors[i], label=f'{ca}% CA',
+				 edgecolor='black',
+				 linewidth=plt.rcParams.get('lines.linewidth', 0.9) * 0.5)
 	
 	ax3.set_xlabel(f'Slope ({measure} per {time_unit})')
 	ax3.set_ylabel('Frequency')
+	ax3.grid(False)
 	plot_title = 'Slope Distribution Histogram'
 	if title:
 		plot_title = f'{title}: {plot_title}'
 	ax3.set_title(plot_title)
 	ax3.legend()
-	ax3.grid(False)
-	ax3.spines['top'].set_visible(False)
-	ax3.spines['right'].set_visible(False)
-	plt.tight_layout()
+	apply_common_plot_style(ax3, remove_top_right=True, ticks_in=True,
+							remove_x_margins=True, remove_y_margins=True)
+	fig3.tight_layout()
 	figures['histogram'] = fig3
 	
 	if save_path is not None:
@@ -4293,6 +4387,73 @@ def generate_slope_analysis_report_cah(
 	return "\n".join(lines)
 
 
+def generate_slope_mwu_report_cah(
+	slopes_df: pd.DataFrame,
+	measure: str = "Total Change",
+	time_unit: str = "Week",
+) -> str:
+	"""Generate a Mann-Whitney U test report table for slope comparison brackets."""
+	SEP = "=" * 90
+	lines = [
+		SEP,
+		"MANN-WHITNEY U TEST RESULTS  --  Slope Comparison Brackets",
+		SEP,
+		f"Generated  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+		f"Measure    : {measure}",
+		f"Time unit  : {time_unit}",
+		"Correction : None (single pairwise comparison)",
+		"",
+		"Field definitions:",
+		"  U        : Mann-Whitney U statistic",
+		"  p(raw)   : Two-sided p-value (uncorrected)",
+		"  p(adj)   : Adjusted p-value (= p(raw); no correction for single comparison)",
+		"  r_rb     : Rank-biserial correlation (effect size r = 1 - 2U/(nA*nB))",
+		"             |r| < 0.3 = small, 0.3-0.5 = medium, > 0.5 = large",
+		"  HL_est   : Hodges-Lehmann location shift (median of all pairwise diffs A-B)",
+		"  95% CI   : Bootstrap CI (n=2 000 resamples) on Hodges-Lehmann estimator",
+		"",
+		f"{'Comparison':<40} {'nA':>4} {'nB':>4} {'U':>10} {'p(raw)':>10} {'p(adj)':>10} {'r_rb':>8} {'HL_est':>10}  95% CI",
+		"-" * 100,
+	]
+
+	ca_groups = sorted(slopes_df['CA (%)'].unique())
+	for i, ca_a in enumerate(ca_groups):
+		for ca_b in ca_groups[i + 1:]:
+			s_a = slopes_df[slopes_df['CA (%)'] == ca_a]['Slope'].values
+			s_b = slopes_df[slopes_df['CA (%)'] == ca_b]['Slope'].values
+			nA, nB = len(s_a), len(s_b)
+			u_stat, p_raw = stats.mannwhitneyu(s_a, s_b, alternative='two-sided')
+			p_adj = p_raw  # no correction for single comparison
+			r_rb = 1.0 - 2.0 * u_stat / (nA * nB)
+			# Hodges-Lehmann estimator: median of all pairwise differences
+			hl_est = float(np.median(np.subtract.outer(s_a, s_b).ravel()))
+			# Bootstrap 95% CI on HL
+			rng = np.random.default_rng(42)
+			hl_boot = np.array([
+				np.median(np.subtract.outer(
+					rng.choice(s_a, size=nA, replace=True),
+					rng.choice(s_b, size=nB, replace=True)
+				).ravel())
+				for _ in range(2000)
+			])
+			ci_lo = float(np.quantile(hl_boot, 0.025))
+			ci_hi = float(np.quantile(hl_boot, 0.975))
+			p_raw_str = "< 0.001" if p_raw < 0.001 else f"{p_raw:.4f}"
+			p_adj_str = "< 0.001" if p_adj < 0.001 else f"{p_adj:.4f}"
+			label = f"{int(ca_a)}% CA vs {int(ca_b)}% CA"
+			lines.append(
+				f"{label:<40} {nA:>4} {nB:>4} {u_stat:>10.2f} {p_raw_str:>10} {p_adj_str:>10}"
+				f" {r_rb:>8.4f} {hl_est:>10.4f}  [{ci_lo:.4f}, {ci_hi:.4f}]"
+			)
+
+	lines += [
+		"",
+		"Significance: * p<0.05   ** p<0.01   *** p<0.001",
+		SEP,
+	]
+	return "\n".join(lines)
+
+
 def perform_complete_slope_analysis_cah(
 	df: pd.DataFrame,
 	measure: str = "Total Change",
@@ -4360,7 +4521,14 @@ def perform_complete_slope_analysis_cah(
 		with open(report_path, 'w', encoding='utf-8') as f:
 			f.write(report_text)
 		print(f"\n[OK] Report saved to: {report_path}")
-	
+
+	mwu_report = generate_slope_mwu_report_cah(slopes_df, measure=measure, time_unit=time_unit)
+	if save_report:
+		mwu_path = output_dir / f"CAH_slope_analysis_mwu_{measure.replace(' ', '_')}.txt"
+		with open(mwu_path, 'w', encoding='utf-8') as f:
+			f.write(mwu_report)
+		print(f"[OK] MWU report saved to: {mwu_path}")
+
 	# Create visualization
 	if save_plot:
 		plot_path = output_dir / f"CAH_slope_analysis_{measure.replace(' ', '_')}_{timestamp}.png"
@@ -4377,6 +4545,7 @@ def perform_complete_slope_analysis_cah(
 		'within_results': within_results,
 		'between_results': between_results,
 		'report_text': report_text,
+		'mwu_report': mwu_report,
 		'measure': measure,
 		'time_unit': time_unit
 	}

@@ -1,27 +1,80 @@
 """
-Cross-Cohort Analysis Module
+Cross-Cohort Weight & Behavioral Analysis Module
 
-This module provides functionality to load and compare data across multiple cohorts.
-Each cohort is loaded from a separate master CSV file (e.g., master_data_0%.csv, master_data_2%.csv).
+Compares body-weight trajectories and behavioral outcomes across 2–3 cohorts
+(0% CA nonramp, 2% CA nonramp, CA-ramp, and/or 2-week ramp).  Each cohort is
+loaded from its own master_data_*.csv file.
 
-Main features:
-- Load multiple cohort CSV files into separate dataframes
-- Clean and standardize data across cohorts
-- Compare metrics (weights, behavioral measures) across cohorts
-- Aggregate and summarize cross-cohort data
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ HOW TO RUN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  python across_cohort.py
 
-Usage:
-    from across_cohort import load_cohorts, preview_cohorts
-    
-    # Option 1: Specify paths directly
-    cohort_paths = {
-        "0% CA": Path("0%_files/master_data_0%.csv"),
-        "2% CA": Path("2%_files/master_data_2%.csv")
-    }
-    cohorts = load_cohorts(cohort_paths)
-    
-    # Option 2: Use GUI to select files
-    cohorts = select_and_load_cohorts(n_cohorts=2)
+  A text prompt asks for the number of cohorts (2 or 3).  GUI file-pickers
+  open for each cohort's master_data_*.csv.  The script auto-detects the
+  comparison type (0v2, 0vramp, 2vramp, all3, rampramp) and routes to the
+  appropriate analysis menu.
+
+  To use programmatically:
+    from across_cohort import load_cohorts, perform_cross_cohort_mixed_anova
+    cohorts = load_cohorts({"0% CA": Path("..."), "2% CA": Path("...")})
+
+  Required input: master_data_*.csv (one row per animal per day; columns
+    include ID, Sex, CA (%), Date, Total Change, Daily Change, and
+    behavioral Yes/No columns).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ STATISTICAL ANALYSES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Weight analyses
+    - 3-way mixed ANOVA: CA% (between) × Day (within) × Sex (between)
+    - Weekly version of the above (days averaged into weeks)
+    - Between-subjects ANOVA at a fixed time point or averaged over days
+    - Daily between-subjects ANOVA (all days held constant, CA% × Sex)
+    - Sex-stratified mixed ANOVA: Day × CA% (per sex, daily & weekly)
+    - CA%-stratified mixed ANOVA: Day × Sex (per CA%, daily & weekly)
+    - CA% × Week two-way mixed ANOVA (sex collapsed)
+    - Omnibus BH-FDR mixed ANOVA across multiple weight measures
+    - OLS assumption diagnostics (normality, homoscedasticity, leverage)
+    - Per-animal linear regression slopes (Total Change or Daily Change
+      vs. Day/Week) with between-group Mann-Whitney U comparisons
+      (Holm-Bonferroni corrected) and within-group slope significance
+    - Complete slope analysis with reports and plots
+    - Distribution diagnostics (via R if rpy2 available)
+  Behavioral analyses
+    - Mixed Cochran's Q / GEE / McNemar for binary behavioral outcomes
+      (Nest Made, Lethargic, CA-Spot Digging, Anxious Behaviors)
+    - Between-subjects chi-square for behavioral outcomes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PLOTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Weight trajectories
+    - Total / Daily Change by individual animal (lines colored by cohort)
+    - Total / Daily Change grouped by sex (mean ± SEM per cohort)
+    - Total / Daily Change grouped by CA% (mean ± SEM)
+    - Total / Daily Change grouped by cohort (mean ± SEM)
+    - Weekly means by cohort over time
+    - Slope comparison box/scatter plots (between CA% groups)
+  Interaction effects
+    - CA% × Sex interaction (bar chart, grand-average)
+    - Time × CA% interaction (line plot)
+    - Time × Sex interaction (line plot)
+    - Three-way CA% × Sex × Time interaction (faceted)
+    - All significant interactions in a single call
+  Behavioral metrics
+    - Bar charts of behavioral measures per cohort
+    - Behavioral interaction-effect plots
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ DEPENDENCIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Required : pandas, numpy, matplotlib, scipy
+  Optional : pingouin  (mixed ANOVA)
+             statsmodels (Cochran's Q, McNemar, GEE)
+             rpy2 + R packages lme4/lmerTest/emmeans (distribution diagnostics,
+               polynomial contrasts)
+             tkinter  (GUI file pickers — standard library on most platforms)
 """
 
 from pathlib import Path

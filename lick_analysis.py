@@ -1,14 +1,90 @@
 """
 Lick Analysis — Unified Ramp / Non-Ramp Script
 
-Performs statistical comparisons across multiple weeks of capacitive sensor data.
-Set EXPERIMENT_MODE (below) to control which experimental design is analysed:
+Analyzes lick behavior within a single cohort across multiple weekly capacitive
+sensor sessions.  Supports two experimental designs selected via EXPERIMENT_MODE:
+  'ramp'    — CA% increases each week; within-subjects factor = CA_Percent
+  'nonramp' — CA% is fixed across weeks; within-subjects factor = Week
 
-  'ramp'    — CA% increases each week (within-subjects factor = CA_Percent)
-  'nonramp' — CA% is constant across weeks (within-subjects factor = Week)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ HOW TO RUN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1. Set EXPERIMENT_MODE = 'ramp' or 'nonramp' near the top of this file.
+  2. Run:  python lick_analysis.py
+  3. GUI file-pickers open in sequence:
+       a. Select the lick master CSV (e.g. 0%_lick_data.csv).
+          The master CSV maps each animal ID to its sensor column, sex,
+          weekly session dates, and pre/post body weights.
+       b. Select all capacitive log CSVs for the cohort (hold Ctrl for
+          multiple files).  Each log corresponds to one weekly session.
+  4. All analyses and plots run automatically; prompts ask whether to
+     save each output.
 
-Usage:
-    python lick_analysis.py
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ LICK DETECTION PIPELINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1. Load each capacitive log CSV (Arduino_Timestamp + Sensor_1…Sensor_N)
+  2. Compute per-sensor KDE baseline (cached to disk for speed)
+  3. Apply fixed threshold (default 0.01) to KDE-normalized deviations
+  4. Detect lick events (threshold crossings) per sensor
+  5. Compute lick bouts using ILI cutoff (default 0.5 s)
+  6. Aggregate per-animal, per-week metrics:
+       Total Licks, Total Bouts, Mean ILI, Mean Bout Duration,
+       First-5-min Lick %, First-5-min Bout %, Time to 50% Licks
+  7. Match results back to animal metadata via the master CSV
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ STATISTICAL ANALYSES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  - Mixed ANOVA: Sex (between) × Week/CA% (within) for each lick measure
+    via pingouin; falls back to one-way RM ANOVA if only one sex present
+  - Bonferroni-corrected paired t-tests (within-subjects post-hoc for
+    main Week/CA% effect and Sex × Week/CA% interaction simple effects)
+  - Front-loading analyses (temporal distribution of licking):
+      • One-way repeated-measures ANOVA for First-5-min Lick %,
+        First-5-min Bout %, and Time to 50% Licks (within-subjects Week/CA%)
+      • Bonferroni paired t-test post-hoc for front-loading one-way ANOVA
+      • Two-way mixed ANOVA (Sex × Week/CA%) for front-loading measures
+      • FDR-BH post-hoc for front-loading mixed ANOVA
+  - Lick–body weight repeated-measures correlation (rmcorr via R, if rpy2
+    available; falls back to Pearson/Spearman)
+  - Polynomial contrasts via R / lme4 / lmerTest / emmeans (rpy2 optional)
+  - Normality report: Shapiro-Wilk per group per week
+  - Lick descriptive stats report (mean, SEM, n per group per week)
+  - Statistical test registry report (methods documentation)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PLOTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  - Weekly averages panel: Total Licks, Total Bouts, Fecal Count, Weight
+  - Per-week lick rate histograms (5-minute bins over 30 minutes)
+  - Comprehensive lick rate histogram (all weeks/CA% overlaid)
+  - First-5-min lick % by week (bar + mean ± SEM)
+  - First-5-min lick % by week with individual animal trajectories
+  - First-5-min bout % by week (bar + mean ± SEM)
+  - First-5-min bout % by week with individual animal trajectories
+  - Time to 50% of total licks by week (bar + mean ± SEM)
+  - Time to 50% of total licks by week with individual animal trajectories
+  - Sex × Week/CA% interaction effect plots
+  - Lick vs. body-weight correlation scatter (rmcorr regression lines)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ OUTPUT FILES (auto-saved to master CSV directory)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  frontloading_analysis_report.txt   — front-loading ANOVA + post-hoc
+  weekly_lick_summary_brief.txt      — brief per-animal lick counts
+  (optional) comprehensive_statistical_analysis_summary.txt
+  (optional) statistical_test_registry.txt
+  (optional) weekly_averages_plots.svg
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ DEPENDENCIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Required : pandas, numpy, matplotlib, scipy
+  Optional : pingouin  (mixed ANOVA)
+             rpy2 + R packages lme4/lmerTest/emmeans/rmcorr
+               (polynomial contrasts, rmcorr)
+             tkinter  (GUI file pickers — standard library on most platforms)
 """
 
 from __future__ import annotations

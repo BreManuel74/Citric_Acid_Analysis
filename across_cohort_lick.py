@@ -1,35 +1,79 @@
 """
 Cross-Cohort Lick Analysis Module
 
-This module provides functionality to load and compare lick data across multiple cohorts.
-Each cohort consists of capacitive sensor data files and associated metadata.
+Compares lick behavior across 2–3 cohorts (0% CA nonramp, 2% CA nonramp,
+and/or CA-ramp) by processing raw capacitive sensor log files alongside
+each cohort's lick master CSV.
 
-Main features:
-- Load multiple cohorts of lick data from capacitive sensor CSV files
-- Process lick events and bouts for each cohort
-- Compare lick metrics (total licks, bouts, ILI, bout duration) across cohorts
-- Perform statistical analyses: Mixed ANOVA (CA% × Time × Sex)
-- Stratified analyses holding sex or CA% constant
-- Generate comprehensive reports and visualizations
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ HOW TO RUN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  python across_cohort_lick.py
 
-Usage:
-    from across_cohort_lick import load_lick_cohorts, perform_cross_cohort_lick_anova
-    
-    # Load cohorts with capacitive sensor data
-    cohort_paths = {
-        "0% CA": {
-            "master_csv": Path("0%_files/0%_lick_data.csv"),
-            "capacitive_logs": [Path("0%_files/capacitive_log_2026-1-21.csv"), ...]
-        },
-        "2% CA": {
-            "master_csv": Path("2%_files/2%_lick_data.csv"),
-            "capacitive_logs": [Path("2%_files/capacitive_log_2026-1-28.csv"), ...]
-        }
-    }
-    cohorts = load_lick_cohorts(cohort_paths)
-    
-    # Perform cross-cohort analysis
-    results = perform_cross_cohort_lick_anova(cohorts, measure="Total Licks")
+  A text prompt asks for the number of cohorts (2 or 3).  GUI file-pickers
+  then open for each cohort:
+    1. Select the lick master CSV (e.g. 0%_lick_data.csv — NOT master_data_*.csv)
+    2. Select one or more capacitive log CSVs for that cohort
+       (hold Ctrl/Shift to pick multiple files)
+
+  The script auto-detects the comparison type from cohort labels
+  (0v2, 0vramp, 2vramp, all3) and opens the appropriate analysis menu.
+
+  To use programmatically:
+    from across_cohort_lick import load_lick_cohorts, perform_omnibus_lick_anova
+    cohorts = load_lick_cohorts(cohort_specs)   # see load_lick_cohorts() docstring
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ LICK DETECTION PIPELINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1. Load capacitive sensor CSV (Arduino_Timestamp + Sensor_1…Sensor_N)
+  2. Compute per-sensor KDE baseline (cached to disk for speed)
+  3. Apply fixed threshold (default 0.01) to normalized deviations
+  4. Detect lick events (threshold crossings) per sensor
+  5. Compute lick bouts using ILI cutoff (default 0.5 s)
+  6. Calculate per-animal, per-week summary metrics:
+       Total Licks, Total Bouts, ILI, Bout Duration,
+       First-5-min Lick %, Time to 50% Licks, Fecal Count
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ STATISTICAL ANALYSES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  - Mixed ANOVA: CA% (between) × Week (within) × Sex (between)
+    for a single lick measure via pingouin
+  - Between-subjects ANOVA at a fixed time point or averaged over weeks
+  - Sex-stratified mixed ANOVA (holding sex constant)
+  - CA%-stratified mixed ANOVA (holding CA% constant)
+  - Omnibus BH-FDR corrected mixed ANOVA across 5 measures
+    (Total Licks, Total Bouts, First-5-min Lick %, Time to 50% Licks,
+     Fecal Count) — main workhorse for publication figures
+  - Omnibus sex-stratified and CA%-stratified versions
+  - Omnibus 2-way between-subjects ANOVA (CA% × Sex, time collapsed)
+  - Bonferroni paired t-tests (within-subjects post-hoc)
+  - Tukey HSD (between-subjects post-hoc)
+  - Mann-Whitney U pairwise with Holm-Bonferroni correction
+  - Polynomial contrasts via R / lme4 / lmerTest / emmeans (rpy2)
+  - npar LD non-parametric longitudinal analysis (via R nparLD package)
+  - Negative-binomial GLMM for count measures (via R lme4)
+  - Fecal count Poisson goodness-of-fit test
+  - Normality reports: Shapiro-Wilk, Levene, Mauchly sphericity
+  - Statistical test registry report (methods documentation)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PLOTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  - Lick measure by cohort over weeks (line + scatter, mean ± SEM)
+  - Omnibus interaction plots (CA% × Week for each measure)
+  - Fecal count bar/line plots by week, split by cohort / sex
+  - Q-Q normality plots for fecal count residuals
+  - Significance brackets added automatically from MWU results
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ DEPENDENCIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Required : pandas, numpy, matplotlib, scipy, statsmodels
+  Optional : pingouin  (mixed ANOVA)
+             rpy2 + R packages lme4/lmerTest/emmeans/nparLD (advanced models)
+             tkinter  (GUI file pickers — standard library on most platforms)
 """
 
 from pathlib import Path

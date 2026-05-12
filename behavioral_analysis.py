@@ -1,6 +1,68 @@
-"""Unified Analysis — Ramp / Non-Ramp Script
+"""
+Behavioral & Weight Analysis — Unified Ramp / Non-Ramp Script
 
-Set EXPERIMENT_MODE below to 'ramp' or 'nonramp' before running.
+Analyzes body-weight changes and behavioral observations from a single cohort's
+master CSV file.  Supports two experimental designs controlled by EXPERIMENT_MODE:
+  'ramp'    — CA% increases each week; within-subjects factor = CA_Percent
+  'nonramp' — CA% is fixed across weeks; within-subjects factor = Week
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ HOW TO RUN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1. Set EXPERIMENT_MODE = 'ramp' or 'nonramp' near the top of this file.
+  2. Run:  python behavioral_analysis.py
+  3. A GUI file-picker opens — select the cohort's master_data_*.csv.
+  4. An interactive text menu guides the rest of the session.
+
+Required input: master_data_*.csv (one row per animal per day,
+  columns including ID, Sex, Week, CA (%), Total Change, Daily Change,
+  and behavioral Yes/No columns such as Nest Made, Lethargic, etc.)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ STATISTICAL ANALYSES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  - Two-way repeated-measures ANOVA: Sex (between) × Week/CA% (within)
+    via pingouin; falls back to one-way repeated-measures if only one sex
+  - Bonferroni-corrected paired t-tests (post-hoc for weight RM ANOVA)
+  - OLS regression with assumption diagnostics (normality, homoscedasticity,
+    linearity, leverage/Cook's D) for Total Change
+  - R-based polynomial contrast fits for Total Change over time (rpy2/lme4)
+  - Friedman test + Dunn post-hoc for milestone-day comparisons (via R)
+  - Two-way chi-square / Cochran's Q (Cochran's Q requires statsmodels)
+    for repeated binary behavioral outcomes (Nest Made, Lethargic, etc.)
+  - Pairwise McNemar tests with Bonferroni correction (post-hoc for
+    significant chi-square / Cochran's Q effects)
+  - Descriptive statistics report (mean, SEM, n per group/week)
+  - Statistical test registry report (methods documentation)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PLOTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Weight trajectories
+    - Total Change by individual (colored by sex)
+    - Daily Change by individual (colored by sex)
+    - Total Change by sex (mean ± SEM)
+    - Daily Change by sex (mean ± SEM)
+    - Average weight change binned by CA% (ramp) or by Week (nonramp)
+    - Total Change with R polynomial fit overlay
+    - Milestone-day daily-change bar chart
+  Behavioral outcomes (pie charts)
+    - Nest Made, Lethargic, CA-Spot Digging, Anxious Behaviors
+    - All four pie charts in a single combined figure
+    - Pie charts split by CA% level (ramp) or by Week (nonramp)
+  Aberrant-behavior summaries
+    - Line plots across weeks/CA%
+    - Stacked "load" bar charts across weeks/CA%
+  Interaction effects
+    - Sex × Week/CA% interaction line plots for weight and behavioral measures
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ DEPENDENCIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Required : pandas, numpy, matplotlib, scipy
+  Optional : pingouin  (mixed ANOVA)
+             statsmodels (Cochran's Q, McNemar)
+             rpy2 + R packages lme4/lmerTest/emmeans (polynomial contrasts)
 """
 from pathlib import Path
 from typing import Dict, Optional, Tuple

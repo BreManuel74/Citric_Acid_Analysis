@@ -1,14 +1,70 @@
 """
-Lick detection plotting utility
+Lick Detection — Capacitive Sensor Visualization & Lick Event Analysis
 
-Reads a capacitive sensor CSV log (Arduino output), converts Arduino_Timestamp from ms to minutes,
-and plots all sensor columns (Sensor_1..Sensor_24) over time (x-axis in seconds).
-Also creates a separate plot for a chosen sensor (x-axis in seconds).
+Reads one or more Arduino capacitive sensor log CSVs and provides a comprehensive
+suite of sensor signal plots, lick-event detection, bout analysis, and
+weight/weight-loss correlation plots.  Primarily used for quality-checking raw
+sensor data and tuning detection thresholds before running lick_analysis.py.
 
-Usage (from the workspace root):
-	python lick_detection.py --input "capacitive_log_2025-09-29_15-38-39.csv" --save "lick_sensors_plot.png"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ HOW TO RUN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Specify file on the command line:
+  python lick_detection.py --input capacitive_log_2026-1-21.csv
 
-If --input is omitted, a file picker window will open to select a CSV. The plot window will display interactively on every run.
+  # Optionally save a plot:
+  python lick_detection.py --input capacitive_log_2026-1-21.csv --save sensors_plot.png
+
+  # If --input is omitted a GUI file-picker opens automatically.
+  python lick_detection.py
+
+  Optional flags:
+    --input FILE     Path to a capacitive log CSV
+    --save  FILE     Save the all-sensors plot to this path (PNG or SVG)
+    --sensor NAME    Focus plots on a single sensor (e.g. Sensor_3)
+    --metadata FILE  Load a metadata CSV mapping sessions to sensor/weight data
+    --sensors-only   Skip event detection; only show raw sensor traces
+
+  Required input: capacitive_log_*.csv
+    Columns: Arduino_Timestamp (ms), Sensor_1 … Sensor_N (raw capacitance)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ DETECTION PIPELINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1. Load CSV; convert Arduino_Timestamp (ms) to seconds / minutes
+  2. Compute per-sensor KDE baseline distribution
+  3. Calculate normalized deviations from baseline
+  4. Threshold crossings → discrete lick events (default threshold 0.01)
+  5. Group events into bouts using ILI cutoff (default 0.3 s)
+  6. Compute inter-lick intervals (ILI) per sensor
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PLOTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Raw signals
+    - All sensors overlaid on a single axis (time in seconds)
+    - Single sensor over time
+    - Selected-sensor 2×6 grid of raw traces
+  Deviation & derivative
+    - KDE-normalized deviation 2×6 grid (all sensors)
+    - Derivative 2×6 grid with detected event markers
+    - Deviation 2×6 grid with event markers and threshold line
+    - Single sensor: derivative with events
+    - Single sensor: deviation with events
+  Correlations (require sensor → weight / weight-loss mappings)
+    - Lick count vs. body weight (per sensor / animal)
+    - Bout count vs. body weight
+    - Lick count vs. weight loss
+    - Bout count vs. weight loss
+    - Body weight vs. weight loss
+  Diagnostics
+    - Arduino timestamp delta series (detects clock gaps / freezes)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ DEPENDENCIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Required : pandas, numpy, matplotlib, scipy
+  Optional : tkinter (GUI file picker — standard library on most platforms)
 """
 
 from __future__ import annotations
