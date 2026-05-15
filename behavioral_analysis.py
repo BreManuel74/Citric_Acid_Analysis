@@ -109,7 +109,7 @@ plt.rcParams["svg.fonttype"] = "none"
 # ═══════════════════════════════════════════════════════════════════════════════
 #  EXPERIMENT MODE — change this single value to switch between designs
 # ═══════════════════════════════════════════════════════════════════════════════
-EXPERIMENT_MODE = 'nonramp'   # 'ramp' or 'nonramp'
+EXPERIMENT_MODE = 'ramp'   # 'ramp' or 'nonramp'
 
 _MODE_LABELS = {
     'ramp': {
@@ -895,10 +895,15 @@ def bin_weight_changes_by_ca_percent(df: pd.DataFrame) -> dict:
 	
 	# Clean the dataframe
 	cdf = clean_master_dataframe(df)
-	
+
+	# In ramp mode, exclude the baseline day (Day 1: first measurement, Total Change = 0)
+	if EXPERIMENT_MODE == 'ramp':
+		cdf = _add_day_number_column(cdf)
+		cdf = cdf[cdf["Day"] > 1]
+
 	# Drop rows with missing essential data
 	cdf = cdf.dropna(subset=["ID", "CA (%)", "Daily Change", "Total Change"])
-	
+
 	binned_by_id = {}
 	
 	for animal_id, group in cdf.groupby("ID", dropna=True):
@@ -3288,6 +3293,10 @@ def generate_descriptive_stats_report(
 	if EXPERIMENT_MODE == 'nonramp':
 		cdf = _add_day_number_column(cdf)
 		cdf = _add_week_column(cdf)
+	elif EXPERIMENT_MODE == 'ramp':
+		# Exclude the baseline day (Day 1) from all CA% averages
+		cdf = _add_day_number_column(cdf)
+		cdf = cdf[cdf["Day"] > 1]
 
 	if wc not in cdf.columns:
 		print(f"  Column '{wc}' not found in data.")
@@ -4112,8 +4121,13 @@ def perform_two_way_anova_weight(df: pd.DataFrame) -> dict:
 	if EXPERIMENT_MODE == 'nonramp':
 		cdf = _add_week_column(cdf)
 
-	# Filter to exclude Day < 0 (baseline measurements)
-	cdf = cdf[cdf["Day"] >= 0]
+	# Filter to exclude the baseline day
+	# ramp:    Day 1 = baseline (Total Change = 0 by definition) → exclude Day 1
+	# nonramp: Day 0 = baseline → Day >= 0 keeps it (mapped to Week 0, its own level)
+	if EXPERIMENT_MODE == 'ramp':
+		cdf = cdf[cdf["Day"] > 1]
+	else:
+		cdf = cdf[cdf["Day"] >= 0]
 
 	# Keep only rows with complete data (no sex column required)
 	required_cols = ["ID", wc, "Daily Change", "Total Change"]

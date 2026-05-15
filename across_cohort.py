@@ -138,7 +138,7 @@ try:
         "figure.titlesize": 10,
         "lines.linewidth": 0.9,
         "lines.markersize": 3,
-        "figure.figsize": (4, 2.5),
+        "figure.figsize": (3, 3),
     })
 except ImportError:
     HAS_MATPLOTLIB = False
@@ -634,9 +634,15 @@ def add_day_column_across_cohorts(combined_df: pd.DataFrame) -> pd.DataFrame:
 
     print(f"[OK] Added 'Day' column (range: {df['Day'].min()} to {df['Day'].max()})")
     
-    # Drop baseline rows (Day 0 for nonramp; nothing to drop for ramp since Day starts at 1)
+    # Drop baseline rows:
+    #   nonramp: Day 0 = baseline → keep Day >= 1
+    #   ramp:    Day 1 = baseline (Total Change = 0) → also drop Day 1 for ramp cohorts
     df = df[df['Day'] >= 1].copy()
-    print(f"[OK] Filtered to Day >= 1 (range: {df['Day'].min()} to {df['Day'].max()})")
+    if 'Cohort' in df.columns:
+        is_ramp = df['Cohort'].str.lower().str.contains('ramp', na=False)
+        df = df[~(is_ramp & (df['Day'] == 1))].copy()
+        print(f"[OK] Excluded ramp cohort baseline (Day 1) rows")
+    print(f"[OK] Filtered baseline rows (range: {df['Day'].min()} to {df['Day'].max()})")
 
     return df
 
@@ -13176,6 +13182,7 @@ def run_nparld_cohort_week_r(
         d = df.copy()
         d = clean_cohort(d)
         if 'Day' not in d.columns:
+            d['Cohort'] = label  # ensure ramp day-numbering and Day 1 exclusion are applied correctly
             d = add_day_column_across_cohorts(d)
         d = d[d['Day'] >= 1].copy()
         d = _add_week_column_across_cohorts(d)
@@ -13202,6 +13209,20 @@ def run_nparld_cohort_week_r(
 
     if weeks is not None:
         weekly = weekly[weekly['Week'].isin(weeks)].copy()
+
+    # ── Diagnostic: per-cohort per-week means (for cross-verification) ───
+    print("\n  [DIAG] Per-cohort per-week mean TotalChange (before complete-case filter):")
+    diag = (
+        weekly
+        .groupby(['Cohort', 'Week'])['TotalChange']
+        .agg(n='count', mean='mean', sd='std')
+        .reset_index()
+    )
+    for cohort, grp in diag.groupby('Cohort'):
+        print(f"    Cohort: {cohort}")
+        for _, row in grp.iterrows():
+            print(f"      Week {int(row['Week'])}: n={int(row['n'])}, mean={row['mean']:.4f}, SD={row['sd']:.4f}")
+    print()
 
     # Complete-case filter: keep only animals present in every Week
     week_counts = weekly.groupby('ID')['Week'].nunique()
@@ -13234,7 +13255,7 @@ def run_nparld_cohort_week_r(
     _co_levels = ', '.join(f'"{c}"' for c in cohort_levels)
 
     r_script = (
-        'options(warn=1)\n'
+        'options(warn=1, scipen=999)\n'
         'if (!require("nparLD", quietly=TRUE, warn.conflicts=FALSE)) {\n'
         '  install.packages("nparLD", repos="https://cran.r-project.org", quiet=TRUE)\n'
         '  library(nparLD)\n'
@@ -13391,6 +13412,13 @@ def run_nparld_cohort_week_r(
         tmp_csv.unlink(missing_ok=True)
         tmp_r.unlink(missing_ok=True)
 
+    # Clean up R output: rename Wilcoxon label, strip trailing whitespace and leading tabs
+    r_output = r_output.replace(
+        'Pairwise comparisons using Wilcoxon rank sum test with continuity correction',
+        'Pairwise comparisons using Mann-Whitney U test with continuity correction'
+    )
+    r_output = '\n'.join(ln.rstrip() for ln in r_output.replace('\t', '  ').splitlines())
+
     print(r_output)
 
     # ── Save report ────────────────────────────────────────────────────────
@@ -13492,6 +13520,7 @@ def run_art_behavior_r(
     for label, df in cohort_dfs.items():
         cdf = clean_cohort(df.copy())
         if 'Day' not in cdf.columns:
+            cdf['Cohort'] = label  # ensure ramp day-numbering and Day 1 exclusion are applied correctly
             cdf = add_day_column_across_cohorts(cdf)
         cdf = cdf[cdf['Day'] >= 1].copy()
         cdf = _add_week_column_across_cohorts(cdf)
@@ -13764,6 +13793,7 @@ def run_nparld_behavior_r(
     for label, df in cohort_dfs.items():
         cdf = clean_cohort(df.copy())
         if 'Day' not in cdf.columns:
+            cdf['Cohort'] = label  # ensure ramp day-numbering and Day 1 exclusion are applied correctly
             cdf = add_day_column_across_cohorts(cdf)
         cdf = cdf[cdf['Day'] >= 1].copy()
         cdf = _add_week_column_across_cohorts(cdf)
@@ -13859,7 +13889,7 @@ def run_nparld_behavior_r(
     )
 
     r_script = (
-        'options(warn=1)\n'
+        'options(warn=1, scipen=999)\n'
         'if (!require("nparLD", quietly=TRUE, warn.conflicts=FALSE)) {\n'
         '  install.packages("nparLD", repos="https://cran.r-project.org", quiet=TRUE)\n'
         '  library(nparLD)\n'
