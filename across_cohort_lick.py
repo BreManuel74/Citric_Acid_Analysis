@@ -8218,10 +8218,10 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     cohort_labels_fec = list(cohorts.keys())
 
                 _BAR_COLORS = [
-                    {'face': '#1f77b4',  'edge': '#0d3d5c'},
-                    {'face': '#2da048', 'edge': '#155224'},
-                    {'face': '#9467bd',   'edge': '#4a3560'},
-                    {'face': '#d62728', 'edge': '#8b0000'},
+                    {'face': '#1f77b4'},
+                    {'face': '#2da048'},
+                    {'face': '#7f3f98'},
+                    {'face': '#d62728'},
                 ]
 
                 fig_fec4, ax_fec4 = _plt.subplots()
@@ -8249,7 +8249,7 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     ax_fec4.bar(
                         x_positions[i], mean_val,
                         width=bar_width,
-                        color=c['face'], edgecolor=c['edge'], linewidth=0.9,
+                        color=c['face'], alpha=0.7,
                         zorder=2, label=cohort_lbl,
                     )
                     ax_fec4.errorbar(
@@ -8263,11 +8263,12 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     jitter = rng_fec.uniform(-0.12, 0.12, size=len(vals))
                     ax_fec4.scatter(
                         x_positions[i] + jitter, vals,
-                        color='black', s=30, alpha=0.7,
-                        zorder=4, linewidths=0,
+                        color=c['face'], s=10, alpha=0.6,
+                        edgecolors='black', linewidths=0.5, zorder=4,
                     )
 
                 ax_fec4.set_xticks(x_positions)
+                ax_fec4.set_xlim(x_positions[0] - 0.7, x_positions[-1] + 0.7)
                 ax_fec4.set_xticklabels(cohort_labels_fec)
                 ax_fec4.set_ylabel('Fecal Count (mean \u00b1 SEM)', weight='bold')
                 ax_fec4.set_title('Fecal Count at Week 4 by Cohort', weight='bold')
@@ -8673,10 +8674,10 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     cohort_labels_fec = list(cohorts.keys())
 
                 _BAR_COLORS = [
-                    {'face': 'steelblue',    'edge': 'navy'},
-                    {'face': '#2da048',   'edge': '#155224'},
-                    {'face': '#9467bd',     'edge': '#4a3560'},
-                    {'face': '#d62728', 'edge': '#8b0000'},
+                    {'face': '#f79520'},
+                    {'face': '#2da048'},
+                    {'face': '#7f3f98'},
+                    {'face': '#d62728'},
                 ]
 
                 fig_fec4, ax_fec4 = _plt.subplots()
@@ -8704,7 +8705,7 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     ax_fec4.bar(
                         x_positions[i], mean_val,
                         width=bar_width,
-                        color=c['face'], edgecolor=c['edge'], linewidth=0.9,
+                        color=c['face'], alpha=0.7,
                         zorder=2, label=cohort_lbl,
                     )
                     ax_fec4.errorbar(
@@ -8717,11 +8718,12 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     jitter = rng_fec.uniform(-0.12, 0.12, size=len(vals))
                     ax_fec4.scatter(
                         x_positions[i] + jitter, vals,
-                        color='black', s=30, alpha=0.7,
-                        zorder=4, linewidths=0,
+                        color=c['face'], s=10, alpha=0.6,
+                        edgecolors='black', linewidths=0.5, zorder=4,
                     )
 
                 ax_fec4.set_xticks(x_positions)
+                ax_fec4.set_xlim(x_positions[0] - 0.7, x_positions[-1] + 0.7)
                 ax_fec4.set_xticklabels(cohort_labels_fec)
                 ax_fec4.set_ylabel('Fecal Count (mean \u00b1 SEM)', weight='bold')
                 ax_fec4.set_title('Fecal Count at Week 4 by Cohort', weight='bold')
@@ -8784,10 +8786,10 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     cohort_labels_lk3 = list(cohorts.keys())
 
                 _BAR_COLORS = [
-                    {'face': 'steelblue',    'edge': 'navy'},
-                    {'face': 'darkorange',   'edge': 'saddlebrown'},
-                    {'face': '#9467bd',     'edge': '#4a3560'},
-                    {'face': '#d62728', 'edge': '#8b0000'},
+                    {'face': '#f79520'},
+                    {'face': '#2da048'},
+                    {'face': '#7f3f98'},
+                    {'face': '#d62728'},
                 ]
 
                 fig_lk3, ax_lk3 = _plt.subplots()
@@ -8815,7 +8817,7 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     ax_lk3.bar(
                         x_positions[i], mean_val,
                         width=bar_width,
-                        color=c['face'], edgecolor=c['edge'], linewidth=0.9,
+                        color=c['face'], alpha=0.7,
                         zorder=2, label=cohort_lbl,
                     )
                     ax_lk3.errorbar(
@@ -8828,11 +8830,12 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     jitter = rng_lk3.uniform(-0.12, 0.12, size=len(vals))
                     ax_lk3.scatter(
                         x_positions[i] + jitter, vals,
-                        color='black', s=30, alpha=0.7,
-                        zorder=4, linewidths=0,
+                        color=c['face'], s=10, alpha=0.6,
+                        edgecolors='black', linewidths=0.5, zorder=4,
                     )
 
                 ax_lk3.set_xticks(x_positions)
+                ax_lk3.set_xlim(x_positions[0] - 0.7, x_positions[-1] + 0.7)
                 ax_lk3.set_xticklabels(cohort_labels_lk3)
                 ax_lk3.set_ylabel('Total Licks (mean \u00b1 SEM)', weight='bold')
                 ax_lk3.set_title('Total Licks at Week 3 by Cohort', weight='bold')
@@ -8903,10 +8906,10 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     raise ValueError("No weight change column found (expected 'Total_Weight_Change' or 'total_weight_change')")
 
                 _BAR_COLORS = [
-                    {'face': 'steelblue',  'edge': 'navy'},
-                    {'face': 'darkorange', 'edge': 'saddlebrown'},
-                    {'face': '#9467bd',    'edge': '#4a3560'},
-                    {'face': '#d62728',    'edge': '#8b0000'},
+                    {'face': '#f79520'},
+                    {'face': '#2da048'},
+                    {'face': '#7f3f98'},
+                    {'face': '#d62728'},
                 ]
 
                 fig_wt, ax_wt = _plt.subplots()
@@ -8934,7 +8937,7 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     ax_wt.bar(
                         x_positions[i], mean_val,
                         width=bar_width,
-                        color=c['face'], edgecolor=c['edge'], linewidth=0.9,
+                        color=c['face'], alpha=0.7,
                         zorder=2, label=cohort_lbl,
                     )
                     ax_wt.errorbar(
@@ -8947,20 +8950,25 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     jitter = rng_wt.uniform(-0.12, 0.12, size=len(vals))
                     ax_wt.scatter(
                         x_positions[i] + jitter, vals,
-                        color='black', s=30, alpha=0.7,
-                        zorder=4, linewidths=0,
+                        color=c['face'], s=10, alpha=0.6,
+                        edgecolors='black', linewidths=0.5, zorder=4,
                     )
 
                 ax_wt.set_xticks(x_positions)
+                ax_wt.set_xlim(x_positions[0] - 0.7, x_positions[-1] + 0.7)
                 ax_wt.set_xticklabels(cohort_labels_wt)
-                ax_wt.set_ylabel('Total Weight Change on Lick Day (g, mean \u00b1 SEM)', weight='bold')
-                ax_wt.set_title('Week 3 Total Weight Change on Lick Detection Day', weight='bold')
+                ax_wt.set_ylabel('Total Weight Change (%)')
+                ax_wt.set_title('Week 3 Total Weight Change')
                 ax_wt.spines['top'].set_visible(False)
                 ax_wt.spines['right'].set_visible(False)
                 ax_wt.tick_params(direction='in', which='both', length=5)
                 _mwu_res_wt = _add_mwu_brackets(
                     ax_wt, _bar_vals, x_positions, _bar_ytops,
                     group_labels=cohort_labels_wt)
+                # Re-apply after _add_mwu_brackets overrides ylim
+                ax_wt.set_ylim(bottom=-20, top=5.5)
+                ax_wt.set_yticks(range(-20, 6, 5))
+                ax_wt.spines['left'].set_bounds(-20, 5)
                 fig_wt.tight_layout()
 
                 wt_plot_dir = Path(f"2vramp_lick_plots_{timestamp}")
@@ -9354,10 +9362,10 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     cohort_labels_fec = list(cohorts.keys())
 
                 _BAR_COLORS = [
-                    {'face': 'steelblue',    'edge': 'navy'},
-                    {'face': 'darkorange',   'edge': 'saddlebrown'},
-                    {'face': '#2da048',     'edge': '#155224'},
-                    {'face': '#9467bd', 'edge': '#4a3560'},
+                    {'face': '#1f77b4'},
+                    {'face': '#f79520'},
+                    {'face': '#2da048'},
+                    {'face': '#7f3f98'},
                 ]
 
                 fig_fec4, ax_fec4 = _plt.subplots()
@@ -9385,7 +9393,7 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     ax_fec4.bar(
                         x_positions[i], mean_val,
                         width=bar_width,
-                        color=c['face'], edgecolor=c['edge'], linewidth=0.9,
+                        color=c['face'], alpha=0.7,
                         zorder=2, label=cohort_lbl,
                     )
                     ax_fec4.errorbar(
@@ -9398,11 +9406,12 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     jitter = rng_fec.uniform(-0.12, 0.12, size=len(vals))
                     ax_fec4.scatter(
                         x_positions[i] + jitter, vals,
-                        color='black', s=30, alpha=0.7,
-                        zorder=4, linewidths=0,
+                        color=c['face'], s=10, alpha=0.6,
+                        edgecolors='black', linewidths=0.5, zorder=4,
                     )
 
                 ax_fec4.set_xticks(x_positions)
+                ax_fec4.set_xlim(x_positions[0] - 0.7, x_positions[-1] + 0.7)
                 ax_fec4.set_xticklabels(cohort_labels_fec)
                 ax_fec4.set_ylabel('Fecal Count (mean \u00b1 SEM)', weight='bold')
                 ax_fec4.set_title('Fecal Count at Week 4 by Cohort', weight='bold')
@@ -9412,7 +9421,7 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 _mwu_res_fec4 = _add_mwu_brackets(
                     ax_fec4, _bar_vals, x_positions, _bar_ytops,
                     group_labels=cohort_labels_fec)
-                ax_fec4.set_ylim(bottom=0)
+                ax_fec4.set_ylim(bottom=0, top=12)
                 fig_fec4.tight_layout()
 
                 fec4_plot_dir = Path(f"all3_lick_plots_{timestamp}")

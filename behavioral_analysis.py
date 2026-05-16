@@ -248,8 +248,8 @@ plt.rcParams.update({
     "legend.fontsize": 7.5,
     "figure.titlesize": 10,
     "lines.linewidth": 0.5,
-    "lines.markersize": 1.5,
-    "figure.figsize": (3, 2.5), #4.5 by 2.5 for larger plot
+    "lines.markersize": 3,
+    "figure.figsize": (4, 2.5), #4.5 by 2.5 for larger plot
     "axes.xmargin": 0,
     "savefig.dpi": 200,
 })
@@ -3736,7 +3736,7 @@ def plot_total_change_r_fit(
 ) -> dict:
 	"""
 	Scatterplot of Total Change values vs the within-subjects factor (Week/CA%) or
-	vs Day number, with per-animal trajectories and linear + quadratic OLS fit lines.
+	vs Day number, with per-animal trajectories and linear / exp decay fit lines.
 
 	The plot is drawn in matplotlib (matching all other plots' rcParams style).
 	R is called only for model statistics (F-test, AIC, BIC, adj. R²), which are
@@ -3761,7 +3761,12 @@ def plot_total_change_r_fit(
 	cdf = _add_day_number_column(cdf)
 	if EXPERIMENT_MODE == 'nonramp':
 		cdf = _add_week_column(cdf)
-		cdf = cdf[cdf.get('Day', pd.Series([1])) >= 1] if 'Day' in cdf.columns else cdf
+		cdf = cdf[cdf['Day'] >= 1].copy() if 'Day' in cdf.columns else cdf
+	# cdf_scatter: keeps all days (including ramp Day 1) for scatter point plotting
+	cdf_scatter = cdf.copy()
+	if EXPERIMENT_MODE == 'ramp' and 'Day' in cdf.columns:
+		# Day 1 is the baseline (Total Change = 0); exclude from model fits only
+		cdf = cdf[cdf['Day'] > 1].copy()
 
 	if by_day:
 		x_col   = 'Day'
@@ -3789,6 +3794,15 @@ def plot_total_change_r_fit(
 
 	plot_df['x_factor'] = pd.to_numeric(plot_df['x_factor'], errors='coerce')
 	plot_df = plot_df.dropna(subset=['x_factor'])
+
+	# scatter_df: includes ramp Day 1 so that point appears on the plot
+	scatter_df = (
+		cdf_scatter[['ID', x_col, 'Total Change']]
+		.dropna()
+		.rename(columns={x_col: 'x_factor', 'Total Change': 'total_change'})
+	)
+	scatter_df['x_factor'] = pd.to_numeric(scatter_df['x_factor'], errors='coerce')
+	scatter_df = scatter_df.dropna(subset=['x_factor'])
 
 	# ── Locate Rscript ────────────────────────────────────────────────────────
 	rscript = shutil.which('Rscript') or shutil.which('Rscript.exe')
@@ -3823,13 +3837,10 @@ def plot_total_change_r_fit(
 df <- read.csv("{dat_r}", stringsAsFactors=FALSE)
 df <- df[!is.na(df$x_factor) & !is.na(df$total_change), ]
 df$x_factor <- as.numeric(df$x_factor)
-m_lin  <- lm(total_change ~ x_factor,                 data=df)
-m_quad <- lm(total_change ~ x_factor + I(x_factor^2), data=df)
+m_lin  <- lm(total_change ~ x_factor, data=df)
 s_lin  <- summary(m_lin)
-s_quad <- summary(m_quad)
-comp   <- anova(m_lin, m_quad)
-aic_l  <- AIC(m_lin);  aic_q <- AIC(m_quad)
-bic_l  <- BIC(m_lin);  bic_q <- BIC(m_quad)
+aic_l  <- AIC(m_lin)
+bic_l  <- BIC(m_lin)
 
 # Exponential decay: y = A + B * exp(-k * x)
 y_r <- range(df$total_change)
@@ -3864,10 +3875,6 @@ cat("LINEAR MODEL  (total_change ~ {x_label})\\n")
 cat("========================================\\n")
 print(s_lin)
 cat("\\n========================================\\n")
-cat("QUADRATIC MODEL  (total_change ~ {x_label} + {x_label}^2)\\n")
-cat("========================================\\n")
-print(s_quad)
-cat("\\n========================================\\n")
 cat("EXPONENTIAL DECAY  (total_change ~ A + B*exp(-k*{x_label}))\\n")
 cat("========================================\\n")
 if (m_exp_ok) {{
@@ -3877,21 +3884,19 @@ if (m_exp_ok) {{
   cat("Exponential fit did not converge.\\n")
 }}
 cat("\\n========================================\\n")
-cat("MODEL COMPARISON (F-test: Linear vs Quadratic)\\n")
+cat("MODEL COMPARISON (AIC/BIC: Linear vs Exponential)\\n")
 cat("========================================\\n")
-print(comp)
-cat(sprintf("AIC  -- Linear: %.3f  |  Quadratic: %.3f  |  Exponential: %s\\n",
-            aic_l, aic_q, ifelse(m_exp_ok, sprintf("%.3f", aic_exp), "N/A")))
-cat(sprintf("BIC  -- Linear: %.3f  |  Quadratic: %.3f  |  Exponential: %s\\n",
-            bic_l, bic_q, ifelse(m_exp_ok, sprintf("%.3f", bic_exp), "N/A")))
-cat(sprintf("Adj R2 -- Linear: %.4f  |  Quadratic: %.4f  |  Exp pseudo-R2: %s\\n",
-            s_lin$adj.r.squared, s_quad$adj.r.squared,
+cat(sprintf("AIC  -- Linear: %.3f  |  Exponential: %s\\n",
+            aic_l, ifelse(m_exp_ok, sprintf("%.3f", aic_exp), "N/A")))
+cat(sprintf("BIC  -- Linear: %.3f  |  Exponential: %s\\n",
+            bic_l, ifelse(m_exp_ok, sprintf("%.3f", bic_exp), "N/A")))
+cat(sprintf("Adj R2 -- Linear: %.4f  |  Exp pseudo-R2: %s\\n",
+            s_lin$adj.r.squared,
             ifelse(m_exp_ok, sprintf("%.4f", r2_exp), "N/A")))
 sink()
 # machine-readable summary for Python
-cat(sprintf("__STATS__:%.4f:%.4f:%.4f:%.4f:%.4f:%s:%s\\n",
-            s_lin$adj.r.squared, s_quad$adj.r.squared, aic_l, aic_q,
-            ifelse(is.na(comp[["Pr(>F)"]][2]), NA_real_, comp[["Pr(>F)"]][2]),
+cat(sprintf("__STATS__:%.4f:%.4f:%s:%s\\n",
+            s_lin$adj.r.squared, aic_l,
             ifelse(m_exp_ok, sprintf("%.4f", aic_exp), "NA"),
             ifelse(m_exp_ok, sprintf("%.4f", r2_exp),  "NA")))
 if (m_exp_ok) {{
@@ -3918,13 +3923,10 @@ if (m_exp_ok) {{
 						parts = line[len('__STATS__:'):].split(':')
 						try:
 							r_stats = {
-								'adj_r2_lin':  float(parts[0]),
-								'adj_r2_quad': float(parts[1]),
-								'aic_lin':     float(parts[2]),
-								'aic_quad':    float(parts[3]),
-								'p_ftest':     float(parts[4]) if parts[4] not in ('NA', 'NaN') else float('nan'),
-								'aic_exp':     float(parts[5]) if len(parts) > 5 and parts[5] not in ('NA', 'NaN') else float('nan'),
-								'r2_exp':      float(parts[6]) if len(parts) > 6 and parts[6] not in ('NA', 'NaN') else float('nan'),
+								'adj_r2_lin': float(parts[0]),
+								'aic_lin':    float(parts[1]),
+								'aic_exp':    float(parts[2]) if len(parts) > 2 and parts[2] not in ('NA', 'NaN') else float('nan'),
+								'r2_exp':     float(parts[3]) if len(parts) > 3 and parts[3] not in ('NA', 'NaN') else float('nan'),
 							}
 						except (ValueError, IndexError):
 							pass
@@ -3949,19 +3951,16 @@ if (m_exp_ok) {{
 	if save_svg:
 		svg_out = (save_path.parent / svg_filename) if svg_filename else save_path.with_suffix('.svg')
 
-	ids   = plot_df['ID'].unique()
-	cmap  = plt.get_cmap('tab10')
-	icols = {iid: cmap(i % 10) for i, iid in enumerate(ids)}
+	ids   = scatter_df['ID'].unique()
 
 	x_vals = plot_df['x_factor'].values
 	y_vals = plot_df['total_change'].values
-	x_seq  = np.linspace(x_vals.min(), x_vals.max(), 300)
+	# x_seq spans the full scatter range (including ramp Day 1) so fit lines reach both ends
+	x_seq  = np.linspace(scatter_df['x_factor'].min(), scatter_df['x_factor'].max(), 300)
 
 	# fit curves in numpy / scipy for the plot
-	_c_lin  = np.polyfit(x_vals, y_vals, 1)
-	_c_quad = np.polyfit(x_vals, y_vals, 2)
-	y_lin   = np.polyval(_c_lin,  x_seq)
-	y_quad  = np.polyval(_c_quad, x_seq)
+	_c_lin = np.polyfit(x_vals, y_vals, 1)
+	y_lin  = np.polyval(_c_lin, x_seq)
 
 	# exponential decay: use R coefficients if available, else scipy fallback
 	y_exp: Optional[np.ndarray] = None
@@ -3980,51 +3979,35 @@ if (m_exp_ok) {{
 		except Exception:
 			exp_label = 'Exp decay (no fit)'
 
-	title_str = f"Total Change (%) by {x_label} \u2014 Linear / Quadratic / Exp Decay"
+	title_str = f"Total Change (%) by {x_label} \u2014 Linear / Exp Decay"
 
 	fig, ax = plt.subplots()
 	ax.set_title(title_str)
 	ax.set_xlabel(x_label)
 	ax.set_ylabel('Total Change (%)')
 
-	# per-animal trajectories
-	for iid, grp in plot_df.groupby('ID'):
+	# per-animal trajectories (scatter_df includes ramp Day 1)
+	for iid, grp in scatter_df.groupby('ID'):
 		grp_s = grp.sort_values('x_factor')
-		c = icols[iid]
 		ax.plot(grp_s['x_factor'], grp_s['total_change'],
-		        color=c, alpha=0.25, linewidth=plt.rcParams['lines.linewidth'])
+		        color=COHORT_COLOR, alpha=0.25, linewidth=plt.rcParams['lines.linewidth'])
 		ax.scatter(grp_s['x_factor'], grp_s['total_change'],
-		           color=c, alpha=0.55, s=plt.rcParams['lines.markersize']**2,
+		           color=COHORT_COLOR, alpha=0.55, s=plt.rcParams['lines.markersize']**2,
 		           zorder=3)
 
 	# fit lines
-	ax.plot(x_seq, y_lin,  color='royalblue', linewidth=1.2, linestyle='-',
+	ax.plot(x_seq, y_lin, color='royalblue', linewidth=1.2, linestyle='-',
 	        label='Linear fit', zorder=4)
-	ax.plot(x_seq, y_quad, color='firebrick', linewidth=1.2, linestyle='--',
-	        label='Quadratic fit', zorder=4)
 	if y_exp is not None:
 		ax.plot(x_seq, y_exp, color='#2ca02c', linewidth=1.2, linestyle=':',
 		        label=exp_label, zorder=4)
 
-	# annotation from R stats (if available)
-	if r_stats:
-		p_f    = r_stats.get('p_ftest', float('nan'))
-		p_str  = f"Lin vs Quad F-test p={p_f:.4f}" if not np.isnan(p_f) else "F-test N/A"
-		aic_e  = r_stats.get('aic_exp', float('nan'))
-		r2_e   = r_stats.get('r2_exp',  float('nan'))
-		exp_str = f"{aic_e:.1f}" if not np.isnan(aic_e) else 'N/A'
-		r2e_str = f"{r2_e:.3f}" if not np.isnan(r2_e)  else 'N/A'
-		ann = (
-			f"{p_str}  |  Adj R\u00b2: Lin={r_stats['adj_r2_lin']:.3f} "
-			f"Quad={r_stats['adj_r2_quad']:.3f} Exp={r2e_str}\n"
-			f"AIC: Lin={r_stats['aic_lin']:.1f} Quad={r_stats['aic_quad']:.1f} Exp={exp_str}"
-		)
-		ax.annotate(ann, xy=(0.5, -0.22), xycoords='axes fraction',
-		            ha='center', va='top', fontsize=5, color='0.4')
-
 	ax.legend(fontsize=plt.rcParams['legend.fontsize'], frameon=False)
 	ax.spines['top'].set_visible(False)
 	ax.spines['right'].set_visible(False)
+	ax.set_ylim(bottom=-20, top= 10)
+	ax.set_xlim(1, 36)
+	ax.set_xticks(range(4, 37, 4))
 	ax.tick_params(direction='in')
 	ax.axhline(0, color='0.3', linewidth=0.8, linestyle=':', alpha=0.7)
 	fig.tight_layout()
@@ -4055,7 +4038,6 @@ if (m_exp_ok) {{
 		'FITTED COEFFICIENTS (Python numpy / scipy)',
 		'-' * 60,
 		f'  Linear:    slope={_c_lin[0]:.4f},  intercept={_c_lin[1]:.4f}',
-		f'  Quadratic: a={_c_quad[0]:.4f},  b={_c_quad[1]:.4f},  c={_c_quad[2]:.4f}',
 	]
 	if r_stats.get('exp_A') is not None:
 		rpt_lines.append(
@@ -4070,13 +4052,10 @@ if (m_exp_ok) {{
 			'-' * 60,
 			'MODEL FIT SUMMARY (from R)',
 			'-' * 60,
-			f'  Adj R²   — Linear:    {r_stats.get("adj_r2_lin",  float("nan")):.4f}',
-			f'  Adj R²   — Quadratic: {r_stats.get("adj_r2_quad", float("nan")):.4f}',
-			f'  Pseudo R²— Exp decay: {r_stats.get("r2_exp",      float("nan")):.4f}',
-			f'  AIC      — Linear:    {r_stats.get("aic_lin",  float("nan")):.3f}',
-			f'  AIC      — Quadratic: {r_stats.get("aic_quad", float("nan")):.3f}',
-			f'  AIC      — Exp decay: {r_stats.get("aic_exp",  float("nan")):.3f}',
-			f'  F-test (Lin vs Quad) p = {r_stats.get("p_ftest", float("nan")):.4f}',
+			f'  Adj R²   — Linear:    {r_stats.get("adj_r2_lin", float("nan")):.4f}',
+			f'  Pseudo R²— Exp decay: {r_stats.get("r2_exp",     float("nan")):.4f}',
+			f'  AIC      — Linear:    {r_stats.get("aic_lin",    float("nan")):.3f}',
+			f'  AIC      — Exp decay: {r_stats.get("aic_exp",    float("nan")):.3f}',
 		]
 
 	rpt_path.write_text('\n'.join(rpt_lines), encoding='utf-8')
@@ -6037,23 +6016,25 @@ def plot_daily_change_milestone_days(
     means = [data_by_day[d]['mean'] for d in _days]
     sems  = [data_by_day[d]['sem']  for d in _days]
 
+    _lw = plt.rcParams['lines.linewidth']
+    _ms = plt.rcParams.get('lines.markersize', 4)
+
     ax.bar(x_pos, means, bar_w,
            color=COHORT_COLOR, alpha=0.75,
-           edgecolor='black', linewidth=0.8, zorder=2)
+           edgecolor='black', linewidth=_lw, zorder=2)
     ax.errorbar(x_pos, means, yerr=sems,
                 fmt='none', ecolor='black',
-                elinewidth=0.8, capsize=3, capthick=0.8, zorder=3)
+                elinewidth=_lw, capsize=_ms * 1.5, capthick=_lw, zorder=3)
 
     # individual animal points with jitter
-    _ms = plt.rcParams.get('lines.markersize', 4)
     for i, d in enumerate(_days):
         vals   = data_by_day[d]['vals']
         jitter = rng.uniform(-bar_w * 0.25, bar_w * 0.25, size=len(vals))
         ax.scatter(i + jitter, vals,
-                   s=_ms ** 2, color='white', edgecolors='black',
-                   linewidths=0.6, alpha=0.9, zorder=4)
+                   s=_ms ** 2, color=COHORT_COLOR, edgecolors='black',
+                   linewidths=_lw, alpha=0.6, zorder=4)
 
-    ax.axhline(0, color='black', linewidth=0.8, linestyle='-', alpha=0.8)
+    ax.axhline(0, color='black', linewidth=_lw, linestyle='-', alpha=0.8)
     ax.set_xticks(x_pos)
     ax.set_xticklabels([f"Day {d}" for d in _days])
     ax.set_xlim(-bar_w, n_bars - 1 + bar_w)
@@ -6064,7 +6045,7 @@ def plot_daily_change_milestone_days(
         weight='bold')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    ax.tick_params(direction='in', which='both', length=5)
+    ax.tick_params(direction='in')
 
     # y-axis ticks
     all_vals = np.concatenate([data_by_day[d]['vals']
@@ -6596,7 +6577,7 @@ def main() -> None:
 			_cache['desc'] = generate_descriptive_stats_report(cdf, save_report=True)
 
 		elif task == 15:
-			print(f"\n[R Fit] Total Change \u2014 linear vs quadratic (calls Rscript)...")
+			print(f"\n[R Fit] Total Change \u2014 linear / exp decay (calls Rscript)...")
 			try:
 				gran = input(f"  Granularity: [1] by {fl}  [2] by Day  (default 1): ").strip()
 			except (KeyboardInterrupt, EOFError):
@@ -6665,7 +6646,7 @@ def main() -> None:
 		12: "Save statistical analysis report",
 		13: "Statistical test registry",
 		14: f"Descriptive statistics (per {fl}): weight changes + behavior %",
-		15: f"R: Total Change scatterplot \u2014 linear vs quadratic fit (per {fl})",
+		15: f"R: Total Change scatterplot \u2014 linear / exp decay fit (per {fl})",
 		16: "Daily weight change \u2014 milestone days bar chart (days 8,15,22,29) + report",
 		17: "R: Friedman test \u2014 Daily Weight Change at milestone days (repeated measures)",
 	}

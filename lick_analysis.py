@@ -6770,10 +6770,7 @@ def _plot_rmcorr_licks_vs_weight_impl(
                 f"95% CI [{_ci_lo:.3f}, {_ci_hi:.3f}]\n"
                 f"n = {n_animals} mice")
         if not np.isnan(_slope):
-            _x_lo = _df['weight_pct'].min()
-            _x_hi = _df['weight_pct'].max()
-            _x_pad_w = (_x_hi - _x_lo) * 0.05
-            _line_xs = np.linspace(_x_lo - _x_pad_w, _x_hi + _x_pad_w, 200)
+            _line_xs = np.linspace(-50, 50, 500)
             _grand_intercept = _df['licks'].mean() - _slope * _df['weight_pct'].mean()
             _line_ys = _grand_intercept + _slope * _line_xs
         else:
@@ -6784,7 +6781,7 @@ def _plot_rmcorr_licks_vs_weight_impl(
         if len(_valid) >= 3:
             _rho, _pv = stats.spearmanr(_valid['weight_pct'], _valid['licks'])
             _sl, _ic, *_ = stats.linregress(_valid['weight_pct'], _valid['licks'])
-            _line_xs = np.linspace(_valid['weight_pct'].min(), _valid['weight_pct'].max(), 200)
+            _line_xs = np.linspace(-50, 50, 500)
             _line_ys = _sl * _line_xs + _ic
             _p_str = f"p = {_pv:.4f}" if _pv >= 0.0001 else "p < 0.0001"
             _ann = (f"Spearman \u03c1 = {_rho:.3f}\n{_p_str}\nn = {n_animals} mice\n"
@@ -6803,77 +6800,25 @@ def _plot_rmcorr_licks_vs_weight_impl(
         if _line_xs is not None:
             _axx.plot(_line_xs, _line_ys, **_line_kw)
 
-    # ── decide whether a y-axis break is needed ───────────────────────────
-    _y_vals     = _df['licks'].dropna().values
-    _y_min_data = float(np.nanmin(_y_vals)) if len(_y_vals) else 0.0
-    _y_max_data = float(np.nanmax(_y_vals)) if len(_y_vals) else 1.0
-    _y_range    = _y_max_data - _y_min_data + 1e-9
-    # Break if the gap between 0 and lowest data point is > 25 % of the spread
-    _use_break  = (_y_min_data > 0) and (_y_min_data > 0.25 * _y_range)
-
-    if _use_break:
-        # ── single axis with two angled dashes on the y-axis spine ───────
-        _data_lo = _y_min_data - _y_range * 0.06
-        _data_hi = _y_max_data + _y_range * 0.10
-
-        fig, ax = plt.subplots()
-        _draw_scatter_and_line(ax)
-        ax.set_ylim(_data_lo, _data_hi)
-
-        # two angled dashed slashes ( // ) on the y-axis only
-        import matplotlib.transforms as _mtt
-        _trans = _mtt.blended_transform_factory(ax.transAxes, ax.transData)
-        _h    = _y_range * 0.016   # half-height of each slash in data units
-        _gap  = _y_range * 0.030   # vertical gap between the two slashes
-        _bk_y = _data_lo + _gap    # mid-point of the break-mark pair
-        _w    = 0.038              # half-width of each slash in axes units
-        _bk_kw = dict(color='k', linewidth=0.9, linestyle='--',
-                      clip_on=False, zorder=5)
-        # lower slash
-        ax.plot([-_w, _w],
-                [_bk_y - _gap / 2 - _h, _bk_y - _gap / 2 + _h],
-                transform=_trans, **_bk_kw)
-        # upper slash (right next to lower)
-        ax.plot([-_w, _w],
-                [_bk_y + _gap / 2 - _h, _bk_y + _gap / 2 + _h],
-                transform=_trans, **_bk_kw)
-
-        # "0" label just below the break marks
-        ax.text(-0.07, _data_lo - _y_range * 0.005, '0',
-                transform=_trans, ha='center', va='top',
-                fontsize=plt.rcParams.get('ytick.labelsize', 8))
-
-        ax.text(0.03, 0.97, _ann,
-                transform=ax.transAxes, va='top', ha='left', fontsize=7.5,
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.75,
-                          edgecolor='gray'))
-        ax.set_xlabel('Total Weight Change (%)', weight='bold')
-        ax.set_ylabel('Total Lick Count', weight='bold')
-        ax.set_title(
-            f'Repeated-Measures Correlation: Licks ~ Weight Change\n({design_label})',
-            weight='bold')
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        ax.tick_params(direction='in', which='both', length=5)
-        plt.tight_layout()
-
-    else:
-        # ── single axis, y starts at 0 ────────────────────────────────────
-        fig, ax = plt.subplots()
-        _draw_scatter_and_line(ax)
-        ax.set_ylim(bottom=0)
-        ax.text(0.03, 0.97, _ann,
-                transform=ax.transAxes, va='top', ha='left', fontsize=7.5,
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.75, edgecolor='gray'))
-        ax.set_xlabel('Total Weight Change (%)', weight='bold')
-        ax.set_ylabel('Total Lick Count', weight='bold')
-        ax.set_title(
-            f'Repeated-Measures Correlation: Licks ~ Weight Change\n({design_label})',
-            weight='bold')
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        ax.tick_params(direction='in', which='both', length=5)
-        plt.tight_layout()
+    # ── single axis ────────────────────────────────────────────────────────
+    fig, ax = plt.subplots()
+    _draw_scatter_and_line(ax)
+    ax.set_ylim(bottom=0, top=5000)
+    ax.set_yticks(range(0, 5001, 1000))
+    ax.set_xlim(-20, 5)
+    ax.set_xticks(range(-20, 6, 5))
+    ax.text(0.03, 0.97, _ann,
+            transform=ax.transAxes, va='top', ha='left', fontsize=7.5,
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.75, edgecolor='gray'))
+    ax.set_xlabel('Total Weight Change (%)')
+    ax.set_ylabel('Lick Count')
+    ax.set_title(
+        f'Repeated-Measures Correlation: Licks ~ Weight Change\n({design_label})',
+        weight='bold')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(direction='in', which='both', length=5)
+    plt.tight_layout()
 
     # ── save ──────────────────────────────────────────────────────────────
     if save_path is not None:
@@ -6935,30 +6880,19 @@ def _plot_rmcorr_licks_vs_weight_impl(
             if _line_xs is not None:
                 _axx.plot(_line_xs, _line_ys, **_line_kw)
 
-        if _use_break:
-            fig_ca, ax_ca = plt.subplots()
-            _draw_ca_colored(ax_ca)
-            ax_ca.set_ylim(_data_lo, _data_hi)
-            # reuse the same break-mark slashes
-            _trans_ca = _mtt.blended_transform_factory(ax_ca.transAxes, ax_ca.transData)
-            ax_ca.plot([-_w, _w], [_bk_y - _gap/2 - _h, _bk_y - _gap/2 + _h],
-                       transform=_trans_ca, **_bk_kw)
-            ax_ca.plot([-_w, _w], [_bk_y + _gap/2 - _h, _bk_y + _gap/2 + _h],
-                       transform=_trans_ca, **_bk_kw)
-            ax_ca.text(-0.07, _data_lo - _y_range * 0.005, '0',
-                       transform=_trans_ca, ha='center', va='top',
-                       fontsize=plt.rcParams.get('ytick.labelsize', 8))
-        else:
-            fig_ca, ax_ca = plt.subplots()
-            _draw_ca_colored(ax_ca)
-            ax_ca.set_ylim(bottom=0)
+        fig_ca, ax_ca = plt.subplots()
+        _draw_ca_colored(ax_ca)
+        ax_ca.set_ylim(bottom=0, top=5000)
+        ax_ca.set_yticks(range(0, 5001, 1000))
+        ax_ca.set_xlim(-20, 5)
+        ax_ca.set_xticks(range(-20, 6, 5))
 
         ax_ca.text(0.03, 0.97, _ann,
                    transform=ax_ca.transAxes, va='top', ha='left', fontsize=7.5,
                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.75,
                              edgecolor='gray'))
-        ax_ca.set_xlabel('Total Weight Change (%)', weight='bold')
-        ax_ca.set_ylabel('Total Lick Count', weight='bold')
+        ax_ca.set_xlabel('Total Weight Change (%)')
+        ax_ca.set_ylabel('Lick Count')
         ax_ca.set_title(
             f'Repeated-Measures Correlation: Licks ~ Weight Change\n({design_label})',
             weight='bold')

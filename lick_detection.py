@@ -1222,15 +1222,15 @@ def plot_single_sensor_deviation_with_events(
 	_df_win = events_df.loc[_mask]
 
 	ax.plot(_df_win["Time_sec"], _df_win[dev_col],
-	        color="#1f77b4", linewidth=0.8, label="Deviation")
+	        color="#747575", linewidth=0.8, label="Capacitance")
 
 	if event_col in events_df.columns:
 		event_mask = _df_win[event_col].astype(bool)
 		event_times = _df_win.loc[event_mask, "Time_sec"]
 		event_values = _df_win.loc[event_mask, dev_col]
-		ax.scatter(event_times, event_values, color="red", s=15, zorder=5, label="Detected events")
+		ax.scatter(event_times, event_values, color="#eb0d8c", s=15, zorder=5, label="Detected events")
 
-	ax.axhline(y=threshold, color="orange", linestyle="--", linewidth=0.8, label=f"Threshold ({threshold:.3f})")
+	ax.axhline(y=threshold, color="#2278b5", linestyle="-", linewidth=1.0, label=f"Threshold")
 
 	ax.set_xlabel("Time (s)")
 	ax.set_ylabel("Capacitance (a.u.)")
@@ -1239,8 +1239,8 @@ def plot_single_sensor_deviation_with_events(
 	ax.legend(loc="best", frameon=False)
 
 	ax.set_xlim(left=_t_min, right=_t_max)
+	ax.set_ylim(bottom=0.00, top=0.03)
 	ax.margins(x=0)
-	ax.set_ylim(bottom=0)
 	for side in ("top", "right"):
 		ax.spines[side].set_visible(False)
 	ax.tick_params(direction="in", which="both", length=5)

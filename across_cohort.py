@@ -138,7 +138,7 @@ try:
         "figure.titlesize": 10,
         "lines.linewidth": 0.9,
         "lines.markersize": 3,
-        "figure.figsize": (3.5, 2.5),
+        "figure.figsize": (4.5, 2.5),
     })
 except ImportError:
     HAS_MATPLOTLIB = False
@@ -3465,7 +3465,7 @@ def plot_behavioral_metrics_by_cohort(
         print("[WARNING] matplotlib not available -- cannot generate behavioral plot")
         return None
 
-    _COLORS = ['#2166AC', '#D6604D', '#4DAC26', '#984EA3', '#FF7F00']
+    _COLORS = ['#1f77b4', '#f79520', '#2da048', '#984EA3', '#FF7F00']
 
     # (column, aberrant_value, panel_title)
     BEHAVIORS = [
@@ -3580,9 +3580,9 @@ def plot_behavioral_metrics_by_cohort(
             )
         ax.set_xticks(range(len(all_weeks_sorted)))
         ax.set_xticklabels(x_labels)
-        ax.set_xlabel('Week', weight='bold')
-        ax.set_ylim(0, _y_max)
-        ax.set_title(panel_title, weight='bold', pad=10)
+        ax.set_xlabel('Week')
+        ax.set_ylim(0, 50)
+        ax.set_title(panel_title, pad=10)
         ax.grid(False)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
