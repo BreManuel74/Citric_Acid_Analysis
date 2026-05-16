@@ -138,7 +138,7 @@ try:
         "figure.titlesize": 10,
         "lines.linewidth": 0.9,
         "lines.markersize": 3,
-        "figure.figsize": (3, 3),
+        "figure.figsize": (4.5, 2.5),
     })
 except ImportError:
     HAS_MATPLOTLIB = False
@@ -595,12 +595,15 @@ def combine_cohorts_for_analysis(cohort_dfs: Dict[str, pd.DataFrame]) -> pd.Data
     return combined
 
 
-def add_day_column_across_cohorts(combined_df: pd.DataFrame) -> pd.DataFrame:
+def add_day_column_across_cohorts(combined_df: pd.DataFrame, drop_ramp_baseline: bool = True) -> pd.DataFrame:
     """
     Add a cohort-aligned 'Day' column to combined data.
     
     Parameters:
         combined_df: Combined DataFrame with ID and Date columns
+        drop_ramp_baseline: If True (default), drop ramp cohort Day 1 rows (baseline
+            with Total Change = 0). Set False when preparing data for plotting so that
+            the first ramp data point is visible.
         
     Returns:
         DataFrame with added 'Day' column
@@ -636,9 +639,9 @@ def add_day_column_across_cohorts(combined_df: pd.DataFrame) -> pd.DataFrame:
     
     # Drop baseline rows:
     #   nonramp: Day 0 = baseline → keep Day >= 1
-    #   ramp:    Day 1 = baseline (Total Change = 0) → also drop Day 1 for ramp cohorts
+    #   ramp:    Day 1 = baseline (Total Change = 0) → only drop for analyses
     df = df[df['Day'] >= 1].copy()
-    if 'Cohort' in df.columns:
+    if drop_ramp_baseline and 'Cohort' in df.columns:
         is_ramp = df['Cohort'].str.lower().str.contains('ramp', na=False)
         df = df[~(is_ramp & (df['Day'] == 1))].copy()
         print(f"[OK] Excluded ramp cohort baseline (Day 1) rows")
@@ -2823,12 +2826,12 @@ def plot_daily_change_by_cohort(
         all_idx_concat = pd.concat(all_group_indices)
         x_data_min = int(all_idx_concat.min())
         x_data_max = int(all_idx_concat.max())
-        x_step = _auto_integer_step(x_data_min, x_data_max, target_ticks=10, allow_sub5=True)
-        _apply_integer_axis(ax, axis='x', data_min=x_data_min, data_max=x_data_max,
+        x_step = _auto_integer_step(1, 36, target_ticks=10, allow_sub5=True)
+        _apply_integer_axis(ax, axis='x', data_min=1, data_max=36,
                             step=x_step, clamp_min=1, left_pad_steps=0, right_pad_steps=0)
-        y_step = _auto_integer_step(y_data_min, y_data_max, target_ticks=7)
-        _apply_integer_axis(ax, axis='y', data_min=y_data_min, data_max=y_data_max,
-                            step=y_step, left_pad_steps=0, right_pad_steps=1)
+        y_step = _auto_integer_step(-15, 5, target_ticks=6)
+        _apply_integer_axis(ax, axis='y', data_min=-15, data_max=5,
+                            step=y_step, left_pad_steps=0, right_pad_steps=0)
 
     ax.legend(title="Cohort", loc="best")
     fig.tight_layout()
@@ -3772,7 +3775,7 @@ def plot_weight_interaction_effects(
         combined = combine_cohorts_for_analysis(cohort_dfs)
         combined = clean_cohort(combined)
         if 'Day' not in combined.columns:
-            combined = add_day_column_across_cohorts(combined)
+            combined = add_day_column_across_cohorts(combined, drop_ramp_baseline=False)
         combined = _add_week_column_across_cohorts(combined)
         combined = combined[combined['Day'] >= 1]
     except Exception as e:
@@ -9336,16 +9339,18 @@ def plot_slopes_comparison(
     positions = list(range(len(ca_groups)))
     box_data = [slopes_df[slopes_df['Cohort'] == c]['Slope'].values for c in ca_groups]
 
+    # Clean tick labels: strip parenthetical suffixes like "(6 animals)"
+    import re as _re
+    tick_labels = [_re.sub(r'\s*\(.*?\)', '', g).strip() for g in ca_groups]
+
     fig, ax = plt.subplots()
 
-    bp = ax.boxplot(box_data, positions=positions, widths=0.5, patch_artist=True,
-                    medianprops=dict(color='black', linewidth=1.0),
-                    whiskerprops=dict(linewidth=0.5),
-                    capprops=dict(linewidth=0.5),
-                    flierprops=dict(marker='o', markersize=3, linestyle='none'))
-    for patch, color in zip(bp['boxes'], colors):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.7)
+    # Bar plot: mean ± SEM per cohort
+    bar_means = [np.mean(d) if len(d) > 0 else 0.0 for d in box_data]
+    bar_sems  = [stats.sem(d) if len(d) > 1 else 0.0 for d in box_data]
+    ax.bar(positions, bar_means, width=0.65, color=colors, alpha=0.7,
+           yerr=bar_sems, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'),
+           zorder=2)
 
     # Overlay individual points
     for i, ca_val in enumerate(ca_groups):
@@ -9356,8 +9361,10 @@ def plot_slopes_comparison(
 
     ax.axhline(0, color='black', linewidth=0.5, linestyle='--')
     ax.set_xticks(positions)
-    ax.set_xticklabels(ca_groups)
+    ax.set_xticklabels(tick_labels)
     ax.set_xlim(-0.7, len(ca_groups) - 1 + 0.7)
+    ax.set_ylim(-6, 6)
+    ax.set_yticks(range(-6, 7, 2))
     ax.set_xlabel('Cohort')
     ax.set_ylabel(f'Slope ({measure} per {time_unit})')
     ax.tick_params(direction='in')
@@ -9368,10 +9375,10 @@ def plot_slopes_comparison(
     from itertools import combinations
     pairs = list(combinations(range(len(ca_groups)), 2))
     n_pairs = len(pairs)
-    all_vals = np.concatenate([d for d in box_data if len(d) > 0])
-    y_top = np.nanmax(all_vals) if len(all_vals) > 0 else 1.0
-    y_range = np.nanmax(all_vals) - np.nanmin(all_vals) if len(all_vals) > 0 else 1.0
-    step = y_range * 0.12
+    step = 0.35
+    tick_h = step * 0.15
+    _data_max = max((float(np.max(d)) for d in box_data if len(d) > 0), default=0.0)
+    y_top = min(_data_max + 0.3, 5.9 - step * n_pairs - tick_h)
 
     _mwu_bracket_results = []
     for level, (i, j) in enumerate(pairs):
@@ -9439,7 +9446,6 @@ def plot_slopes_comparison(
 
         y_bracket = y_top + step * (level + 1)
         x1, x2 = positions[i], positions[j]
-        tick_h = step * 0.15
         ax.plot([x1, x1, x2, x2], [y_bracket - tick_h, y_bracket, y_bracket, y_bracket - tick_h],
                 color='black', linewidth=0.5)
         ax.text((x1 + x2) / 2, y_bracket + tick_h * 0.5, label,
@@ -11160,7 +11166,7 @@ def _run_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined = combine_cohorts_for_analysis(cohorts)
             combined = clean_cohort(combined)
             if 'Day' not in combined.columns:
-                combined = add_day_column_across_cohorts(combined)
+                combined = add_day_column_across_cohorts(combined, drop_ramp_baseline=False)
 
             plot_dir = Path(f"0v2_plots_{timestamp}")
             plot_dir.mkdir(exist_ok=True)
@@ -11556,7 +11562,7 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined = combine_cohorts_for_analysis(cohorts)
             combined = clean_cohort(combined)
             if 'Day' not in combined.columns:
-                combined = add_day_column_across_cohorts(combined)
+                combined = add_day_column_across_cohorts(combined, drop_ramp_baseline=False)
             combined = combined[combined['Day'] >= 1].copy()
 
             plot_dir.mkdir(exist_ok=True)
@@ -11594,7 +11600,7 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 combined_wk = combine_cohorts_for_analysis(cohorts)
                 combined_wk = clean_cohort(combined_wk)
                 if 'Day' not in combined_wk.columns:
-                    combined_wk = add_day_column_across_cohorts(combined_wk)
+                    combined_wk = add_day_column_across_cohorts(combined_wk, drop_ramp_baseline=False)
                 combined_wk = combined_wk[combined_wk['Day'] >= 1].copy()
                 combined_wk = _add_week_column_across_cohorts(combined_wk)
             except Exception as e:
@@ -11677,7 +11683,7 @@ def _run_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined = combine_cohorts_for_analysis(cohorts)
             combined = clean_cohort(combined)
             if 'Day' not in combined.columns:
-                combined = add_day_column_across_cohorts(combined)
+                combined = add_day_column_across_cohorts(combined, drop_ramp_baseline=False)
             combined = combined[combined['Day'] >= 1].copy()
 
             plot_dir.mkdir(exist_ok=True)
@@ -11923,7 +11929,7 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined = combine_cohorts_for_analysis(cohorts)
             combined = clean_cohort(combined)
             if 'Day' not in combined.columns:
-                combined = add_day_column_across_cohorts(combined)
+                combined = add_day_column_across_cohorts(combined, drop_ramp_baseline=False)
             combined = combined[combined['Day'] >= 1].copy()
 
             plot_dir.mkdir(exist_ok=True)
@@ -11961,7 +11967,7 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 combined_wk = combine_cohorts_for_analysis(cohorts)
                 combined_wk = clean_cohort(combined_wk)
                 if 'Day' not in combined_wk.columns:
-                    combined_wk = add_day_column_across_cohorts(combined_wk)
+                    combined_wk = add_day_column_across_cohorts(combined_wk, drop_ramp_baseline=False)
                 combined_wk = combined_wk[combined_wk['Day'] >= 1].copy()
                 combined_wk = _add_week_column_across_cohorts(combined_wk)
             except Exception as e:
@@ -12044,7 +12050,7 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined = combine_cohorts_for_analysis(cohorts)
             combined = clean_cohort(combined)
             if 'Day' not in combined.columns:
-                combined = add_day_column_across_cohorts(combined)
+                combined = add_day_column_across_cohorts(combined, drop_ramp_baseline=False)
             combined = combined[combined['Day'] >= 1].copy()
 
             plot_dir.mkdir(exist_ok=True)
@@ -12124,7 +12130,7 @@ def _run_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 combined_wk3 = combine_cohorts_for_analysis(cohorts)
                 combined_wk3 = clean_cohort(combined_wk3)
                 if 'Day' not in combined_wk3.columns:
-                    combined_wk3 = add_day_column_across_cohorts(combined_wk3)
+                    combined_wk3 = add_day_column_across_cohorts(combined_wk3, drop_ramp_baseline=False)
                 combined_wk3 = combined_wk3[combined_wk3['Day'] >= 1].copy()
                 combined_wk3 = _add_week_column_across_cohorts(combined_wk3)
 
@@ -12510,7 +12516,7 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined = combine_cohorts_for_analysis(cohorts)
             combined = clean_cohort(combined)
             if 'Day' not in combined.columns:
-                combined = add_day_column_across_cohorts(combined)
+                combined = add_day_column_across_cohorts(combined, drop_ramp_baseline=False)
             combined = combined[combined['Day'] >= 1].copy()
 
             plot_dir.mkdir(exist_ok=True)
@@ -12547,7 +12553,7 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined = combine_cohorts_for_analysis(cohorts)
             combined = clean_cohort(combined)
             if 'Day' not in combined.columns:
-                combined = add_day_column_across_cohorts(combined)
+                combined = add_day_column_across_cohorts(combined, drop_ramp_baseline=False)
             combined = combined[combined['Day'] >= 1].copy()
 
             plot_dir.mkdir(exist_ok=True)
@@ -12585,7 +12591,7 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 combined_wk = combine_cohorts_for_analysis(cohorts)
                 combined_wk = clean_cohort(combined_wk)
                 if 'Day' not in combined_wk.columns:
-                    combined_wk = add_day_column_across_cohorts(combined_wk)
+                    combined_wk = add_day_column_across_cohorts(combined_wk, drop_ramp_baseline=False)
                 combined_wk = combined_wk[combined_wk['Day'] >= 1].copy()
                 combined_wk = _add_week_column_across_cohorts(combined_wk)
             except Exception as e:
@@ -12686,7 +12692,7 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             combined = combine_cohorts_for_analysis(cohorts)
             combined = clean_cohort(combined)
             if 'Day' not in combined.columns:
-                combined = add_day_column_across_cohorts(combined)
+                combined = add_day_column_across_cohorts(combined, drop_ramp_baseline=False)
             combined = combined[combined['Day'] >= 1].copy()
 
             plot_dir.mkdir(exist_ok=True)
