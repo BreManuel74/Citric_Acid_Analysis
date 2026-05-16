@@ -138,7 +138,7 @@ try:
         "figure.titlesize": 10,
         "lines.linewidth": 0.9,
         "lines.markersize": 3,
-        "figure.figsize": (4.5, 2.5),
+        "figure.figsize": (3.5, 2.5),
     })
 except ImportError:
     HAS_MATPLOTLIB = False
@@ -13002,9 +13002,9 @@ def _run_rampramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     'Ramp (Day 8, 15) vs 2-Week Ramp (Day 4, 7)',
                 )
                 rng = _np.random.default_rng(42)
-                bar_width = 0.5
+                bar_width = 0.35
                 cohort_order = [ramp_label, twowk_label]
-                x_pos = _np.arange(len(cohort_order))
+                x_pos = _np.array([0.2, 0.8])
 
                 # Pre-compute global y-range across both panels for shared axis
                 _global_plotted = [0.0]
@@ -13018,13 +13018,11 @@ def _run_rampramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         _global_plotted.append(mean_val + sem_val)
                         _global_plotted.append(mean_val - sem_val)
 
-                _g_max   = float(_np.max(_global_plotted))
-                _g_min   = float(_np.min(_global_plotted))
-                _g_span  = max(_g_max - _g_min, 0.1)
-                _bkt_y   = _g_max + 0.10 * _g_span
+                _ylim_bot = -12.5
+                _ylim_top = 2.5
+                _g_span  = _ylim_top - _ylim_bot
                 _tick_h  = 0.04 * _g_span
-                _ylim_bot = _g_min - 0.05 * _g_span
-                _ylim_top = _bkt_y + _tick_h * 3.5
+                _bkt_y   = _ylim_top - _tick_h * 3.5
 
                 for ax_idx, (ax, sr) in enumerate(zip(axes, stat_results)):
                     transition = sr['transition']
@@ -13043,7 +13041,8 @@ def _run_rampramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                                     capsize=6, capthick=0.8, linewidth=1.0, zorder=3)
                         jitter = rng.uniform(-0.12, 0.12, size=len(vals))
                         ax.scatter(x_pos[i] + jitter, vals,
-                                   color='black', s=30, alpha=0.7, zorder=4, linewidths=0)
+                                   color=c['face'], s=10, alpha=0.6,
+                                   edgecolors='black', linewidths=0.5, zorder=4)
 
                     ax.axhline(0, color='black', linewidth=0.6, linestyle='--', zorder=1)
                     ax.set_xticks(x_pos)
@@ -13058,6 +13057,7 @@ def _run_rampramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     ax.spines['top'].set_visible(False)
                     ax.spines['right'].set_visible(False)
                     ax.tick_params(direction='in', which='both', length=5)
+                    ax.set_xlim(-0.1, 1.1)
 
                     # significance bracket (globally positioned, same height both panels)
                     ax.plot([x_pos[0], x_pos[1]], [_bkt_y, _bkt_y],
