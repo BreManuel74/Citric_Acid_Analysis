@@ -130,7 +130,7 @@ try:
         "figure.titlesize": 10,
         "lines.linewidth": 0.9,
         "lines.markersize": 3,
-        "figure.figsize": (2.5, 3),
+        "figure.figsize": (4.5, 2.5),
     })
 except ImportError:
     HAS_MATPLOTLIB = False
@@ -2209,11 +2209,13 @@ def generate_lick_frontloading_descriptives_report(
 _OMNIBUS_MEASURES = ["Total_Licks", "Total_Bouts", "First_5min_Lick_Pct", "Time_to_50pct_Licks",
                     "Fecal_Count"]
 _OMNIBUS_MEASURE_LABELS = {
-    "Total_Licks":         "Total Licks",
-    "Total_Bouts":         "Total Lick Bouts",
-    "First_5min_Lick_Pct": "% Licks in First 5 min",
-    "Time_to_50pct_Licks": "Time to 50% Licks (min)",
-    "Fecal_Count":         "Fecal Count",
+    "Total_Licks":          "Total Licks",
+    "Total_Bouts":          "Total Lick Bouts",
+    "First_5min_Lick_Pct":  "% Licks in First 5 min",
+    "Time_to_50pct_Licks":  "Time to 50% Licks (min)",
+    "Fecal_Count":          "Fecal Count",
+    "Total_Weight_Change":  "Total Weight Change (%)",
+    "total_weight_change":  "Total Weight Change (%)",
 }
 
 
@@ -4306,15 +4308,12 @@ def plot_fecal_counts_by_week(
             markeredgecolor=c['edge'],
         )
 
-    ax.set_xlabel('Week', weight='bold')
-    ax.set_ylabel('Fecal Count (mean \u00b1 SEM)', weight='bold')
-    ax.set_title('Fecal Count Across Weeks by Cohort (mean \u00b1 SEM)',
-                 weight='bold')
+    ax.set_xlabel('Week')
+    ax.set_ylabel('Fecal Count')
+    ax.set_title('Fecal Count')
     ax.set_xticks(weeks)
     ax.set_xticklabels([str(int(w) + 1) for w in weeks])
-    if weeks:
-        ax.set_xlim([weeks[0] - 0.1, weeks[-1] + 0.1])
-    ax.set_ylim(bottom=0)
+    ax.set_ylim(bottom=0, top=10)
     ax.legend(loc='best')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -4447,19 +4446,17 @@ def plot_lick_measure_by_cohort(
     elif 'Avg' in measure:
         measure_label = measure_label
     
-    ax.set_ylabel(measure_label, weight='bold')
+    ax.set_ylabel(measure_label)
     
-    error_type = '±SD' if use_std else '±SEM'
-    ax.set_title(f'{measure_label} Across Weeks by Cohort ({error_type})', 
-                weight='bold')    
+    ax.set_title(f'{measure_label}')
     # Set x-ticks to show Week 1, 2, 3, etc.
     if len(combined_df['Week'].unique()) > 0:
         all_weeks = sorted(combined_df['Week'].unique())
         ax.set_xticks(all_weeks)
         ax.set_xticklabels([f"{int(w)+1}" for w in all_weeks])
-        ax.set_xlim([all_weeks[0] - 0.1, all_weeks[-1] + 0.1])
     
-    ax.set_ylim(bottom=0)
+    ax.set_ylim(bottom=0, top=2500)
+    ax.set_yticks(range(0, 2501, 500))
     ax.legend(loc='best')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -5213,7 +5210,7 @@ def test_nparLD_lick_analysis(
             return pandas2ri.py2rpy(df)
 
     # ── default measures ─────────────────────────────────────────────────
-    _DEFAULT_MEASURES = ["Total_Licks", "Fecal_Count", "First_5min_Lick_Pct"]
+    _DEFAULT_MEASURES = ["Total_Licks", "Fecal_Count", "First_5min_Lick_Pct", "Total_Weight_Change"]
     if measures is None:
         _comb_tmp = combine_lick_cohorts(cohort_dfs)
         measures = [m for m in _DEFAULT_MEASURES if m in _comb_tmp.columns]
@@ -5693,6 +5690,36 @@ def test_nparLD_lick_analysis(
                         )
                     else:
                         sec.append("  " + ln)
+                sec.append("")
+
+            # ── per-week between-cohort MWU post-hoc ────────────────────────────────
+            _week_groups = sorted(adf['CA_group'].dropna().unique())
+            sec += [
+                "  Between-Cohort Comparisons at Each Week  (Mann-Whitney U, Holm corrected within each week)",
+                "  " + "─" * 88,
+            ]
+            for _wk in sorted(adf['Week'].dropna().unique()):
+                _week_sub   = adf[adf['Week'] == _wk]
+                _wpairs_raw = []
+                _wpairs_info = []
+                for _wi in range(len(_week_groups)):
+                    for _wj in range(_wi + 1, len(_week_groups)):
+                        _g1, _g2 = _week_groups[_wi], _week_groups[_wj]
+                        _v1 = _week_sub[_week_sub['CA_group'] == _g1][measure].dropna().values
+                        _v2 = _week_sub[_week_sub['CA_group'] == _g2][measure].dropna().values
+                        if len(_v1) > 0 and len(_v2) > 0:
+                            _, _p = stats.mannwhitneyu(_v1, _v2, alternative='two-sided')
+                        else:
+                            _p = 1.0
+                        _wpairs_raw.append(_p)
+                        _wpairs_info.append((_g1, len(_v1), _g2, len(_v2), _p))
+                _wadj = _holm_bonferroni(_wpairs_raw)
+                sec.append(f"  Week: {int(_wk)}")
+                for (_g1, _n1, _g2, _n2, _pr), _pa in zip(_wpairs_info, _wadj):
+                    sec.append(
+                        f"    {_g1} (n={_n1}) vs {_g2} (n={_n2}) :  "
+                        f"p_raw={_pr:.4f}  p_holm={_pa:.4f}  {_poly_sig_stars(_pa)}"
+                    )
                 sec.append("")
 
             sec += ["  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10", ""]
@@ -8837,15 +8864,16 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 ax_lk3.set_xticks(x_positions)
                 ax_lk3.set_xlim(x_positions[0] - 0.7, x_positions[-1] + 0.7)
                 ax_lk3.set_xticklabels(cohort_labels_lk3)
-                ax_lk3.set_ylabel('Total Licks (mean \u00b1 SEM)', weight='bold')
-                ax_lk3.set_title('Total Licks at Week 3 by Cohort', weight='bold')
+                ax_lk3.set_ylabel('Lick Count')
+                ax_lk3.set_title('Week 3 Lick Count')
                 ax_lk3.spines['top'].set_visible(False)
                 ax_lk3.spines['right'].set_visible(False)
                 ax_lk3.tick_params(direction='in', which='both', length=5)
                 _mwu_res_lk3 = _add_mwu_brackets(
                     ax_lk3, _bar_vals, x_positions, _bar_ytops,
                     group_labels=cohort_labels_lk3)
-                ax_lk3.set_ylim(bottom=0)
+                ax_lk3.set_ylim(bottom=0, top= 2500)
+                ax_lk3.set_yticks(range(0, 2501, 500))
                 fig_lk3.tight_layout()
 
                 lk3_plot_dir = Path(f"2vramp_lick_plots_{timestamp}")
@@ -9262,11 +9290,10 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                             markeredgecolor=c['edge'],
                         )
 
-                    ax_fl.set_xlabel('Week', weight='bold')
-                    ax_fl.set_ylabel(f'{y_label} (mean \u00b1 SEM)', weight='bold')
+                    ax_fl.set_xlabel('Week')
+                    ax_fl.set_ylabel(f'{y_label}')
                     ax_fl.set_title(
-                        f'{y_label} Across Weeks by Cohort (mean \u00b1 SEM)',
-                        weight='bold'                    )
+                        f'{y_label}')
                     ax_fl.set_xticks(weeks_fl)
                     ax_fl.set_xticklabels([str(int(w) + 1) for w in weeks_fl])
                     ax_fl.set_ylim(bottom=y_min if y_min is not None else ax_fl.get_ylim()[0])
