@@ -2826,9 +2826,9 @@ def plot_daily_change_by_cohort(
         all_idx_concat = pd.concat(all_group_indices)
         x_data_min = int(all_idx_concat.min())
         x_data_max = int(all_idx_concat.max())
-        x_step = _auto_integer_step(1, 36, target_ticks=10, allow_sub5=True)
-        _apply_integer_axis(ax, axis='x', data_min=1, data_max=36,
-                            step=x_step, clamp_min=1, left_pad_steps=0, right_pad_steps=0)
+        # Manual x-axis limits and ticks
+        ax.set_xlim(0, 36)
+        ax.set_xticks(range(0, 37, 4))
         y_step = _auto_integer_step(-15, 5, target_ticks=6)
         _apply_integer_axis(ax, axis='y', data_min=-15, data_max=5,
                             step=y_step, left_pad_steps=0, right_pad_steps=0)
@@ -9522,10 +9522,12 @@ def generate_slope_analysis_report(
         lines.append(f"\n{ca_val} (n={len(cohort_data)}):")
         
         for _, row in cohort_data.iterrows():
+            n_pts = int(row['N_points']) if 'N_points' in row.index else '?'
             lines.append(f"  {row['ID']:8s} ({row['Sex']}): "
                         f"Slope = {row['Slope']:7.4f}, "
                         f"R^2 = {row['R2']:.3f}, "
-                        f"p = {row['P_value']:.4f}")
+                        f"p = {row['P_value']:.4f}, "
+                        f"N Points: {n_pts}")
     
     # Within-cohort variability
     lines.append("\n\n" + "=" * 80)

@@ -249,7 +249,7 @@ plt.rcParams.update({
     "figure.titlesize": 10,
     "lines.linewidth": 0.5,
     "lines.markersize": 3,
-    "figure.figsize": (4, 2.5), #4.5 by 2.5 for larger plot
+    "figure.figsize": (3, 2), #4.5 by 2.5 for larger plot
     "axes.xmargin": 0,
     "savefig.dpi": 200,
 })
@@ -1284,8 +1284,8 @@ def plot_average_weight_change_by_week(
 			color='coral', alpha=0.8, edgecolor='black', linewidth=1.2,
 			error_kw={'elinewidth': 2, 'capthick': 2})
 	ax2.set_xlabel('Week', weight='bold')
-	ax2.set_ylabel('Total Change (Mean ± SEM)', weight='bold')
-	ax2.set_title('Total Weight Change', weight='bold', pad=10)
+	ax2.set_ylabel('Total Weight Change')
+	ax2.set_title('Total Weight Change', pad=10)
 	ax2.set_xticks(x_pos); ax2.set_xticklabels(week_labels)
 	ax2.axhline(0, color='black', linewidth=1.0, linestyle='-', alpha=0.8)
 	ax2.grid(False); ax2.spines['top'].set_visible(False); ax2.spines['right'].set_visible(False)
@@ -6773,7 +6773,7 @@ def plot_total_change_by_id(
 		)
 
 	ax.set_xlabel("Day" if use_day_number else "Date")
-	ax.set_ylabel("Total Change")
+	ax.set_ylabel("Total Weight Change")
 	ax.grid(False)
 
 	# Axis formatting: integers for day numbers, concise dates for datetimes
@@ -6807,23 +6807,10 @@ def plot_total_change_by_id(
 	y_data_max = float(np.nanmax(all_y)) if all_y.size else 1.0
 
 	if use_day_number:
-		all_x = np.concatenate([np.asarray(s.index, dtype=float) for s in series_by_id.values() if len(s) > 0])
-		x_data_min = int(np.nanmin(all_x)) if all_x.size else 0
-		x_data_max = int(np.nanmax(all_x)) if all_x.size else 1
-		# Choose or compute x step and apply with clamp at zero
-		x_step = x_tick_interval or _auto_integer_step(
-			x_data_min, x_data_max, target_ticks=x_target_ticks, allow_sub5=True
-		)
-		_apply_integer_axis(
-			ax,
-			axis='x',
-			data_min=x_data_min,
-			data_max=x_data_max,
-			step=x_step,
-			clamp_min=1,
-			left_pad_steps=1,
-			right_pad_steps=1,
-		)
+		# Fixed x-axis: 0 to 36 with ticks every 4
+		ax.set_xlim(0, 10)
+		ax.set_xticks(list(range(0, 11, 2)))
+		ax.xaxis.set_major_formatter(mticker.FormatStrFormatter('%d'))
 	else:
 		# Leave date axis as previously configured
 		pass
@@ -6855,9 +6842,12 @@ def plot_total_change_by_id(
 		ax.plot([], [], color=COHORT_COLOR, marker='o', linestyle='-', label='Female')[0],
 	]
 	ax.legend(handles=_leg_handles, loc="best")
+	_figsize = plt.rcParams["figure.figsize"]
+	fig.set_size_inches(*_figsize)
 	fig.tight_layout()
 
 	if save_path is not None:
+		fig.set_size_inches(*_figsize)
 		fig.savefig(str(save_path))
 
 	if save_svg:
@@ -6866,6 +6856,7 @@ def plot_total_change_by_id(
 		if not safe.lower().endswith(".svg"):
 			safe += ".svg"
 		out_path = Path.cwd() / safe
+		fig.set_size_inches(*_figsize)
 		fig.savefig(str(out_path), format="svg")
 		print(f"Saved SVG to: {out_path}")
 
