@@ -2992,6 +2992,137 @@ def plot_daily_change_by_cohort(
     return fig
 
 
+def plot_daily_change_bar_by_day_all3(
+    cohorts: Dict[str, pd.DataFrame],
+    target_days: Optional[List[int]] = None,
+    save_path: Optional[Path] = None,
+    show: bool = True,
+) -> Optional["plt.Figure"]:
+    """
+    Grouped bar chart of Daily Change (mean ± SEM) at specific target days for
+    3 cohorts (0% CA, 2% CA, 5-Wk Ramp).  One bar group per target day; one
+    bar per cohort within each group.  Individual animal values overlaid as
+    scatter points.  Uses the same day-alignment logic as
+    plot_daily_change_by_cohort (drop_ramp_baseline=False, Day >= 1).
+    """
+    if not HAS_MATPLOTLIB:
+        print("[ERROR] matplotlib is required for plotting")
+        return None
+
+    if target_days is None:
+        target_days = [5, 12, 19, 26, 33]
+
+    import colorsys as _cs
+
+    # ------------------------------------------------------------------
+    # Build aligned combined frame (same logic as option 5)
+    # ------------------------------------------------------------------
+    combined = combine_cohorts_for_analysis(cohorts)
+    combined = clean_cohort(combined)
+    if 'Day' not in combined.columns:
+        combined = add_day_column_across_cohorts(combined, drop_ramp_baseline=False)
+    combined = combined[combined['Day'] >= 1].copy()
+
+    cohort_map = _get_id_cohort_map(combined)
+    series_by_id = build_daily_change_series_by_id(combined)
+
+    # Consistent cohort ordering: 0% → 2% → ramp
+    all_labels = sorted(
+        set(cohort_map.values()),
+        key=lambda lbl: (
+            0 if '0%' in lbl.lower() and 'ramp' not in lbl.lower() else
+            1 if '2%' in lbl.lower() and 'ramp' not in lbl.lower() else 2
+        ),
+    )
+    color_map = {lbl: _cohort_label_to_color(lbl) for lbl in all_labels}
+
+    # ------------------------------------------------------------------
+    # Extract per-(day, cohort) animal values
+    # ------------------------------------------------------------------
+    day_cohort_vals: Dict[int, Dict[str, list]] = {
+        day: {lbl: [] for lbl in all_labels} for day in target_days
+    }
+    for mid, series in series_by_id.items():
+        cohort_lbl = cohort_map.get(mid)
+        if cohort_lbl is None:
+            continue
+        for day in target_days:
+            if day in series.index:
+                val = series.loc[day]
+                if np.isfinite(val):
+                    day_cohort_vals[day][cohort_lbl].append(float(val))
+
+    # ------------------------------------------------------------------
+    # Layout: groups of bars per day, one bar per cohort
+    # ------------------------------------------------------------------
+    n_days = len(target_days)
+    n_cohorts = len(all_labels)
+    bar_width = 0.22
+    bar_gap = 0.04
+    group_spacing = 1.0
+    step = bar_width + bar_gap
+    offsets = np.array([i * step for i in range(n_cohorts)], dtype=float)
+    offsets -= offsets.mean()          # centre the cohort bars around the day tick
+
+    rng = np.random.default_rng(42)
+    fig, ax = plt.subplots(figsize=plt.rcParams['figure.figsize'])
+
+    for ci, lbl in enumerate(all_labels):
+        col = color_map[lbl]
+        _r, _g, _b = (int(col.lstrip('#')[k:k+2], 16) / 255.0 for k in (0, 2, 4))
+        _h, _s, _v = _cs.rgb_to_hsv(_r, _g, _b)
+        edge_col = '#%02x%02x%02x' % tuple(
+            int(c * 255) for c in _cs.hsv_to_rgb(_h, min(_s * 1.3, 1.0), _v * 0.72))
+
+        for di, day in enumerate(target_days):
+            vals = np.array(day_cohort_vals[day][lbl])
+            if len(vals) == 0:
+                continue
+            x_center = di * group_spacing + offsets[ci]
+            mean_v = float(np.mean(vals))
+            sem_v = (float(np.std(vals, ddof=1) / np.sqrt(len(vals)))
+                     if len(vals) > 1 else 0.0)
+            ax.bar(x_center, mean_v, width=bar_width,
+                   color=col, edgecolor=edge_col, linewidth=0.8, zorder=2,
+                   label=lbl if di == 0 else '_nolegend_')
+            ax.errorbar(x_center, mean_v, yerr=sem_v,
+                        fmt='none', color='black', capsize=3, capthick=0.7,
+                        linewidth=0.8, zorder=3)
+            jitter = rng.uniform(-bar_width * 0.35, bar_width * 0.35, size=len(vals))
+            ax.scatter(x_center + jitter, vals,
+                       color=col, s=10, alpha=0.65,
+                       edgecolors='black', linewidths=0.4, zorder=4)
+
+    ax.axhline(0, color='black', linewidth=0.6, linestyle='--', zorder=1)
+
+    group_centers = [di * group_spacing for di in range(n_days)]
+    ax.set_xticks(group_centers)
+    ax.set_xticklabels([f"Day {d}" for d in target_days], fontsize=7)
+    ax.set_xlim(group_centers[0] - 0.65, group_centers[-1] + 0.65)
+    ax.set_ylabel('Daily Change (%BW/day)  (mean \u00b1 SEM)')
+    ax.set_title('Daily Weight Change at Selected Days\n0% CA  |  2% CA  |  5-Wk Ramp')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(direction='in', which='both', length=4)
+    ax.legend(title='Cohort', loc='lower left', fontsize=7)
+
+    fig.tight_layout()
+
+    ax.set_ylim(-5, 10)
+    ax.set_yticks([-5, 0, 5, 10])
+
+    if save_path is not None:
+        fig.savefig(save_path, format='svg')
+        print(f"[OK] Bar chart saved -> {save_path}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig
+
+
 # =============================================================================
 # INTERACTION PLOTTING FUNCTIONS
 # =============================================================================
@@ -12642,15 +12773,16 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  8. R: nparLD Cohort x Week -- nonparametric two-way ANOVA (Cohort between, Week within) on weekly means")
     print("  9. R: ART Cohort x Week  -- behavioral metrics (No Nest, Anxious, Lethargy) via Aligned Ranks Transformation")
     print(" 10. R: nparLD behavioral  -- nparLD F1-LD-F1 for No Nest / Anxious / Lethargy (comparison to ART)")
-    print(" 11. Run all (1-10)")
+    print(" 11. Daily Change bar chart -- mean \u00b1 SEM bars at Days 5, 12, 19, 26, 33 per cohort")
+    print(" 12. Run all (1-11)")
     print()
 
-    user_input = input("Select option (1-11) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-12) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '11')
+    run_all = (user_input == '12')
 
     plot_dir = Path(f"all3_plots_{timestamp}")
 
@@ -12977,6 +13109,40 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
         except Exception as e:
             print(f"  [WARNING] nparLD behavior analysis failed: {e}")
             import traceback; traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 11: Daily Change grouped bar chart at Days 5, 12, 19, 26, 33
+    # ------------------------------------------------------------------ #
+    if user_input == '11' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available -- cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Daily Change bar chart at Days 5, 12, 19, 26, 33 (all 3 cohorts)")
+            print("=" * 80)
+
+            plot_dir.mkdir(exist_ok=True)
+            try:
+                fig = plot_daily_change_bar_by_day_all3(
+                    cohorts=cohorts,
+                    target_days=[5, 12, 19, 26, 33],
+                    save_path=plot_dir / "daily_change_bar_by_day_all3.svg",
+                    show=False,
+                )
+                if fig:
+                    print(
+                        f"\n[OK] Daily Change bar chart saved -> "
+                        f"{plot_dir / 'daily_change_bar_by_day_all3.svg'}"
+                    )
+            except Exception as e:
+                print(f"  [WARNING] Daily Change bar chart failed: {e}")
+                import traceback; traceback.print_exc()
+
+            show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
+            if show_now == 'y':
+                plt.show()
+            else:
+                plt.close('all')
 
     print("\n" + "=" * 80)
     print("0% vs 2% vs Ramp analysis complete.")
