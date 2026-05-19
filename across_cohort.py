@@ -155,6 +155,7 @@ except ImportError:
 _COLOR_0PCT  = "#1f77b4"   # 0% CA
 _COLOR_2PCT  = "#f79520"   # 2% CA
 _COLOR_RAMP  = "#2da048"   # Ramp
+_COLOR_4PCT  = "#424143"   # 4% CA
 _COLOR_OTHER = "#7f3f98"   # fallback
 
 
@@ -163,6 +164,8 @@ def _cohort_label_to_color(label: str) -> str:
     lo = str(label).lower()
     if "0%" in lo:
         return _COLOR_0PCT
+    if "4%" in lo:
+        return _COLOR_4PCT
     if "2%" in lo:
         return _COLOR_2PCT
     if "ramp" in lo:
@@ -542,6 +545,147 @@ def clear_cache() -> None:
     _COHORT_DFS.clear()
     _COHORT_PATHS.clear()
     print("[OK] Cohort cache cleared")
+
+
+# =============================================================================
+# 4% PILOT DATA LOADING
+# =============================================================================
+
+def load_4pct_from_pilot(
+    pilot_csv_path: Path,
+    label: str = "4% CA (Pilot)",
+    encoding: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Load the 4% CA cohort from a pilot CSV (e.g. pilot_cohort_1.csv).
+
+    The pilot CSV uses a ``Condition`` column to identify CA% groups.  This
+    function filters rows where Condition contains '4%', normalises column
+    names to match the master_data_*.csv schema, and returns a clean
+    DataFrame ready for cross-cohort analysis.
+
+    Parameters
+    ----------
+    pilot_csv_path : Path
+        Path to the pilot CSV (must contain columns: ID, DOB, Sex, Date,
+        Weight, Daily Change, Total Change, Condition).
+    label : str
+        Cohort label to assign (stored in a 'Cohort' column).
+    encoding : str, optional
+        File encoding (default: None → pandas default utf-8/detect).
+
+    Returns
+    -------
+    pd.DataFrame
+        Normalised DataFrame with the same key columns as master_data CSVs,
+        plus a 'CA (%)' column set to 4.0.
+
+    Examples
+    --------
+    >>> df = load_4pct_from_pilot(Path("pilot_data/pilot_cohort_1.csv"))
+    >>> print(df[["ID", "Sex", "Date", "Daily Change"]].head())
+    """
+    pilot_csv_path = Path(pilot_csv_path)
+    if not pilot_csv_path.exists():
+        raise FileNotFoundError(f"Pilot CSV not found: {pilot_csv_path}")
+
+    print(f"\n[INFO] Loading 4% cohort from pilot CSV: {pilot_csv_path}")
+    raw = pd.read_csv(pilot_csv_path, encoding=encoding)
+    print(f"  [OK] Loaded {len(raw)} total rows, {raw['ID'].nunique()} unique animals")
+
+    # Filter to 4% condition only
+    if "Condition" not in raw.columns:
+        raise ValueError("Pilot CSV must contain a 'Condition' column.")
+    mask = raw["Condition"].astype(str).str.contains(r'4\s*%', regex=True, na=False)
+    df = raw[mask].copy()
+    print(f"  [OK] Filtered to 4% condition: {len(df)} rows, {df['ID'].nunique()} animals")
+    if df.empty:
+        print("  [WARNING] No 4% rows found — check the Condition column values.")
+        return df
+
+    # Normalise to master_data schema
+    df["CA (%)"] = 4.0
+    df["Cohort"]  = label
+
+    # Rename Notes → not a standard column; leave as-is (or drop silently)
+    # Ensure Date is datetime
+    if "Date" in df.columns:
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+
+    # Ensure numeric weight / change columns
+    for col in ("Weight", "Daily Change", "Total Change"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Add placeholder behavioral columns absent from pilot data so downstream
+    # functions that expect them don't KeyError
+    for beh_col in ("Nest Made?", "Lethargy?", "Anxious Behaviors?", "CA Spot Digging?"):
+        if beh_col not in df.columns:
+            df[beh_col] = None
+
+    print(f"  Animals: {sorted(df['ID'].unique())}")
+    return df.reset_index(drop=True)
+
+
+def export_daily_change_all4(
+    cohorts: Dict[str, pd.DataFrame],
+    save_path: Optional[Path] = None,
+) -> pd.DataFrame:
+    """
+    Extract and export ``Daily Change`` (per-animal, per-day) from all four
+    cohorts for downstream plotting.
+
+    Adds ``Day`` (1-indexed, per-animal), ``Cohort``, and ``CA (%)`` columns.
+    Drops Day-0 baseline rows.
+
+    Parameters
+    ----------
+    cohorts : dict
+        Mapping of cohort label → DataFrame (as loaded by load_cohorts or
+        load_4pct_from_pilot).
+    save_path : Path, optional
+        If provided, saves the combined CSV to this path.
+
+    Returns
+    -------
+    pd.DataFrame
+        Long-format DataFrame with columns:
+        ID, Sex, Date, Day, Daily Change, Cohort, CA (%)
+    """
+    frames = []
+    for label, df in cohorts.items():
+        cdf = clean_cohort(df.copy())
+        cdf["Cohort"] = label
+
+        if "CA (%)" not in cdf.columns:
+            match = re.search(r'(\d+(?:\.\d+)?)\s*%', label)
+            cdf["CA (%)"] = float(match.group(1)) if match else float("nan")
+
+        if "Day" not in cdf.columns:
+            cdf = add_day_column_across_cohorts(cdf, drop_ramp_baseline=True)
+
+        cdf = cdf[cdf["Day"] >= 1].copy()
+
+        keep_cols = [c for c in ("ID", "Sex", "Date", "Day", "Daily Change",
+                                 "Cohort", "CA (%)") if c in cdf.columns]
+        frames.append(cdf[keep_cols])
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.sort_values(["Cohort", "ID", "Day"]).reset_index(drop=True)
+
+    print(f"\n[OK] Daily Change export: {len(combined)} rows across {len(cohorts)} cohorts")
+    for lbl, grp in combined.groupby("Cohort"):
+        n_animals = grp["ID"].nunique()
+        n_days    = grp["Day"].nunique()
+        print(f"  {lbl:30s}  {n_animals:2d} animals  {n_days:2d} days")
+
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        combined.to_csv(save_path, index=False)
+        print(f"  [OK] Saved -> {save_path}")
+
+    return combined
 
 
 # =============================================================================
@@ -10703,12 +10847,15 @@ def _detect_comparison_type(cohorts: Dict[str, pd.DataFrame]) -> str:
       '0vramp' -- 0% nonramp vs ramp
       '2vramp' -- 2% nonramp vs ramp
       'all3'   -- all three cohorts
+      'rampramp' -- Ramp vs 2-Week Ramp
+      'all4'   -- 2% nonramp + 4% pilot + 5-wk ramp + 2-wk ramp
       'unknown'-- cannot determine
     """
     labels_lower = [lbl.lower() for lbl in cohorts.keys()]
 
     has_zero  = any('0%' in l and 'ramp' not in l for l in labels_lower)
-    has_two   = any('2%' in l and 'ramp' not in l for l in labels_lower)
+    has_two   = any('2%' in l and 'ramp' not in l and '4%' not in l for l in labels_lower)
+    has_four  = any('4%' in l for l in labels_lower)
     has_ramp  = any('ramp' in l for l in labels_lower)
 
     _TWOWK_KW = ('2wk', '2_wk', '2week', '2 wk', '2-wk', '2-week', '2 week')
@@ -10716,6 +10863,9 @@ def _detect_comparison_type(cohorts: Dict[str, pd.DataFrame]) -> str:
     has_twowk = any(any(kw in l for kw in _TWOWK_KW) for l in labels_lower)
 
     n = len(cohorts)
+    # all4: 2% nonramp + 4% pilot + any ramp + 2-week ramp
+    if n == 4 and has_two and has_four and has_ramp and has_twowk:
+        return 'all4'
     # rampramp: one regular ramp label and one 2-week-ramp label (no CA% nonramp cohorts)
     if n == 2 and has_twowk and (has_ramp or has_twowk) and not has_zero and not has_two:
         return 'rampramp'
@@ -14090,6 +14240,505 @@ def run_nparld_behavior_r(
     }
 
 
+def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
+    """
+    Interactive analysis menu for the 4-cohort comparison:
+    2% CA nonramp  vs  4% CA (pilot)  vs  5-Week Ramp  vs  2-Week Ramp.
+
+    Provides:
+      1. Daily Change per-animal line plots (all four cohorts overlaid)
+      2. Daily Change grouped by cohort (mean ± SEM)
+      3. Export Daily Change to CSV for external plotting
+      4. Day-1 / transition-day bar chart -- 4 cohorts, canonical colours,
+         scatter points, mean ± SEM, all-pairs MWU (Holm-Bonferroni)
+      5. Run all (1-4)
+    """
+    from datetime import datetime
+    import numpy as _np
+    from scipy import stats as _stats
+
+    MEASURES = ["Total Change", "Daily Change"]
+
+    combined_temp = combine_cohorts_for_analysis(cohorts)
+    available_measures = [m for m in MEASURES if m in combined_temp.columns]
+
+    # Identify canonical labels for each of the four roles
+    _TWOWK_KW = ('2wk', '2_wk', '2week', '2 wk', '2-wk', '2-week', '2 week')
+    twowk_label = next(
+        (lbl for lbl in cohorts if any(kw in lbl.lower() for kw in _TWOWK_KW)),
+        None,
+    )
+    four_pct_label = next(
+        (lbl for lbl in cohorts if '4%' in lbl.lower()),
+        None,
+    )
+    two_pct_label = next(
+        (lbl for lbl in cohorts
+         if '2%' in lbl.lower() and 'ramp' not in lbl.lower() and '4%' not in lbl.lower()),
+        None,
+    )
+    # The remaining label is the 5-week ramp (or general ramp that isn't 2wk)
+    ramp_label = next(
+        (lbl for lbl in cohorts
+         if lbl not in (twowk_label, four_pct_label, two_pct_label)),
+        None,
+    )
+
+    # Target day for each cohort in the bar chart:
+    #   Ramp cohorts use 1-based indexing (Day 1 = first calendar date).
+    #   Nonramp cohorts use 0-based indexing (Day 0 = baseline, Day 1 = first measurement).
+    _BAR_DAYS = {
+        two_pct_label:   ('nonramp', 1),   # Day 1 (0-based) = first measurement day
+        four_pct_label:  ('nonramp', 1),   # Day 1 (0-based) = 2/10/25
+        ramp_label:      ('ramp',    8),   # Day 8 (1-based) = 0%→1% transition
+        twowk_label:     ('ramp',    4),   # Day 4 (1-based) = 0%→1% transition
+    }
+
+    print("\n" + "=" * 80)
+    print("4-COHORT COMPARISON \u2014 ANALYSIS MENU")
+    print("  2% CA  |  4% CA (Pilot)  |  5-Wk Ramp  |  2-Wk Ramp")
+    print("=" * 80)
+    print(f"\n  2% nonramp label  : {two_pct_label}")
+    print(f"  4% pilot label    : {four_pct_label}")
+    print(f"  Ramp label        : {ramp_label}")
+    print(f"  2-Week Ramp label : {twowk_label}")
+    print(f"\n  Available measures: {available_measures}")
+    print(f"  Cohorts present   : {list(cohorts.keys())}")
+    print()
+    print("  1. Daily Change per-animal plots  -- individual lines per cohort")
+    print("  2. Daily Change by cohort         -- mean \u00b1 SEM per cohort across days")
+    print("  3. Export Daily Change CSV        -- long-format CSV for all 4 cohorts")
+    print("  4. Day-1/transition bar chart     -- 4 cohorts, scatter + MWU (Holm-Bonferroni)")
+    print("  5. Run all (1-4)")
+    print()
+
+    user_input = input("Select option (1-5) or 'n' to skip: ").strip()
+    if user_input.lower() == 'n':
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_all = (user_input == '5')
+    plot_dir = Path(f"all4_plots_{timestamp}")
+
+    # ------------------------------------------------------------------ #
+    # Option 1: Per-animal Daily Change line plots
+    # ------------------------------------------------------------------ #
+    if user_input == '1' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available \u2014 cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Daily Change per-animal line plots (all 4 cohorts)")
+            print("=" * 80)
+            combined = combine_cohorts_for_analysis(cohorts)
+            combined = clean_cohort(combined)
+            if 'Day' not in combined.columns:
+                combined = add_day_column_across_cohorts(combined, drop_ramp_baseline=False)
+            combined = combined[combined['Day'] >= 1].copy()
+
+            if 'Daily Change' not in combined.columns:
+                print("  [WARNING] 'Daily Change' column not found in combined data")
+            else:
+                plot_dir.mkdir(exist_ok=True)
+                cohort_order = [lbl for lbl in
+                                (two_pct_label, four_pct_label, ramp_label, twowk_label)
+                                if lbl is not None]
+                color_map = {lbl: _cohort_label_to_color(lbl) for lbl in cohort_order}
+
+                fig, ax = plt.subplots(figsize=(6, 3.5))
+                for lbl in cohort_order:
+                    sub = combined[combined['Cohort'] == lbl]
+                    for animal_id, grp in sub.groupby('ID'):
+                        grp_sorted = grp.sort_values('Day')
+                        ax.plot(
+                            grp_sorted['Day'],
+                            grp_sorted['Daily Change'],
+                            color=color_map[lbl],
+                            alpha=0.35,
+                            linewidth=0.7,
+                        )
+                # Legend proxy
+                import matplotlib.lines as mlines
+                handles = [
+                    mlines.Line2D([], [], color=color_map[lbl], label=lbl,
+                                  linewidth=1.5)
+                    for lbl in cohort_order if lbl in color_map
+                ]
+                ax.legend(handles=handles, fontsize=7, loc='best')
+                ax.axhline(0, color='black', linewidth=0.5, linestyle='--')
+                ax.set_xlabel("Day")
+                ax.set_ylabel("Daily Change (%BW)")
+                ax.set_title("Daily Weight Change \u2014 All 4 Cohorts (per animal)")
+                fig.tight_layout()
+
+                save_path = plot_dir / "daily_change_per_animal_all4.svg"
+                fig.savefig(save_path, dpi=200)
+                print(f"  [OK] Plot saved -> {save_path}")
+
+                show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
+                if show_now == 'y':
+                    plt.show()
+                else:
+                    plt.close(fig)
+
+    # ------------------------------------------------------------------ #
+    # Option 2: Daily Change by cohort (mean ± SEM)
+    # ------------------------------------------------------------------ #
+    if user_input == '2' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available \u2014 cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Daily Change by cohort (mean \u00b1 SEM)")
+            print("=" * 80)
+            combined = combine_cohorts_for_analysis(cohorts)
+            combined = clean_cohort(combined)
+            if 'Day' not in combined.columns:
+                combined = add_day_column_across_cohorts(combined, drop_ramp_baseline=False)
+            combined = combined[combined['Day'] >= 1].copy()
+
+            if 'Daily Change' not in combined.columns:
+                print("  [WARNING] 'Daily Change' column not found in combined data")
+            else:
+                plot_dir.mkdir(exist_ok=True)
+                cohort_order = [lbl for lbl in
+                                (two_pct_label, four_pct_label, ramp_label, twowk_label)
+                                if lbl is not None]
+                color_map = {lbl: _cohort_label_to_color(lbl) for lbl in cohort_order}
+
+                fig, ax = plt.subplots(figsize=(6, 3.5))
+                for lbl in cohort_order:
+                    sub = combined[combined['Cohort'] == lbl]
+                    grp_stats = (
+                        sub.groupby('Day')['Daily Change']
+                        .agg(['mean', 'sem'])
+                        .reset_index()
+                    )
+                    grp_stats.columns = ['Day', 'Mean', 'SEM']
+                    ax.plot(
+                        grp_stats['Day'], grp_stats['Mean'],
+                        color=color_map[lbl], label=lbl, linewidth=1.2,
+                    )
+                    ax.fill_between(
+                        grp_stats['Day'],
+                        grp_stats['Mean'] - grp_stats['SEM'],
+                        grp_stats['Mean'] + grp_stats['SEM'],
+                        color=color_map[lbl], alpha=0.18,
+                    )
+                ax.axhline(0, color='black', linewidth=0.5, linestyle='--')
+                ax.legend(fontsize=7, loc='best')
+                ax.set_xlabel("Day")
+                ax.set_ylabel("Daily Change (%BW)")
+                ax.set_title("Daily Weight Change \u2014 All 4 Cohorts (mean \u00b1 SEM)")
+                fig.tight_layout()
+
+                save_path = plot_dir / "daily_change_by_cohort_all4.svg"
+                fig.savefig(save_path, dpi=200)
+                print(f"  [OK] Plot saved -> {save_path}")
+
+                show_now = input("\nDisplay plot now? (y/n): ").strip().lower()
+                if show_now == 'y':
+                    plt.show()
+                else:
+                    plt.close(fig)
+
+    # ------------------------------------------------------------------ #
+    # Option 3: Export Daily Change CSV
+    # ------------------------------------------------------------------ #
+    if user_input == '3' or run_all:
+        print("\n" + "=" * 80)
+        print("EXPORTING: Daily Change long-format CSV (all 4 cohorts)")
+        print("=" * 80)
+        try:
+            export_path = Path(f"daily_change_all4_{timestamp}.csv")
+            export_daily_change_all4(cohorts, save_path=export_path)
+            print(f"  [OK] Export complete -> {export_path}")
+        except Exception as e:
+            print(f"  [WARNING] Export failed: {e}")
+            import traceback; traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 4: Day-1 / transition-day bar chart (4 cohorts, all-pairs MWU)
+    # ------------------------------------------------------------------ #
+    if user_input == '4' or run_all:
+        if not HAS_MATPLOTLIB:
+            print("\n[WARNING] matplotlib not available \u2014 cannot generate plots")
+        else:
+            print("\n" + "=" * 80)
+            print("GENERATING: Day-1 / transition-day Daily Change bar chart (4 cohorts)")
+            print("=" * 80)
+            print("  2% nonramp  : Day 1 (0-based, first measurement day)")
+            print("  4% pilot    : Day 1 (0-based, first measurement day = 2/10/25)")
+            print("  5-wk ramp   : Day 8 (1-based, 0%\u21921% transition)")
+            print("  2-wk ramp   : Day 4 (1-based, 0%\u21921% transition)")
+            try:
+                # -------------------------------------------------------- #
+                # Per-cohort: compute Day with the correct indexing scheme  #
+                # and extract per-animal Daily Change at the target day.    #
+                # -------------------------------------------------------- #
+                cohort_order = [lbl for lbl in
+                                (two_pct_label, four_pct_label, ramp_label, twowk_label)
+                                if lbl is not None]
+                color_map = {lbl: _cohort_label_to_color(lbl) for lbl in cohort_order}
+
+                bar_vals: Dict[str, _np.ndarray] = {}
+                for lbl in cohort_order:
+                    df_c = cohorts[lbl].copy()
+                    df_c = clean_cohort(df_c)
+                    df_c['Date'] = pd.to_datetime(df_c['Date'], errors='coerce')
+                    df_c = df_c.sort_values(['ID', 'Date']).reset_index(drop=True)
+
+                    scheme, tday = _BAR_DAYS.get(lbl, ('nonramp', 1))
+                    first_dates = df_c.groupby('ID')['Date'].transform('min')
+                    if scheme == 'ramp':
+                        # 1-based: Day 1 = first calendar date
+                        df_c['_day'] = (df_c['Date'] - first_dates).dt.days + 1
+                    else:
+                        # 0-based: Day 0 = baseline, Day 1 = first measurement
+                        df_c['_day'] = (df_c['Date'] - first_dates).dt.days
+
+                    day_df = df_c[df_c['_day'] == tday]
+                    if day_df.empty:
+                        print(f"  [WARNING] No rows at Day {tday} for {lbl} \u2014 skipping")
+                        bar_vals[lbl] = _np.array([])
+                        continue
+                    if 'Daily Change' not in day_df.columns:
+                        print(f"  [WARNING] 'Daily Change' missing for {lbl} \u2014 skipping")
+                        bar_vals[lbl] = _np.array([])
+                        continue
+                    animal_means = (
+                        day_df.dropna(subset=['Daily Change'])
+                        .groupby('ID')['Daily Change']
+                        .mean()
+                        .values
+                    )
+                    bar_vals[lbl] = _np.asarray(animal_means, dtype=float)
+                    print(
+                        f"  {lbl:30s}  n={len(bar_vals[lbl])}  "
+                        f"mean={_np.mean(bar_vals[lbl]):.2f}%/day"
+                    )
+
+                # -------------------------------------------------------- #
+                # All-pairs Mann-Whitney U + Holm-Bonferroni                #
+                # -------------------------------------------------------- #
+                pairs = [
+                    (cohort_order[i], cohort_order[j])
+                    for i in range(len(cohort_order))
+                    for j in range(i + 1, len(cohort_order))
+                ]
+                pair_results = []
+                _rng_ci = _np.random.default_rng(0)
+                for a, b in pairs:
+                    va, vb = bar_vals.get(a, _np.array([])), bar_vals.get(b, _np.array([]))
+                    pr = {'a': a, 'b': b, 'na': len(va), 'nb': len(vb),
+                          'U': float('nan'), 'p_raw': float('nan'), 'p_adj': float('nan'),
+                          'hl_est': float('nan'), 'hl_ci_lo': float('nan'), 'hl_ci_hi': float('nan')}
+                    if len(va) >= 2 and len(vb) >= 2:
+                        U, p = _stats.mannwhitneyu(va, vb, alternative='two-sided')
+                        pr['U'] = float(U)
+                        pr['p_raw'] = float(p)
+                        # Hodges-Lehmann estimator = median of all pairwise differences
+                        _diffs = (va[:, _np.newaxis] - vb[_np.newaxis, :]).ravel()
+                        pr['hl_est'] = float(_np.median(_diffs))
+                        # 95% bootstrap CI of the HL estimator (4999 resamples)
+                        _boot_hl = _np.empty(4999)
+                        for _bi in range(4999):
+                            _ba = _rng_ci.choice(va, size=len(va), replace=True)
+                            _bb = _rng_ci.choice(vb, size=len(vb), replace=True)
+                            _boot_hl[_bi] = float(_np.median(
+                                (_ba[:, _np.newaxis] - _bb[_np.newaxis, :]).ravel()))
+                        pr['hl_ci_lo'] = float(_np.percentile(_boot_hl, 2.5))
+                        pr['hl_ci_hi'] = float(_np.percentile(_boot_hl, 97.5))
+                    pair_results.append(pr)
+
+                # Holm-Bonferroni step-down correction
+                valid_pr = [r for r in pair_results if not _np.isnan(r['p_raw'])]
+                k_pairs = len(valid_pr)
+                if k_pairs > 0:
+                    valid_sorted = sorted(valid_pr, key=lambda x: x['p_raw'])
+                    for rank, pr in enumerate(valid_sorted):
+                        pr['p_adj'] = min(pr['p_raw'] * (k_pairs - rank), 1.0)
+                    for i in range(1, len(valid_sorted)):
+                        valid_sorted[i]['p_adj'] = max(
+                            valid_sorted[i]['p_adj'],
+                            valid_sorted[i - 1]['p_adj'],
+                        )
+
+                def _fmt_p(p):
+                    if _np.isnan(p): return 'N/A'
+                    if p < 0.001:    return '< 0.001'
+                    return f'{p:.4f}'
+
+                def _sig(p):
+                    if _np.isnan(p): return ''
+                    if p < 0.001: return '***'
+                    if p < 0.01:  return '**'
+                    if p < 0.05:  return '*'
+                    return 'ns'
+
+                # -------------------------------------------------------- #
+                # Bar chart: 4 bars, scatter points, significance brackets  #
+                # -------------------------------------------------------- #
+                rng = _np.random.default_rng(42)
+                x_pos = _np.arange(len(cohort_order), dtype=float)
+                bar_width = 0.55
+
+                # Compute y limits from all values + SEM headroom
+                _all_vals = _np.concatenate([v for v in bar_vals.values() if len(v) > 0])
+                if len(_all_vals) == 0:
+                    _all_vals = _np.array([0.0])
+                _ylim_bot = -16.0
+                _ylim_top = 0.0
+
+                fig, ax = plt.subplots(figsize=plt.rcParams['figure.figsize'])
+                ax.set_ylim(bottom=_ylim_bot, top=_ylim_top)
+                ax.autoscale(enable=False)  # prevent any drawing / savefig call from re-expanding
+
+                for i, lbl in enumerate(cohort_order):
+                    vals = bar_vals.get(lbl, _np.array([]))
+                    if len(vals) == 0:
+                        continue
+                    mean_v = float(_np.mean(vals))
+                    sem_v  = (float(_np.std(vals, ddof=1) / _np.sqrt(len(vals)))
+                              if len(vals) > 1 else 0.0)
+                    col = color_map[lbl]
+                    # Darken edge colour by reducing brightness ~20%
+                    import colorsys as _cs
+                    _r, _g, _b = (int(col.lstrip('#')[k:k+2], 16) / 255.0
+                                  for k in (0, 2, 4))
+                    _h, _s, _v = _cs.rgb_to_hsv(_r, _g, _b)
+                    edge_col = '#%02x%02x%02x' % tuple(
+                        int(c * 255) for c in _cs.hsv_to_rgb(_h, min(_s * 1.3, 1.0), _v * 0.72)
+                    )
+                    ax.bar(x_pos[i], mean_v, width=bar_width,
+                           color=col, edgecolor=edge_col, linewidth=0.9, zorder=2)
+                    ax.errorbar(x_pos[i], mean_v, yerr=sem_v,
+                                fmt='none', color='black',
+                                capsize=6, capthick=0.8, linewidth=1.0, zorder=3)
+                    jitter = rng.uniform(-0.14, 0.14, size=len(vals))
+                    ax.scatter(x_pos[i] + jitter, vals,
+                               color=col, s=12, alpha=0.65,
+                               edgecolors='black', linewidths=0.5, zorder=4)
+
+                ax.axhline(0, color='black', linewidth=0.6, linestyle='--', zorder=1)
+
+                # X-axis labels: short label + (Day N) annotation
+                _day_labels = {
+                    two_pct_label:  f"2% CA\n(Day 1)",
+                    four_pct_label: f"4% CA\n(Day 1)",
+                    ramp_label:     f"5-Wk Ramp\n(Day 8)",
+                    twowk_label:    f"2-Wk Ramp\n(Day 4)",
+                }
+                ax.set_xticks(x_pos)
+                ax.set_xticklabels(
+                    [_day_labels.get(lbl, lbl) for lbl in cohort_order],
+                    fontsize=7,
+                )
+                ax.set_ylabel('Daily Change (%BW/day)  (mean \u00b1 SEM)')
+                ax.set_title('Daily Weight Change at Day 1 / CA% Transition\n'
+                             '2% CA  |  4% CA (Pilot)  |  5-Wk Ramp  |  2-Wk Ramp')
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                ax.tick_params(direction='in', which='both', length=4)
+                ax.set_xlim(-0.55, len(cohort_order) - 0.45)
+
+                fig.tight_layout()
+                ax.set_ylim(-16, 0)  # set after tight_layout so nothing can override it
+                ax.set_yticks([-16, -12, -8, -4, 0])  # explicit ticks to anchor the extremes
+                plot_dir.mkdir(exist_ok=True)
+                bar_svg = plot_dir / "day1_transition_daily_change_bar_all4.svg"
+                fig.savefig(bar_svg, format='svg')  # no bbox_inches='tight': prevents canvas expanding past clipped artists
+                plt.close(fig)
+                print(f"\n[OK] Bar chart saved -> {bar_svg}")
+
+                # -------------------------------------------------------- #
+                # Print and save stats report                               #
+                # -------------------------------------------------------- #
+                W = 115
+                print("\n" + "=" * W)
+                print("MANN-WHITNEY U TESTS \u2014 Day-1 / Transition-Day Daily Change")
+                print(f"Correction: Holm-Bonferroni (k={k_pairs} pairs)")
+                print("=" * W)
+                report_lines = [
+                    "=" * W,
+                    "4-COHORT COMPARISON \u2014 DAY-1 / TRANSITION-DAY DAILY CHANGE",
+                    "",
+                    "Target days (Daily Change extracted per animal):",
+                    f"  2% nonramp  : Day 1 (0-based) = first measurement day",
+                    f"  4% pilot    : Day 1 (0-based) = 2/10/2025",
+                    f"  5-wk ramp   : Day 8 (1-based) = 0%\u21921% transition",
+                    f"  2-wk ramp   : Day 4 (1-based) = 0%\u21921% transition",
+                    "",
+                    "Statistical test  : Mann-Whitney U (two-sided)",
+                    f"Correction        : Holm-Bonferroni (k={k_pairs} pairs)",
+                    "CI method (HL)    : 4999-resample bootstrap (seed=0)",
+                    "",
+                    "Descriptive statistics  (95% CI = t-based, two-tailed):",
+                    f"  {'Cohort':<30}  {'n':>4}  {'Mean (%/day)':>13}  {'SEM':>8}  {'95% CI':>21}",
+                    f"  {'-'*30}  {'-'*4}  {'-'*13}  {'-'*8}  {'-'*21}",
+                ]
+                for lbl in cohort_order:
+                    vals = bar_vals.get(lbl, _np.array([]))
+                    n_v   = len(vals)
+                    m_v   = float(_np.mean(vals))   if n_v > 0 else float('nan')
+                    s_v   = (float(_np.std(vals, ddof=1) / _np.sqrt(n_v))
+                             if n_v > 1 else float('nan'))
+                    if n_v > 1:
+                        _t_c   = float(_stats.t.ppf(0.975, df=n_v - 1))
+                        ci_lo_v = m_v - _t_c * s_v
+                        ci_hi_v = m_v + _t_c * s_v
+                        ci_str_v = f"[{ci_lo_v:.4f}, {ci_hi_v:.4f}]"
+                    else:
+                        ci_str_v = 'N/A'
+                    report_lines.append(
+                        f"  {lbl:<30}  {n_v:>4}  {m_v:>13.4f}  {s_v:>8.4f}  {ci_str_v:>21}"
+                    )
+                    print(f"  {lbl:<30}  n={n_v}  mean={m_v:.4f} \u00b1 {s_v:.4f} SEM  95% CI {ci_str_v}")
+                report_lines += [
+                    "",
+                    f"{'Pair':<45}  {'n_A':>4}  {'n_B':>4}  {'U':>8}  {'p_raw':>9}  {'p_adj':>9}  "
+                    f"{'sig':<4}  {'HL_est':>8}  {'95% CI (HL)':>22}",
+                    "-" * W,
+                ]
+                for pr in pair_results:
+                    U_str  = f"{pr['U']:.1f}"    if not _np.isnan(pr['U'])       else 'N/A'
+                    hl_str = f"{pr['hl_est']:.4f}" if not _np.isnan(pr['hl_est']) else 'N/A'
+                    ci_str = (f"[{pr['hl_ci_lo']:.4f}, {pr['hl_ci_hi']:.4f}]"
+                              if not _np.isnan(pr['hl_ci_lo']) else 'N/A')
+                    pair_label = f"{pr['a']}  vs  {pr['b']}"
+                    report_lines.append(
+                        f"{pair_label:<45}  {pr['na']:>4}  {pr['nb']:>4}  "
+                        f"{U_str:>8}  {_fmt_p(pr['p_raw']):>9}  "
+                        f"{_fmt_p(pr['p_adj']):>9}  {_sig(pr['p_adj']):<4}  "
+                        f"{hl_str:>8}  {ci_str:>22}"
+                    )
+                    print(
+                        f"  {pair_label}\n"
+                        f"    U={U_str}  p_raw={_fmt_p(pr['p_raw'])}  "
+                        f"p_adj={_fmt_p(pr['p_adj'])}  {_sig(pr['p_adj'])}\n"
+                        f"    HL_est={hl_str}  95% CI {ci_str}"
+                    )
+                report_lines.append("=" * W)
+                report_text = "\n".join(report_lines)
+                rpt_path = plot_dir / f"day1_transition_mwu_all4_{timestamp}.txt"
+                rpt_path.write_text(report_text, encoding='utf-8')
+                print(f"\n[OK] Stats report saved -> {rpt_path}")
+
+                show_now = input("\nDisplay bar chart now? (y/n): ").strip().lower()
+                if show_now == 'y':
+                    plt.show()
+                else:
+                    plt.close('all')
+
+            except Exception as e:
+                print(f"  [WARNING] Bar chart failed: {e}")
+                import traceback; traceback.print_exc()
+
+    print("\n" + "=" * 80)
+    print("4-cohort analysis complete.")
+    print("=" * 80)
+
+
 def _run_unknown_menu(cohorts: Dict[str, pd.DataFrame], comparison: str) -> None:
     """Placeholder menu for comparison types not yet implemented."""
     label_map = {
@@ -14120,16 +14769,51 @@ if __name__ == "__main__":
     print("\nHow many cohorts would you like to compare?")
     print("  2 -- compare two cohorts")
     print("  3 -- compare three cohorts")
-    n_input = input("\nEnter 2 or 3: ").strip()
+    print("  4 -- compare four cohorts (2% | 4% pilot | 5-wk Ramp | 2-wk Ramp)")
+    n_input = input("\nEnter 2, 3, or 4: ").strip()
     try:
         n_cohorts = int(n_input)
-        if n_cohorts not in (2, 3):
+        if n_cohorts not in (2, 3, 4):
             raise ValueError
     except ValueError:
-        print("[ERROR] Please enter 2 or 3. Exiting.")
+        print("[ERROR] Please enter 2, 3, or 4. Exiting.")
         raise SystemExit(1)
 
-    cohorts = select_and_load_cohorts(n_cohorts=n_cohorts)
+    # For the 4-cohort menu the 4% data comes from the pilot CSV; load it
+    # separately and let the user pick the remaining three via file picker.
+    if n_cohorts == 4:
+        print("\n" + "=" * 80)
+        print("4-COHORT MODE: 2% CA  |  4% CA (pilot)  |  5-Wk Ramp  |  2-Wk Ramp")
+        print("=" * 80)
+        print("\nStep 1a: Select the pilot CSV to extract the 4% cohort.")
+        if HAS_TKINTER:
+            import tkinter as _tk
+            from tkinter import filedialog as _fd
+            _root = _tk.Tk(); _root.withdraw(); _root.update_idletasks()
+            _pilot_path = _fd.askopenfilename(
+                title="Select pilot CSV (e.g. pilot_cohort_1.csv)",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            )
+            _root.destroy()
+        else:
+            _pilot_path = input("Enter full path to pilot CSV: ").strip()
+        if not _pilot_path:
+            print("[ERROR] No pilot CSV selected. Exiting.")
+            raise SystemExit(1)
+        four_pct_df = load_4pct_from_pilot(Path(_pilot_path))
+        if four_pct_df.empty:
+            print("[ERROR] 4% cohort is empty after filtering. Exiting.")
+            raise SystemExit(1)
+        four_pct_label = "4% CA (Pilot)"
+
+        print("\nStep 1b: Select the remaining three cohort CSVs (2%, 5-wk Ramp, 2-wk Ramp).")
+        remaining = select_and_load_cohorts(n_cohorts=3)
+        if not remaining or len(remaining) < 3:
+            print("[ERROR] Not enough cohorts loaded. Exiting.")
+            raise SystemExit(1)
+        cohorts = {four_pct_label: four_pct_df, **remaining}
+    else:
+        cohorts = select_and_load_cohorts(n_cohorts=n_cohorts)
 
     if not cohorts or len(cohorts) < n_cohorts:
         print("[ERROR] Not enough cohorts loaded. Exiting.")
@@ -14146,6 +14830,7 @@ if __name__ == "__main__":
         '2vramp':   '2% nonramp  vs  Ramp',
         'all3':     '0% nonramp  vs  2% nonramp  vs  Ramp',
         'rampramp': 'Ramp  vs  2-Week Ramp',
+        'all4':     '2% nonramp  vs  4% pilot  vs  5-Wk Ramp  vs  2-Wk Ramp',
         'unknown':  'Unknown combination',
     }
     print("\n" + "=" * 80)
@@ -14160,9 +14845,13 @@ if __name__ == "__main__":
         print("  1. 0% nonramp vs 2% nonramp")
         print("  2. 0% nonramp vs Ramp")
         print("  3. 2% nonramp vs Ramp")
-        print("  4. All three cohorts")
-        manual = input("\nSelect (1-4): ").strip()
-        comparison = {'1': '0v2', '2': '0vramp', '3': '2vramp', '4': 'all3'}.get(manual, 'unknown')
+        print("  4. All three cohorts (0% / 2% / Ramp)")
+        print("  5. All four cohorts (2% / 4% pilot / 5-wk Ramp / 2-wk Ramp)")
+        manual = input("\nSelect (1-5): ").strip()
+        comparison = {
+            '1': '0v2', '2': '0vramp', '3': '2vramp',
+            '4': 'all3', '5': 'all4',
+        }.get(manual, 'unknown')
 
     # ------------------------------------------------------------------ #
     # Step 3 -- dispatch to comparison-specific menu
@@ -14177,5 +14866,7 @@ if __name__ == "__main__":
         _run_all3_menu(cohorts)
     elif comparison == 'rampramp':
         _run_rampramp_menu(cohorts)
+    elif comparison == 'all4':
+        _run_all4_menu(cohorts)
     else:
         _run_unknown_menu(cohorts, comparison)
