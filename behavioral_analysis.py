@@ -2900,7 +2900,7 @@ def check_ols_assumptions_total_change(
 		# 6. Residual Histogram
 		_ax = _axes[1, 2]
 		_ax.hist(resid_arr, bins=max(8, int(np.sqrt(n_obs))), edgecolor='black', alpha=0.7)
-		_mu, _std = float(np.mean(resid_arr)), float(np.std(resid_arr))
+		_mu, _std = float(np.mean(resid_arr)), float(np.std(resid_arr, ddof=1))
 		_xn = np.linspace(_mu - 3.5*_std, _mu + 3.5*_std, 200)
 		_ax.plot(_xn, stats.norm.pdf(_xn, _mu, _std) * n_obs * (_xn[1] - _xn[0]),
 		         color='red', linestyle='--', linewidth=1.5, label='Normal fit')

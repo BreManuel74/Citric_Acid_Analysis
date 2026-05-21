@@ -3200,6 +3200,48 @@ def build_water_access_day_cohorts(
               f"Available weight columns: {available}")
         return {}
 
+    # ── Collect water-access diagnostic lines (written to file below) ───────
+    _wa_diag: List[str] = [
+        f"WATER-ACCESS DAY DIAGNOSTIC: {measure}",
+        f"Generated  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Target days: {target_days}",
+        "=" * 72,
+        "",
+        f"SECTION 1: Per-animal '{measure}' at each target day",
+        "  Day -> Week: " + ", ".join(f"{d}->{(d - 1) // 7 + 1}" for d in sorted(target_days)),
+        "-" * 72,
+    ]
+    for _coh_lbl in sorted(filtered['Cohort'].unique()):
+        _sub = filtered[filtered['Cohort'] == _coh_lbl].sort_values(['ID', 'Day'])
+        _wa_diag.append(f"  Cohort: {_coh_lbl}")
+        for _, _r in _sub.iterrows():
+            _val = _r.get(measure, float('nan'))
+            _val_str = f"{_val:.4f}" if isinstance(_val, (int, float)) and _val == _val else "NaN"
+            _wa_diag.append(f"    {str(_r['ID']):>14}  Day {int(_r['Day']):>2} -> Week {int(_r['Week'])}: {_val_str}")
+    _wa_diag.append("")
+
+    _wa_diag += [
+        f"SECTION 2: Per-cohort per-week descriptive stats ('{measure}', water-access days)",
+        "  (each animal contributes one value per week; cohort mean shown for reference)",
+        "-" * 72,
+    ]
+    _diag_wa = (
+        filtered
+        .groupby(['Cohort', 'Week'])[measure]
+        .agg(n='count', mean='mean', sd='std')
+        .reset_index()
+    )
+    for _coh_lbl, _grp in _diag_wa.groupby('Cohort'):
+        _wa_diag.append(f"  Cohort: {_coh_lbl}")
+        for _, _r in _grp.iterrows():
+            _wa_diag.append(f"    Week {int(_r['Week'])}: n={int(_r['n'])}, mean={_r['mean']:.4f}, SD={_r['sd']:.4f}")
+    _wa_diag.append("")
+
+    _wa_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _wa_diag_path = Path.cwd() / f"water_access_diag_{_wa_ts}.txt"
+    _wa_diag_path.write_text('\n'.join(_wa_diag), encoding='utf-8')
+    print(f"  [DIAG] Water-access diagnostic → {_wa_diag_path.name}")
+
     # ------------------------------------------------------------------
     # 4. Split back into per-cohort dfs keyed by original label
     # ------------------------------------------------------------------
@@ -6568,7 +6610,7 @@ def check_ols_assumptions_cross_cohort(
         # 6. Residual Histogram
         _ax = _axes[1, 2]
         _ax.hist(resid_arr, bins=max(8, int(_np.sqrt(n_obs))), edgecolor='black', alpha=0.7)
-        _mu, _std = float(_np.mean(resid_arr)), float(_np.std(resid_arr))
+        _mu, _std = float(_np.mean(resid_arr)), float(_np.std(resid_arr, ddof=1))
         _xn = _np.linspace(_mu - 3.5 * _std, _mu + 3.5 * _std, 200)
         _ax.plot(_xn, _scipy_stats.norm.pdf(_xn, _mu, _std) * n_obs * (_xn[1] - _xn[0]),
                  color='red', linestyle='--', linewidth=1.5, label='Normal fit')
@@ -9485,12 +9527,12 @@ def compare_slopes_within_cohorts(slopes_df: pd.DataFrame) -> Dict:
             'N': len(cohort_slopes),
             'Mean': cohort_slopes.mean(),
             'Median': np.median(cohort_slopes),
-            'SD': cohort_slopes.std(),
-            'SEM': cohort_slopes.std() / np.sqrt(len(cohort_slopes)),
+            'SD': cohort_slopes.std(ddof=1),
+            'SEM': cohort_slopes.std(ddof=1) / np.sqrt(len(cohort_slopes)),
             'Min': cohort_slopes.min(),
             'Max': cohort_slopes.max(),
             'IQR': np.percentile(cohort_slopes, 75) - np.percentile(cohort_slopes, 25),
-            'CV': (cohort_slopes.std() / cohort_slopes.mean() * 100) if cohort_slopes.mean() != 0 else np.nan,
+            'CV': (cohort_slopes.std(ddof=1) / cohort_slopes.mean() * 100) if cohort_slopes.mean() != 0 else np.nan,
             'ttest_vs_zero': {
                 'statistic': t_stat_zero,
                 'p_value': p_val_zero,
@@ -9580,12 +9622,12 @@ def compare_slopes_between_cohorts(slopes_df: pd.DataFrame) -> Dict:
 
     print(f"\nCohorts: {', '.join(ca_groups)}")
     for g, s in zip(ca_groups, group_slopes):
-        print(f"  {g}: n={len(s)}, Mean={s.mean():.4f}, SD={s.std():.4f}")
+        print(f"  {g}: n={len(s)}, Mean={s.mean():.4f}, SD={s.std(ddof=1):.4f}")
 
     results = {
         'ca_groups': ca_groups,
         'group_stats': [
-            {'cohort': g, 'n': len(s), 'mean': float(s.mean()), 'sd': float(s.std())}
+            {'cohort': g, 'n': len(s), 'mean': float(s.mean()), 'sd': float(s.std(ddof=1))}
             for g, s in zip(ca_groups, group_slopes)
         ],
     }
@@ -9645,7 +9687,7 @@ def compare_slopes_between_cohorts(slopes_df: pd.DataFrame) -> Dict:
         hl_ci_lo = float(np.percentile(_boot, 2.5))
         hl_ci_hi = float(np.percentile(_boot, 97.5))
         # Cohen's d (pooled SD)
-        pooled_sd = np.sqrt(((n_a - 1) * a.std()**2 + (n_b - 1) * b.std()**2)
+        pooled_sd = np.sqrt(((n_a - 1) * a.std(ddof=1)**2 + (n_b - 1) * b.std(ddof=1)**2)
                             / (n_a + n_b - 2)) if (n_a + n_b - 2) > 0 else np.nan
         cohens_d = float((b.mean() - a.mean()) / pooled_sd) if pooled_sd and pooled_sd > 0 else float('nan')
         if abs(cohens_d) < 0.2:
@@ -13784,6 +13826,28 @@ def run_nparld_cohort_week_r(
     combined = pd.concat(frames, ignore_index=True)
     combined = combined.rename(columns={measure: 'TotalChange', '_Cohort': 'Cohort'})
 
+    # ── Collect diagnostic lines (written to file before R runs) ────────────
+    _diag_lines: List[str] = [
+        f"nparLD WEEKLY-AVERAGE DIAGNOSTIC: {measure}",
+        f"Generated  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "=" * 72,
+        "",
+        "SECTION 1: Day-level observation counts per animal per week",
+        f"  (number of days from each animal/week feeding into the weekly mean for '{measure}')",
+        "-" * 72,
+    ]
+    _raw_obs = (
+        combined
+        .groupby(['Cohort', 'ID', 'Week'])['TotalChange']
+        .agg(n_days='count')
+        .reset_index()
+    )
+    for _coh, _cgrp in _raw_obs.groupby('Cohort'):
+        _diag_lines.append(f"  Cohort: {_coh}")
+        for _, _r in _cgrp.sort_values(['ID', 'Week']).iterrows():
+            _diag_lines.append(f"    {str(_r['ID']):>14}  Week {int(_r['Week'])}: {int(_r['n_days'])} day(s)")
+    _diag_lines.append("")
+
     # Per-animal per-week mean
     weekly = (
         combined
@@ -13794,8 +13858,11 @@ def run_nparld_cohort_week_r(
     if weeks is not None:
         weekly = weekly[weekly['Week'].isin(weeks)].copy()
 
-    # ── Diagnostic: per-cohort per-week means (for cross-verification) ───
-    print("\n  [DIAG] Per-cohort per-week mean TotalChange (before complete-case filter):")
+    # ── Diagnostic sections 2 & 3: cohort/week means and per-animal listing ─
+    _diag_lines += [
+        f"SECTION 2: Per-cohort per-week mean '{measure}' (BEFORE complete-case filter)",
+        "-" * 72,
+    ]
     diag = (
         weekly
         .groupby(['Cohort', 'Week'])['TotalChange']
@@ -13803,20 +13870,69 @@ def run_nparld_cohort_week_r(
         .reset_index()
     )
     for cohort, grp in diag.groupby('Cohort'):
-        print(f"    Cohort: {cohort}")
+        _diag_lines.append(f"  Cohort: {cohort}")
         for _, row in grp.iterrows():
-            print(f"      Week {int(row['Week'])}: n={int(row['n'])}, mean={row['mean']:.4f}, SD={row['sd']:.4f}")
-    print()
+            _diag_lines.append(f"    Week {int(row['Week'])}: n={int(row['n'])}, mean={row['mean']:.4f}, SD={row['sd']:.4f}")
+    _diag_lines.append("")
+
+    _diag_lines += [
+        f"SECTION 3: Per-animal per-week mean '{measure}' (BEFORE complete-case filter)",
+        "-" * 72,
+    ]
+    for cohort, cgrp in weekly.groupby('Cohort'):
+        _diag_lines.append(f"  Cohort: {cohort}")
+        for _, row in cgrp.sort_values(['ID', 'Week']).iterrows():
+            _diag_lines.append(f"    {str(row['ID']):>14}  Week {int(row['Week'])}: {row['TotalChange']:.4f}")
+    _diag_lines.append("")
 
     # Complete-case filter: keep only animals present in every Week
     week_counts = weekly.groupby('ID')['Week'].nunique()
     all_weeks_n = weekly['Week'].nunique()
     complete_ids = week_counts[week_counts == all_weeks_n].index
     n_dropped = weekly['ID'].nunique() - len(complete_ids)
+    _diag_lines += [
+        "SECTION 4: Complete-case filter",
+        "-" * 72,
+    ]
     if n_dropped:
-        print(f"  [NOTE] Dropped {n_dropped} animal(s) with incomplete weekly records; "
-              f"{len(complete_ids)} retained")
+        _dropped_ids = week_counts[week_counts < all_weeks_n].index.tolist()
+        _cohort_map = weekly.drop_duplicates('ID').set_index('ID')['Cohort']
+        print(f"  [NOTE] Dropped {n_dropped} animal(s) with incomplete weekly records "
+              f"({len(complete_ids)} retained) — see diagnostic report for details.")
+        _diag_lines.append(f"  Dropped {n_dropped} animal(s) ({len(complete_ids)} retained):")
+        for _did in sorted(_dropped_ids):
+            _coh = _cohort_map.get(_did, '?')
+            _present = sorted(weekly[weekly['ID'] == _did]['Week'].unique())
+            _missing = [w for w in range(1, all_weeks_n + 1) if w not in _present]
+            _diag_lines.append(f"    {str(_did):>14} ({_coh}): present weeks {_present}, missing weeks {_missing}")
+    else:
+        print("  [NOTE] All animals have complete weekly records — no subjects dropped.")
+        _diag_lines.append("  All animals have complete weekly records — no subjects dropped.")
+    _diag_lines.append("")
     weekly = weekly[weekly['ID'].isin(complete_ids)].copy()
+
+    _diag_lines += [
+        f"SECTION 5: Per-cohort per-week mean '{measure}' (AFTER complete-case filter)",
+        "  (these are the exact per-animal weekly means passed to R/nparLD)",
+        "-" * 72,
+    ]
+    _diag_post = (
+        weekly
+        .groupby(['Cohort', 'Week'])['TotalChange']
+        .agg(n='count', mean='mean', sd='std')
+        .reset_index()
+    )
+    for cohort, grp in _diag_post.groupby('Cohort'):
+        _diag_lines.append(f"  Cohort: {cohort}")
+        for _, row in grp.iterrows():
+            _diag_lines.append(f"    Week {int(row['Week'])}: n={int(row['n'])}, mean={row['mean']:.4f}, SD={row['sd']:.4f}")
+    _diag_lines.append("")
+
+    # ── Write diagnostic report (before R runs, so it's available even if R fails) ─
+    _diag_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _diag_path = Path.cwd() / f"{prefix}_nparld_diag_{_diag_ts}.txt"
+    _diag_path.write_text('\n'.join(_diag_lines), encoding='utf-8')
+    print(f"  [DIAG] Weekly-average diagnostic → {_diag_path.name}")
 
     if weekly.empty or len(complete_ids) < 3:
         print(f"  [ERROR] Insufficient complete-case animals ({len(complete_ids)}) for nparLD.")
