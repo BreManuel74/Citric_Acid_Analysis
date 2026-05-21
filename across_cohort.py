@@ -3123,6 +3123,220 @@ def plot_daily_change_bar_by_day_all3(
     return fig
 
 
+def build_water_access_day_cohorts(
+    cohorts: Dict[str, pd.DataFrame],
+    target_days: Optional[List[int]] = None,
+    measure: str = "Daily Change",
+) -> Dict[str, pd.DataFrame]:
+    """
+    Map the 'weight change on the day following water access' metric to a
+    cohort_dfs-compatible dict for use with run_nparld_cohort_week_r.
+
+    Days 5, 12, 19, 26, 33 are the first post-access measurement day of each
+    7-day block and fall in Weeks 1-5 respectively under the rule
+    ``Week = (Day - 1) // 7 + 1`` used throughout this module.  Filtering
+    each cohort to exactly these days means run_nparld_cohort_week_r will have
+    one observation per animal per week, so the per-animal per-week mean it
+    computes equals the single target-day value directly.
+
+    Day alignment is performed at the *combined* level (same logic as
+    plot_daily_change_bar_by_day_all3 and option 5 of _run_all3_menu) so that
+    ramp-cohort baseline days are excluded consistently.
+
+    Parameters
+    ----------
+    cohorts     : dict label -> master DataFrame (output of load_cohorts)
+    target_days : days to extract; default [5, 12, 19, 26, 33]
+    measure     : weight column to retain alongside the index columns;
+                  default ``"Daily Change"``
+
+    Returns
+    -------
+    dict[str, pd.DataFrame]
+        Keys are the original cohort labels.  Each value is a subset of the
+        aligned combined frame filtered to target_days, with columns including
+        at minimum ``ID``, ``Day``, ``Week``, and ``measure``.  Because ``Day``
+        is already present, run_nparld_cohort_week_r will skip its internal
+        day-alignment step and proceed directly to week assignment and grouping.
+    """
+    if target_days is None:
+        target_days = [5, 12, 19, 26, 33]
+
+    # ------------------------------------------------------------------
+    # 1. Align days at the combined level (mirrors plot_daily_change_bar_by_day_all3)
+    # ------------------------------------------------------------------
+    combined = combine_cohorts_for_analysis(cohorts)
+    combined = clean_cohort(combined)
+    if 'Day' not in combined.columns:
+        combined = add_day_column_across_cohorts(combined, drop_ramp_baseline=False)
+    combined = combined[combined['Day'] >= 1].copy()
+
+    # Pre-compute Week so we can report the mapping
+    combined['Week'] = (combined['Day'] - 1) // 7 + 1
+
+    # ------------------------------------------------------------------
+    # 2. Filter to target days only
+    # ------------------------------------------------------------------
+    filtered = combined[combined['Day'].isin(target_days)].copy()
+
+    if filtered.empty:
+        print(f"  [WARNING] build_water_access_day_cohorts: "
+              f"no rows found for target days {target_days}")
+        return {}
+
+    # Warn about and de-duplicate any (ID, Day) collisions
+    dup_mask = filtered.duplicated(subset=['ID', 'Day'], keep='first')
+    if dup_mask.any():
+        print(f"  [WARNING] {dup_mask.sum()} duplicate (ID, Day) row(s) found — "
+              f"keeping first occurrence per animal per day")
+        filtered = filtered[~dup_mask].copy()
+
+    # ------------------------------------------------------------------
+    # 3. Verify measure column is present
+    # ------------------------------------------------------------------
+    if measure not in filtered.columns:
+        available = [c for c in filtered.columns if 'change' in c.lower()]
+        print(f"  [ERROR] Column '{measure}' not found. "
+              f"Available weight columns: {available}")
+        return {}
+
+    # ------------------------------------------------------------------
+    # 4. Split back into per-cohort dfs keyed by original label
+    # ------------------------------------------------------------------
+    # 'Cohort' column is added by combine_cohorts_for_analysis
+    out: Dict[str, pd.DataFrame] = {}
+    for label in cohorts:
+        # Exact match first; fall back to case-insensitive containment
+        mask = filtered['Cohort'] == label
+        if not mask.any():
+            mask = filtered['Cohort'].str.lower() == label.lower()
+        if not mask.any():
+            mask = filtered['Cohort'].apply(lambda c: label.lower() in str(c).lower())
+        sub = filtered[mask].copy()
+        if sub.empty:
+            print(f"  [WARNING] No target-day rows found for cohort '{label}' — skipping")
+            continue
+        out[label] = sub
+
+    # ------------------------------------------------------------------
+    # 5. Diagnostic summary
+    # ------------------------------------------------------------------
+    day_week = {d: (d - 1) // 7 + 1 for d in sorted(target_days)}
+    print(f"\n  [OK] build_water_access_day_cohorts")
+    print(f"       Day → Week mapping : {day_week}")
+    for label, sub in out.items():
+        ids = sub['ID'].nunique()
+        weeks_present = sorted(sub['Week'].unique())
+        print(f"       {label!r:30s} : {ids} animal(s), weeks {weeks_present}")
+    missing_cohorts = [lbl for lbl in cohorts if lbl not in out]
+    if missing_cohorts:
+        print(f"       [WARNING] Cohorts with no data: {missing_cohorts}")
+
+    return out
+
+
+def compute_water_access_descriptives(
+    cohorts: Dict[str, pd.DataFrame],
+    target_days: Optional[List[int]] = None,
+    ci_alpha: float = 0.05,
+    save_path: Optional[Path] = None,
+) -> pd.DataFrame:
+    """
+    Descriptive statistics (n, mean, SD, SEM, 95% CI) for Daily Change at
+    each water-access target day, reported per cohort per week.
+
+    Days 5, 12, 19, 26, 33 map to Weeks 1–5 under Week = (Day-1)//7+1.
+    One value per animal per week (no averaging — it is a single measurement).
+
+    Parameters
+    ----------
+    cohorts     : dict label → master DataFrame
+    target_days : days to include; default [5, 12, 19, 26, 33]
+    ci_alpha    : two-sided confidence interval alpha; default 0.05 (95% CI)
+    save_path   : if given, write a formatted text report to this path
+
+    Returns
+    -------
+    pd.DataFrame with columns:
+        Cohort, Week, Day, n, mean, SD, SEM, CI_lower, CI_upper
+    """
+    if target_days is None:
+        target_days = [5, 12, 19, 26, 33]
+
+    wa_cohorts = build_water_access_day_cohorts(cohorts, target_days, measure="Daily Change")
+    if not wa_cohorts:
+        print("  [ERROR] compute_water_access_descriptives: no data returned")
+        return pd.DataFrame()
+
+    rows = []
+    for label, sub in wa_cohorts.items():
+        for day in sorted(target_days):
+            week = (day - 1) // 7 + 1
+            vals = sub.loc[sub['Day'] == day, 'Daily Change'].dropna().values
+            n = len(vals)
+            if n == 0:
+                continue
+            mean_v = float(np.mean(vals))
+            sd_v   = float(np.std(vals, ddof=1)) if n > 1 else float('nan')
+            sem_v  = sd_v / np.sqrt(n) if n > 1 else float('nan')
+            # t-based CI
+            if n > 1:
+                t_crit = float(stats.t.ppf(1 - ci_alpha / 2, df=n - 1))
+                ci_lo  = mean_v - t_crit * sem_v
+                ci_hi  = mean_v + t_crit * sem_v
+            else:
+                ci_lo = ci_hi = float('nan')
+            rows.append({
+                'Cohort'  : label,
+                'Week'    : week,
+                'Day'     : day,
+                'n'       : n,
+                'mean'    : mean_v,
+                'SD'      : sd_v,
+                'SEM'     : sem_v,
+                'CI_lower': ci_lo,
+                'CI_upper': ci_hi,
+            })
+
+    if not rows:
+        print("  [ERROR] compute_water_access_descriptives: no rows assembled")
+        return pd.DataFrame()
+
+    desc = pd.DataFrame(rows)
+
+    # ── Pretty-print summary ──────────────────────────────────────────────
+    ci_pct = int(round((1 - ci_alpha) * 100))
+    lines = [
+        "=" * 72,
+        f"Descriptives: Daily Change at water-access days ({ci_pct}% CI, t-based)",
+        f"Days {target_days}  →  Weeks 1–{len(target_days)}",
+        "=" * 72,
+    ]
+    for cohort, grp in desc.groupby('Cohort'):
+        lines.append(f"\nCohort: {cohort}")
+        lines.append(
+            f"  {'Week':>4}  {'Day':>4}  {'n':>3}  "
+            f"{'Mean':>8}  {'SD':>8}  {'SEM':>8}  "
+            f"{f'{ci_pct}% CI lower':>12}  {f'{ci_pct}% CI upper':>12}"
+        )
+        lines.append("  " + "-" * 68)
+        for _, row in grp.sort_values('Week').iterrows():
+            lines.append(
+                f"  {int(row['Week']):>4}  {int(row['Day']):>4}  {int(row['n']):>3}  "
+                f"{row['mean']:>8.3f}  {row['SD']:>8.3f}  {row['SEM']:>8.3f}  "
+                f"{row['CI_lower']:>12.3f}  {row['CI_upper']:>12.3f}"
+            )
+    lines.append("")
+    report_text = '\n'.join(lines)
+    print(report_text)
+
+    if save_path is not None:
+        Path(save_path).write_text(report_text, encoding='utf-8')
+        print(f"[OK] Descriptives saved -> {save_path}")
+
+    return desc
+
+
 # =============================================================================
 # INTERACTION PLOTTING FUNCTIONS
 # =============================================================================
@@ -12773,16 +12987,17 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  8. R: nparLD Cohort x Week -- nonparametric two-way ANOVA (Cohort between, Week within) on weekly means")
     print("  9. R: ART Cohort x Week  -- behavioral metrics (No Nest, Anxious, Lethargy) via Aligned Ranks Transformation")
     print(" 10. R: nparLD behavioral  -- nparLD F1-LD-F1 for No Nest / Anxious / Lethargy (comparison to ART)")
-    print(" 11. Daily Change bar chart -- mean \u00b1 SEM bars at Days 5, 12, 19, 26, 33 per cohort")
-    print(" 12. Run all (1-11)")
+    print(" 11. Daily Change bar chart -- mean ± SEM bars at Days 5, 12, 19, 26, 33 per cohort")
+    print(" 12. R: nparLD water-access daily change -- nparLD Cohort x Week on Day-5/12/19/26/33 Daily Change")
+    print(" 13. Run all (1-12)")
     print()
 
-    user_input = input("Select option (1-12) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-13) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '12')
+    run_all = (user_input == '13')
 
     plot_dir = Path(f"all3_plots_{timestamp}")
 
@@ -13059,21 +13274,38 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             import traceback; traceback.print_exc()
 
     # ------------------------------------------------------------------ #
-    # Option 8: R nparLD -- Cohort x Week nonparametric two-way ANOVA
+    # Option 8: R nparLD omnibus -- Total Change + water-access Daily Change
+    #           BH-FDR correction across both DVs (3 effects × 2 DVs = 6 p-values)
     # ------------------------------------------------------------------ #
     if user_input == '8' or run_all:
         print("\n" + "=" * 80)
-        print("RUNNING: R nparLD -- Cohort x Week nonparametric two-way ANOVA")
+        print("RUNNING: R nparLD OMNIBUS -- Total Change + Daily Change (water-access days)")
+        print("         BH-FDR correction across 6 ATS p-values (3 effects × 2 DVs)")
         print("=" * 80)
         try:
-            run_nparld_cohort_week_r(
+            run_nparld_omnibus_r(
                 cohort_dfs=cohorts,
-                measure="Total Change",
+                target_days=[5, 12, 19, 26, 33],
                 save_report=True,
                 prefix="all3",
             )
         except Exception as e:
-            print(f"  [WARNING] nparLD analysis failed: {e}")
+            print(f"  [WARNING] nparLD omnibus analysis failed: {e}")
+            import traceback; traceback.print_exc()
+
+        # Descriptive statistics for the water-access Daily Change metric
+        print("\n" + "─" * 72)
+        print("DESCRIPTIVES: Daily Change at water-access days (per cohort per week)")
+        print("─" * 72)
+        try:
+            plot_dir.mkdir(exist_ok=True)
+            compute_water_access_descriptives(
+                cohorts=cohorts,
+                target_days=[5, 12, 19, 26, 33],
+                save_path=plot_dir / f"water_access_daily_change_descriptives_{timestamp}.txt",
+            )
+        except Exception as e:
+            print(f"  [WARNING] Descriptives failed: {e}")
             import traceback; traceback.print_exc()
 
     # ------------------------------------------------------------------ #
@@ -13143,6 +13375,34 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 plt.show()
             else:
                 plt.close('all')
+
+    # ------------------------------------------------------------------ #
+    # Option 12: R nparLD on water-access daily change (Days 5/12/19/26/33)
+    # ------------------------------------------------------------------ #
+    if user_input == '12' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: R nparLD -- Daily Change at water-access days (Cohort x Week)")
+        print("         Day 5→Wk1, Day 12→Wk2, Day 19→Wk3, Day 26→Wk4, Day 33→Wk5")
+        print("=" * 80)
+        try:
+            wa_cohorts = build_water_access_day_cohorts(
+                cohorts,
+                target_days=[5, 12, 19, 26, 33],
+                measure="Daily Change",
+            )
+            if wa_cohorts:
+                run_nparld_cohort_week_r(
+                    cohort_dfs=wa_cohorts,
+                    measure="Daily Change",
+                    save_report=True,
+                    prefix="all3_water_access_daily_change",
+                )
+            else:
+                print("  [WARNING] No data returned from build_water_access_day_cohorts — "
+                      "nparLD skipped")
+        except Exception as e:
+            print(f"  [WARNING] nparLD water-access analysis failed: {e}")
+            import traceback; traceback.print_exc()
 
     print("\n" + "=" * 80)
     print("0% vs 2% vs Ramp analysis complete.")
@@ -13574,7 +13834,9 @@ def run_nparld_cohort_week_r(
     tmp_csv = Path(tempfile.mktemp(suffix='.csv'))
     weekly[['ID', 'Cohort', 'Week', 'TotalChange']].to_csv(str(tmp_csv), index=False)
 
-    _csv_r     = str(tmp_csv).replace('\\', '/')
+    _csv_r        = str(tmp_csv).replace('\\', '/')
+    tmp_pvals_csv = Path(tempfile.mktemp(suffix='_pvals.csv'))
+    _pvals_csv_r  = str(tmp_pvals_csv).replace('\\', '/')
     _wk_levels = ', '.join(str(w) for w in week_levels)
     _co_levels = ', '.join(f'"{c}"' for c in cohort_levels)
 
@@ -13606,6 +13868,13 @@ def run_nparld_cohort_week_r(
         '  group.name = "Cohort",\n'
         '  description = FALSE\n'
         ')\n'
+        '\n'
+        f'write.csv(data.frame(\n'
+        f'  Effect    = rownames(result$ANOVA.test),\n'
+        f'  Statistic = result$ANOVA.test[, 1],\n'
+        f'  df        = result$ANOVA.test[, 2],\n'
+        f'  p_value   = result$ANOVA.test[, ncol(result$ANOVA.test)]\n'
+        f'), "{_pvals_csv_r}", row.names=FALSE)\n'
         '\n'
         'cat("\\n--- ANOVA-Type Statistic (ATS) ---\\n")\n'
         'print(result$ANOVA.test)\n'
@@ -13735,6 +14004,14 @@ def run_nparld_cohort_week_r(
     finally:
         tmp_csv.unlink(missing_ok=True)
         tmp_r.unlink(missing_ok=True)
+        # note: tmp_pvals_csv is cleaned below after parsing (also safe on early return) ────────────────────────────────────
+    p_values: Optional[pd.DataFrame] = None
+    if tmp_pvals_csv.exists():
+        try:
+            p_values = pd.read_csv(str(tmp_pvals_csv))
+        except Exception as _pv_err:
+            print(f"  [WARNING] Could not parse nparLD p-values CSV: {_pv_err}")
+    tmp_pvals_csv.unlink(missing_ok=True)
 
     # Clean up R output: rename Wilcoxon label, strip trailing whitespace and leading tabs
     r_output = r_output.replace(
@@ -13784,6 +14061,210 @@ def run_nparld_cohort_week_r(
         'n_subjects': n_subjects,
         'cohorts': cohort_levels,
         'weeks': week_levels,
+        'p_values': p_values,   # pd.DataFrame: Effect, Statistic, df, p_value (ATS)
+    }
+
+
+# =============================================================================
+# R-BASED nparLD OMNIBUS: TWO DVs WITH BH-FDR CORRECTION
+# DV 1 — Total Change (per-animal per-week mean, standard aggregation)
+# DV 2 — Daily Change at water-access days 5/12/19/26/33  → Weeks 1–5
+# BH-FDR applied across all 3 ATS effect p-values × 2 DVs = 6 p-values.
+# =============================================================================
+
+def run_nparld_omnibus_r(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    target_days: Optional[List[int]] = None,
+    save_report: bool = True,
+    prefix: str = "nparld_omnibus",
+) -> dict:
+    """
+    Run nparLD (F1-LD-F1) separately for two DVs and apply BH-FDR correction
+    across the resulting ATS omnibus p-values so that both DVs contribute to
+    the same multiple-comparisons correction envelope.
+
+    DV 1 — Total Change
+        Per-animal per-week mean across all measurement days (identical to
+        option 8 single-DV call).
+
+    DV 2 — Daily Change at water-access days
+        Single Daily Change observation per animal at Days 5, 12, 19, 26, 33
+        (the day immediately following each water-access event), mapped to
+        Weeks 1–5 via build_water_access_day_cohorts.
+
+    BH-FDR is applied across the 6 ATS p-values:
+        (Cohort, Week, Cohort×Week) × (DV1, DV2)
+
+    Parameters
+    ----------
+    cohort_dfs  : dict label → master DataFrame (output of load_cohorts)
+    target_days : water-access days for DV2; default [5, 12, 19, 26, 33]
+    save_report : write combined omnibus report to disk
+    prefix      : filename prefix for the saved report
+
+    Returns
+    -------
+    dict with keys:
+        'tc_result'      – raw run_nparld_cohort_week_r result for Total Change
+        'dc_result'      – raw run_nparld_cohort_week_r result for Daily Change
+        'omnibus_table'  – pd.DataFrame of all 6 effects with raw+BH-FDR p-values
+        'report_path'    – Path to saved report (or None)
+    """
+    if target_days is None:
+        target_days = [5, 12, 19, 26, 33]
+
+    # ── DV 1: Total Change (weekly means) ────────────────────────────────
+    print("\n" + "─" * 72)
+    print("nparLD omnibus — DV 1: Total Change (per-animal per-week mean)")
+    print("─" * 72)
+    tc_result = run_nparld_cohort_week_r(
+        cohort_dfs,
+        measure="Total Change",
+        save_report=False,
+        prefix=prefix,
+    )
+
+    # ── DV 2: Daily Change at water-access days ───────────────────────────
+    print("\n" + "─" * 72)
+    print(f"nparLD omnibus — DV 2: Daily Change at days {target_days}")
+    print("─" * 72)
+    wa_cohorts = build_water_access_day_cohorts(cohort_dfs, target_days, measure="Daily Change")
+    dc_result: dict = {}
+    if wa_cohorts:
+        dc_result = run_nparld_cohort_week_r(
+            wa_cohorts,
+            measure="Daily Change",
+            save_report=False,
+            prefix=prefix,
+        )
+    else:
+        print("  [WARNING] No water-access data — DV 2 skipped")
+
+    # ── Collect ATS p-values for BH-FDR ──────────────────────────────────
+    effect_order = ['Cohort', 'Week', 'Cohort:Week']
+    records = []
+
+    def _collect(result: dict, dv_label: str) -> None:
+        pv_df = result.get('p_values')
+        if pv_df is None or pv_df.empty:
+            return
+        for _, row in pv_df.iterrows():
+            eff = str(row.get('Effect', row.iloc[0])).strip()
+            stat = float(row.get('Statistic', float('nan')))
+            df_v = float(row.get('df', float('nan')))
+            pv   = float(row.get('p_value', float('nan')))
+            records.append({
+                'DV'       : dv_label,
+                'Effect'   : eff,
+                'Statistic': stat,
+                'df'       : df_v,
+                'p_raw'    : pv,
+            })
+
+    _collect(tc_result, 'Total Change (weekly mean)')
+    _collect(dc_result, 'Daily Change (water-access days)')
+
+    omnibus_table = pd.DataFrame()
+    if records:
+        omni = pd.DataFrame(records)
+        # BH-FDR across all valid p-values
+        valid_mask = omni['p_raw'].notna()
+        p_raw_valid = omni.loc[valid_mask, 'p_raw'].tolist()
+        p_fdr_valid = _bh_fdr(p_raw_valid)
+        omni['p_BH_FDR'] = float('nan')
+        omni.loc[valid_mask, 'p_BH_FDR'] = p_fdr_valid
+        omnibus_table = omni
+
+    # ── Build report ──────────────────────────────────────────────────────
+    _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    sep = "=" * 72
+
+    def _sig(p: float) -> str:
+        if p != p:  return ""      # nan
+        if p < 0.001: return "***"
+        if p < 0.01:  return "**"
+        if p < 0.05:  return "*"
+        if p < 0.10:  return "."
+        return ""
+
+    def _fp(p: float) -> str:
+        if p != p: return "      NA"
+        if p < 0.0001: return "< .0001"
+        return f"{p:.4f}"
+
+    report_lines = [
+        sep,
+        "nparLD OMNIBUS: Total Change + Daily Change (water-access days)",
+        f"BH-FDR correction across 6 ATS p-values (3 effects × 2 DVs)",
+        sep,
+        f"Generated  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"DV 1       : Total Change — per-animal per-week mean",
+        f"DV 2       : Daily Change — single value at days {target_days}",
+        f"             (Day→Week: {{{', '.join(f'{d}→{(d-1)//7+1}' for d in target_days)}}})",
+        "",
+        "Design     : F1-LD-F1 (Cohort between-subjects, Week within-subjects)",
+        "Statistic  : ANOVA-Type Statistic (ATS)",
+        "Correction : Benjamini-Hochberg FDR across all 6 omnibus p-values",
+        "",
+    ]
+
+    if not omnibus_table.empty:
+        report_lines += [
+            "─" * 72,
+            "OMNIBUS BH-FDR TABLE",
+            "─" * 72,
+            f"  {'DV':<35}  {'Effect':<12}  {'ATS':>8}  {'df':>6}  {'p_raw':>8}  {'p_BH_FDR':>9}  Sig",
+            "  " + "-" * 68,
+        ]
+        for _, row in omnibus_table.iterrows():
+            report_lines.append(
+                f"  {row['DV']:<35}  {row['Effect']:<12}  "
+                f"{row['Statistic']:>8.4f}  {row['df']:>6.2f}  "
+                f"{_fp(row['p_raw']):>8}  {_fp(row['p_BH_FDR']):>9}  "
+                f"{_sig(row['p_BH_FDR'])}"
+            )
+        report_lines.append("")
+
+    report_lines += [
+        "─" * 72,
+        "DV 1 FULL OUTPUT: Total Change (weekly mean)",
+        "─" * 72,
+        tc_result.get('r_output', '(no output)'),
+        "",
+        "─" * 72,
+        f"DV 2 FULL OUTPUT: Daily Change at days {target_days}",
+        "─" * 72,
+        dc_result.get('r_output', '(no output)'),
+        "",
+        sep,
+        "END",
+    ]
+    report_text = '\n'.join(report_lines)
+
+    print("\n" + "─" * 72)
+    print("OMNIBUS BH-FDR SUMMARY")
+    print("─" * 72)
+    if not omnibus_table.empty:
+        print(f"  {'DV':<35}  {'Effect':<12}  {'p_raw':>8}  {'p_BH_FDR':>9}  Sig")
+        print("  " + "-" * 68)
+        for _, row in omnibus_table.iterrows():
+            print(
+                f"  {row['DV']:<35}  {row['Effect']:<12}  "
+                f"{_fp(row['p_raw']):>8}  {_fp(row['p_BH_FDR']):>9}  "
+                f"{_sig(row['p_BH_FDR'])}"
+            )
+
+    report_path: Optional[Path] = None
+    if save_report and report_text.strip():
+        report_path = Path.cwd() / f"{prefix}_nparld_omnibus_{_ts}.txt"
+        report_path.write_text(report_text, encoding='utf-8')
+        print(f"\n[OK] Omnibus report saved -> {report_path}")
+
+    return {
+        'tc_result'    : tc_result,
+        'dc_result'    : dc_result,
+        'omnibus_table': omnibus_table,
+        'report_path'  : report_path,
     }
 
 
