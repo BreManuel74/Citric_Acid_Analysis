@@ -6661,6 +6661,32 @@ def _plot_rmcorr_licks_vs_weight_impl(
     n_animals      = len(unique_animals)
     design_label   = _MLB['plot_suffix']
 
+    # ── print data pairs for validation ─────────────────────────────────
+    _factor_col = 'ca_percent' if EXPERIMENT_MODE == 'ramp' else 'ca_percent'
+    _factor_lbl = 'CA%' if EXPERIMENT_MODE == 'ramp' else 'Week'
+    _df_sorted = _df.sort_values(['mouse_id', 'ca_percent']).reset_index(drop=True)
+    # Add a 1-based week index per animal for nonramp display
+    _df_sorted['_week_idx'] = (
+        _df_sorted.groupby('mouse_id').cumcount() + 1
+    )
+    print("\n" + "=" * 72)
+    print("RMCORR INPUT — lick / weight pairs (sorted by animal, then week)")
+    print(f"{'Animal':<12}  {_factor_lbl:>6}  {'Week#':>5}  {'Licks':>8}  {'Weight (%BW chg)':>17}")
+    print("-" * 72)
+    for _, _row in _df_sorted.iterrows():
+        print(
+            f"  {_row['mouse_id']:<10}  {_row['ca_percent']:>6.1f}  "
+            f"{int(_row['_week_idx']):>5}  {_row['licks']:>8.0f}  "
+            f"{_row['weight_pct']:>17.4f}"
+        )
+    print("-" * 72)
+    print(f"  Total rows: {len(_df_sorted)}  |  Animals: {n_animals}  |  "
+          f"Rows/animal: "
+          + ", ".join(f"{a}={(_df_sorted['mouse_id']==a).sum()}"
+                      for a in sorted(unique_animals)))
+    print("=" * 72 + "\n")
+    # ────────────────────────────────────────────────────────────────────
+
     # ── attempt rmcorr via rpy2 ──────────────────────────────────────────
     _r_rm  = np.nan
     _p_rm  = np.nan
