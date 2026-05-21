@@ -3007,16 +3007,17 @@ def main() -> None:
 			print(f"{sensor:12s} : {fixed_threshold:8.2f}")
 		print("=" * 60 + "\n")
 		
-		# Also create thresholds for all 12 plotting sensors (for derivative plotting)
-		thresholds_plotting = pd.Series({sensor: fixed_threshold for sensor in selected})
+		# Create thresholds for ALL sensors (selected + remaining) so derivative/event plots
+		# work for the remaining-sensors grid, user-entered 6-sensor grids, and single-sensor plots.
+		thresholds_plotting = pd.Series({sensor: fixed_threshold for sensor in all_sensor_cols})
 		
 		# Detect events above threshold for analysis sensors only
 		print("Detecting events above threshold for analysis sensors...")
 		events_df_analysis = detect_events_above_threshold(df, selected_for_analysis, thresholds_analysis)
 		
-		# Detect events above threshold for all plotting sensors (needed for derivative plots)
-		print("Detecting events above threshold for all plotting sensors (for visualization)...")
-		events_df_plotting = detect_events_above_threshold(df, selected, thresholds_plotting)
+		# Detect events above threshold for ALL sensors (needed for remaining, 6-sensor, and single-sensor plots)
+		print("Detecting events above threshold for all sensors (for visualization)...")
+		events_df_plotting = detect_events_above_threshold(df, all_sensor_cols, thresholds_plotting)
 		
 		# Count events per analysis sensor
 		print("\n" + "=" * 60)

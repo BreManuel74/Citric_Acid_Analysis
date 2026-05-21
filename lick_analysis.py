@@ -122,7 +122,7 @@ except ImportError:
 #   'ramp'    → CA% increases each week; within-subjects factor = CA_Percent
 #   'nonramp' → CA% is constant across weeks; within-subjects factor = Week
 # ─────────────────────────────────────────────────────────────────────────────
-EXPERIMENT_MODE = 'ramp'  # << CHANGE THIS: 'ramp' or 'nonramp'
+EXPERIMENT_MODE = 'nonramp'  # << CHANGE THIS: 'ramp' or 'nonramp'
 # ─────────────────────────────────────────────────────────────────────────────
 
 _MODE_LABELS: dict = {
@@ -643,9 +643,11 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
         avg_total_weight = np.mean(total_weights)
         print(f"Total weight calculation: sum={np.sum(total_weights)}, mean={avg_total_weight:.2f}")
         
-        # Calculate first-5-min percentage averages
-        avg_first_5min_lick_pct = np.mean(first_5min_lick_pcts)
-        avg_first_5min_bout_pct = np.mean(first_5min_bout_pcts)
+        # Calculate first-5-min percentage averages (exclude zero-lick animals, stored as NaN)
+        n_lick_pct = int(np.sum(~np.isnan(first_5min_lick_pcts))) if len(first_5min_lick_pcts) > 0 else 0
+        n_bout_pct = int(np.sum(~np.isnan(first_5min_bout_pcts))) if len(first_5min_bout_pcts) > 0 else 0
+        avg_first_5min_lick_pct = np.nanmean(first_5min_lick_pcts) if n_lick_pct > 0 else np.nan
+        avg_first_5min_bout_pct = np.nanmean(first_5min_bout_pcts) if n_bout_pct > 0 else np.nan
         
         # Calculate time to 50% statistics (excluding NaN values)
         time_to_50pct_valid = time_to_50pct_licks[~np.isnan(time_to_50pct_licks)]
@@ -655,21 +657,21 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
         # Print detailed calculation breakdown for first-5-min percentages
         print(f"\n--- First 5-Minute Average Calculation Details ---")
         print(f"Individual animal lick percentages: {first_5min_lick_pcts}")
-        print(f"Sum of all percentages: {np.sum(first_5min_lick_pcts):.2f}")
-        print(f"Number of animals: {len(first_5min_lick_pcts)}")
-        print(f"Average = {np.sum(first_5min_lick_pcts):.2f} / {len(first_5min_lick_pcts)} = {avg_first_5min_lick_pct:.2f}%")
+        print(f"Sum of all percentages: {np.nansum(first_5min_lick_pcts):.2f}")
+        print(f"Number of animals (non-zero licks): {n_lick_pct} / {len(first_5min_lick_pcts)} total")
+        print(f"Average = {np.nansum(first_5min_lick_pcts):.2f} / {n_lick_pct} = {avg_first_5min_lick_pct:.2f}%")
         print(f"\nIndividual animal bout percentages: {first_5min_bout_pcts}")
-        print(f"Sum of all bout percentages: {np.sum(first_5min_bout_pcts):.2f}")
-        print(f"Number of animals: {len(first_5min_bout_pcts)}")
-        print(f"Average bout % = {np.sum(first_5min_bout_pcts):.2f} / {len(first_5min_bout_pcts)} = {avg_first_5min_bout_pct:.2f}%")
+        print(f"Sum of all bout percentages: {np.nansum(first_5min_bout_pcts):.2f}")
+        print(f"Number of animals (non-zero bouts): {n_bout_pct} / {len(first_5min_bout_pcts)} total")
+        print(f"Average bout % = {np.nansum(first_5min_bout_pcts):.2f} / {n_bout_pct} = {avg_first_5min_bout_pct:.2f}%")
         print(f"--------------------------------------------------\n")
         
         std_licks = np.std(lick_counts, ddof=1) if len(lick_counts) > 1 else 0
         std_bouts = np.std(bout_counts, ddof=1) if len(bout_counts) > 1 else 0
         std_fecal = np.std(fecal_counts, ddof=1) if len(fecal_counts) > 1 else 0
         std_total_weight = np.std(total_weights, ddof=1) if len(total_weights) > 1 else 0
-        std_first_5min_lick_pct = np.std(first_5min_lick_pcts, ddof=1) if len(first_5min_lick_pcts) > 1 else 0
-        std_first_5min_bout_pct = np.std(first_5min_bout_pcts, ddof=1) if len(first_5min_bout_pcts) > 1 else 0
+        std_first_5min_lick_pct = np.nanstd(first_5min_lick_pcts, ddof=1) if n_lick_pct > 1 else 0
+        std_first_5min_bout_pct = np.nanstd(first_5min_bout_pcts, ddof=1) if n_bout_pct > 1 else 0
         
         n = len(lick_counts)
         n_time_to_50pct = len(time_to_50pct_valid)
@@ -677,8 +679,8 @@ def compute_weekly_averages(weekly_results: Dict) -> Dict:
         sem_bouts = std_bouts / np.sqrt(n) if n > 0 else 0
         sem_fecal = std_fecal / np.sqrt(n) if n > 0 else 0
         sem_total_weight = std_total_weight / np.sqrt(n) if n > 0 else 0
-        sem_first_5min_lick_pct = std_first_5min_lick_pct / np.sqrt(n) if n > 0 else 0
-        sem_first_5min_bout_pct = std_first_5min_bout_pct / np.sqrt(n) if n > 0 else 0
+        sem_first_5min_lick_pct = std_first_5min_lick_pct / np.sqrt(n_lick_pct) if n_lick_pct > 0 else 0
+        sem_first_5min_bout_pct = std_first_5min_bout_pct / np.sqrt(n_bout_pct) if n_bout_pct > 0 else 0
         sem_time_to_50pct = std_time_to_50pct / np.sqrt(n_time_to_50pct) if n_time_to_50pct > 0 else np.nan
         if date == '11/12/25':
             n_bottle = len(bottle_weights_filtered)
@@ -3688,12 +3690,13 @@ def generate_lick_descriptive_stats_report(
                 continue
             arr = np.asarray(arr, dtype=float)
             all_vals.append(arr)
-            n = len(arr)
-            mean_v  = float(np.mean(arr))
-            median_v = float(np.median(arr))
-            sd_v    = float(np.std(arr, ddof=1))  if n >= 2 else float('nan')
-            var_v   = float(np.var(arr, ddof=1))  if n >= 2 else float('nan')
-            ci_lo, ci_hi = _ci95(arr)
+            arr_valid = arr[~np.isnan(arr)]
+            n = len(arr_valid)
+            mean_v   = float(np.mean(arr_valid))        if n > 0  else float('nan')
+            median_v = float(np.median(arr_valid))      if n > 0  else float('nan')
+            sd_v     = float(np.std(arr_valid, ddof=1)) if n >= 2 else float('nan')
+            var_v    = float(np.var(arr_valid, ddof=1)) if n >= 2 else float('nan')
+            ci_lo, ci_hi = _ci95(arr_valid)
             ci_str = f"[{ci_lo:.3f}, {ci_hi:.3f}]" if not np.isnan(ci_lo) else "N/A"
             results[dv_label][lbl] = {
                 'n': n, 'mean': mean_v, 'median': median_v,
@@ -3705,16 +3708,17 @@ def generate_lick_descriptive_stats_report(
         if all_vals:
             if len(all_vals) > 1 and all(len(a) == len(all_vals[0]) for a in all_vals):
                 # Same n animals each week: average across weeks per animal position
-                _all = np.mean(np.column_stack(all_vals), axis=1)
+                _all = np.nanmean(np.column_stack(all_vals), axis=1)
             else:
                 # Unequal animal counts across weeks — fall back to concatenation
                 _all = np.concatenate(all_vals)
-            _an = len(_all)
-            _am     = float(np.mean(_all))
-            _amed   = float(np.median(_all))
-            _asd    = float(np.std(_all, ddof=1))  if _an >= 2 else float('nan')
-            _avar   = float(np.var(_all, ddof=1))  if _an >= 2 else float('nan')
-            _aci_lo, _aci_hi = _ci95(_all)
+            _all_valid = _all[~np.isnan(_all)]
+            _an = len(_all_valid)
+            _am     = float(np.mean(_all_valid))        if _an > 0  else float('nan')
+            _amed   = float(np.median(_all_valid))      if _an > 0  else float('nan')
+            _asd    = float(np.std(_all_valid, ddof=1)) if _an >= 2 else float('nan')
+            _avar   = float(np.var(_all_valid, ddof=1)) if _an >= 2 else float('nan')
+            _aci_lo, _aci_hi = _ci95(_all_valid)
             _aci_str = f"[{_aci_lo:.3f}, {_aci_hi:.3f}]" if not np.isnan(_aci_lo) else "N/A"
             results[dv_label]['_all'] = {
                 'n': _an, 'mean': _am, 'median': _amed,
@@ -4253,11 +4257,15 @@ def plot_first_5min_by_week(
         # Calculate SEM
         individual_pcts = data['first_5min_lick_pcts_per_animal']
         individual_data.append(individual_pcts)
-        n = len(individual_pcts)
-        sem = data['std_first_5min_lick_pct'] / np.sqrt(n) if n > 0 else 0
+        n_total = len(individual_pcts)
+        n_valid = int(np.sum(~np.isnan(individual_pcts)))
+        sem = data['sem_first_5min_lick_pct']
         sem_pcts.append(sem)
         
-        print(f"  Week {i+1} ({data['ca_percent']}% CA): avg={avg_pcts[-1]:.2f}%, SEM={sem:.2f}%, n={n}")
+        print(f"  Week {i+1} ({data['ca_percent']}% CA): mean={avg_pcts[-1]:.2f}%, SEM={sem:.2f}%, n={n_valid}/{n_total} animals with licks")
+        _ids_wk = data.get('animal_ids', [f"A{j+1}" for j in range(n_total)])
+        _pairs = [f"{_ids_wk[j]}={individual_pcts[j]:.1f}%" if not np.isnan(individual_pcts[j]) else f"{_ids_wk[j]}=NaN(0 licks)" for j in range(n_total)]
+        print(f"    Per-animal: {', '.join(_pairs)}")
     
     # Create figure
     fig, ax = plt.subplots()
@@ -5023,11 +5031,14 @@ def plot_first_5min_by_week_with_lines(
         individual_data_by_week.append(individual_pcts)
         animal_ids_by_week.append(animal_ids)
         
-        n = len(individual_pcts)
-        sem = data['std_first_5min_lick_pct'] / np.sqrt(n) if n > 0 else 0
+        n_total = len(individual_pcts)
+        n_valid = int(np.sum(~np.isnan(individual_pcts)))
+        sem = data['sem_first_5min_lick_pct']
         sem_pcts.append(sem)
         
-        print(f"  Week {i+1} ({data['ca_percent']}% CA): avg={avg_pcts[-1]:.2f}%, SEM={sem:.2f}%, n={n}")
+        print(f"  Week {i+1} ({data['ca_percent']}% CA): mean={avg_pcts[-1]:.2f}%, SEM={sem:.2f}%, n={n_valid}/{n_total} animals with licks")
+        _pairs = [f"{animal_ids[j]}={individual_pcts[j]:.1f}%" if not np.isnan(individual_pcts[j]) else f"{animal_ids[j]}=NaN(0 licks)" for j in range(n_total)]
+        print(f"    Per-animal: {', '.join(_pairs)}")
     
     # Build a mapping of animal ID to its trajectory across weeks
     # animal_trajectories: dict mapping animal_id -> list of (week_idx, percentage) tuples
@@ -5554,7 +5565,7 @@ def process_single_week(
             
             # Calculate first 5 minute lick percentage
             first_5min_licks = ((events_df[event_col]) & (events_df['Time_sec'] < 300)).sum()
-            first_5min_lick_pct = (first_5min_licks / sensor_licks * 100) if sensor_licks > 0 else 0
+            first_5min_lick_pct = (first_5min_licks / sensor_licks * 100) if sensor_licks >= 2 else np.nan
             first_5min_lick_pcts.append(first_5min_lick_pct)
             
             # Calculate time to 50% of total licks
@@ -5567,7 +5578,7 @@ def process_single_week(
             sensor_status = f"OK - {sensor_licks} licks detected ({first_5min_lick_pct:.1f}% in first 5min)"
         else:
             lick_counts.append(0)
-            first_5min_lick_pcts.append(0)
+            first_5min_lick_pcts.append(np.nan)
             time_to_50pct_licks.append(np.nan)
             sensor_status = f"WARNING - Event column '{event_col}' not found in data!"
         
@@ -5582,12 +5593,12 @@ def process_single_week(
             # Calculate first 5 minute bout percentage
             bout_start_times = bout_dict[sensor]['bout_start_times']
             first_5min_bouts = np.sum(bout_start_times < 300) if len(bout_start_times) > 0 else 0
-            first_5min_bout_pct = (first_5min_bouts / sensor_bouts * 100) if sensor_bouts > 0 else 0
+            first_5min_bout_pct = (first_5min_bouts / sensor_bouts * 100) if sensor_bouts > 0 else np.nan
             first_5min_bout_pcts.append(first_5min_bout_pct)
             print(f"  {sensor}: Total bouts = {sensor_bouts}, First 5min bouts = {first_5min_bouts}, First 5min % = {first_5min_bout_pct:.1f}%")
         else:
             bout_counts.append(0)
-            first_5min_bout_pcts.append(0)
+            first_5min_bout_pcts.append(np.nan)
             sensor_status += " / WARNING - No bout data!"
         
         if lick_counts[-1] == 0:

@@ -744,11 +744,11 @@ def process_cohort_capacitive_files(
                 # Compute first-5-minute lick percentage
                 _evdf = result['events_df']
                 _ecol = f"{sensor_col}_event"
-                if _ecol in _evdf.columns and animal_licks > 0:
+                if _ecol in _evdf.columns and animal_licks >= 2:
                     _f5 = int((_evdf[_ecol] & (_evdf['Time_sec'] < 300)).sum())
                     first_5min_pct = _f5 / animal_licks * 100.0
                 else:
-                    first_5min_pct = 0.0
+                    first_5min_pct = np.nan  # animals with <2 licks excluded from frontloading averages
 
                 # Compute time (minutes) to reach 50% of total licks
                 time_50pct = calculate_time_to_50_percent_licks(_evdf, sensor_col)
@@ -7718,6 +7718,15 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                             .reset_index()
                         )
                         n_per_wk = int(wk_stats['count'].iloc[0]) if len(wk_stats) > 0 else 0
+                        print(f"  [{ca_val:.0f}% CA] {y_label}:")
+                        for _, _row in wk_stats.iterrows():
+                            _n = int(_row['count'])
+                            _m = _row['mean']
+                            _s = _row['sem']
+                            _wk = int(_row['Week']) + 1
+                            _m_str = f"{_m:.3f}" if not np.isnan(_m) else "NaN"
+                            _s_str = f"{_s:.3f}" if not np.isnan(_s) else "NaN"
+                            print(f"    Week {_wk}: mean={_m_str}, SEM={_s_str}, n={_n}")
                         c = _FL_COLORS.get(ca_val, _DEFAULT_COLORS[idx % len(_DEFAULT_COLORS)])
                         lbl = f"{ca_val:.0f}% CA (n={n_per_wk}/week)"
                         ax_fl.errorbar(
@@ -9278,6 +9287,15 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                             .reset_index()
                         )
                         n_per_wk = int(wk_stats['count'].iloc[0]) if len(wk_stats) > 0 else 0
+                        print(f"  [{cohort_lbl}] {y_label}:")
+                        for _, _row in wk_stats.iterrows():
+                            _n = int(_row['count'])
+                            _m = _row['mean']
+                            _s = _row['sem']
+                            _wk = int(_row['Week']) + 1
+                            _m_str = f"{_m:.3f}" if not np.isnan(_m) else "NaN"
+                            _s_str = f"{_s:.3f}" if not np.isnan(_s) else "NaN"
+                            print(f"    Week {_wk}: mean={_m_str}, SEM={_s_str}, n={_n}")
                         c = _COHORT_COLORS[idx % len(_COHORT_COLORS)]
                         lbl = f"{cohort_lbl} (n={n_per_wk}/week)"
                         ax_fl.errorbar(
