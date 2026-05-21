@@ -6261,10 +6261,13 @@ def run_friedman_milestone_days_r(
 ) -> dict:
     """Run a Friedman test in R on Daily Weight Change at milestone days.
 
-    Uses R's built-in ``friedman.test()`` with mouse ID as the blocking
-    (repeated-measures) factor and Day as the categorical time factor.
-    Post-hoc pairwise Wilcoxon signed-rank tests with Holm-Bonferroni
-    correction are run automatically.
+    Uses R's built-in ``friedman.test()`` for the omnibus test.  All
+    pairwise post-hoc comparisons are computed in Python via
+    ``scipy.stats.wilcoxon`` (exact for n ≤ 25, asymptotic otherwise),
+    with Holm-Bonferroni correction applied in Python.  This guarantees
+    correct subject-to-subject pairing (data sorted by ID within each day
+    before comparison) and adds W statistics, Hodges-Lehmann estimates,
+    and bootstrapped 95 % CIs to the report.
 
     Only mice with complete data at *all* specified days are included.
 
@@ -6280,11 +6283,16 @@ def run_friedman_milestone_days_r(
     Returns
     -------
     dict
-        ``{'r_output': str, 'report_path': Path | None,
-           'complete_ids': list, 'n_subjects': int}``
+        Keys: r_output, chi_sq, df, p_omnibus, desc_stats, pair_results,
+        report_path, complete_ids, n_subjects
     """
     import subprocess
     import tempfile
+    import re as _re
+    from itertools import combinations
+    from scipy.stats import wilcoxon as _wilcoxon
+
+    W_RPT = 135   # report line width (matches KW report)
 
     _days = list(days) if days is not None else [8, 15, 22, 29]
 
@@ -6324,20 +6332,65 @@ def run_friedman_milestone_days_r(
 
     long_df = long_df[long_df['ID'].isin(complete_ids)].copy()
 
+    # CRITICAL: sort by Day then by ID so that within each Day level the
+    # subjects appear in the same alphabetical order.  Paired Wilcoxon tests
+    # compare observation[i] of group A with observation[i] of group B — if
+    # the subject order differs between days the wrong animals get paired.
+    long_df = long_df.sort_values(['Day', 'ID']).reset_index(drop=True)
+
+    # Verify alignment: same subject sequence in every Day slice
+    _id_per_day = {d: long_df[long_df['Day'] == d]['ID'].tolist() for d in _days}
+    _ref_order  = _id_per_day[_days[0]]
+    _align_ok   = all(_id_per_day[d] == _ref_order for d in _days[1:])
+
     print(f"\nFriedman test: {len(complete_ids)} subjects × {len(_days)} days")
     print(f"  Subjects : {', '.join(complete_ids)}")
     print(f"  Days     : {_days}")
 
-    # Write long-format data to a temp CSV
+    # ── Input verification table ─────────────────────────────────────────────
+    # Pivot to wide format: rows = Animal ID, columns = Day
+    # Shows exactly which DailyChange value each animal contributes at each day,
+    # and confirms that the row order (animal sequence) is identical across days.
+    _pivot = (
+        long_df.pivot(index='ID', columns='Day', values='DailyChange')
+        .reindex(index=sorted(long_df['ID'].unique()))
+        .reindex(columns=_days)
+    )
+    _col_w   = 10
+    _id_w    = max(len(str(i)) for i in _pivot.index) + 2
+    _hdr     = f"  {'Animal ID':<{_id_w}}" + "".join(f"  {'Day ' + str(d):>{_col_w}}" for d in _days)
+    _sep     = "  " + "─" * (_id_w + (_col_w + 2) * len(_days))
+    print(f"\n  Input data fed to Friedman / pairwise Wilcoxon (DailyChange %/day):")
+    print(_hdr)
+    print(_sep)
+    for _aid in _pivot.index:
+        _row_str = f"  {str(_aid):<{_id_w}}"
+        for d in _days:
+            _val = _pivot.loc[_aid, d]
+            _row_str += f"  {_val:>{_col_w}.4f}" if pd.notna(_val) else f"  {'MISSING':>{_col_w}}"
+        print(_row_str)
+    print(_sep)
+
+    # Report whether subject order is consistent (required for valid pairing)
+    if _align_ok:
+        print("  [OK] Subject order is identical across all days — pairing is valid.")
+    else:
+        print("  [WARNING] Subject order is NOT consistent across days — pairing may be invalid!")
+        for d in _days:
+            print(f"    Day {d}: {_id_per_day[d]}")
+    print()
+
+    # ── R: omnibus Friedman test only ────────────────────────────────────────
     tmp_csv = Path(tempfile.mktemp(suffix='.csv'))
     long_df.to_csv(str(tmp_csv), index=False)
 
-    # Build R script (forward-slashes for R on Windows)
-    _csv_r = str(tmp_csv).replace('\\', '/')
+    _csv_r      = str(tmp_csv).replace('\\', '/')
     _day_levels = ', '.join(str(d) for d in _days)
     r_script = (
         'options(warn=1)\n'
         f'data <- read.csv("{_csv_r}")\n'
+        # Sort within R as well (belt-and-suspenders)
+        'data <- data[order(data$Day, data$ID),]\n'
         f'data$Day <- factor(data$Day, levels = c({_day_levels}))\n'
         'data$ID  <- factor(data$ID)\n'
         '\n'
@@ -6347,21 +6400,9 @@ def run_friedman_milestone_days_r(
         f'cat("Days tested : {_days}\\n")\n'
         'cat("N subjects  :", nlevels(data$ID), "(complete cases)\\n\\n")\n'
         '\n'
-        '# Friedman rank-sum test\n'
         'fr <- friedman.test(DailyChange ~ Day | ID, data = data)\n'
         'print(fr)\n'
         '\n'
-        'cat("\\n----------------------------------------\\n")\n'
-        'cat("POST-HOC: Pairwise Wilcoxon signed-rank\\n")\n'
-        'cat("(Holm-Bonferroni correction)\\n")\n'
-        'cat("----------------------------------------\\n")\n'
-        'ph <- pairwise.wilcox.test(\n'
-        '  data$DailyChange, data$Day,\n'
-        '  p.adjust.method = "holm",\n'
-        '  paired = TRUE,\n'
-        '  exact = FALSE\n'
-        ')\n'
-        'print(ph)\n'
         'cat("\\n========================================\\n")\n'
         'cat("END\\n")\n'
     )
@@ -6369,8 +6410,10 @@ def run_friedman_milestone_days_r(
     tmp_r = Path(tempfile.mktemp(suffix='.R'))
     tmp_r.write_text(r_script, encoding='utf-8')
 
-    # Run Rscript
     r_output = ''
+    chi_sq   = float('nan')
+    df_fr    = float('nan')
+    p_omni   = float('nan')
     try:
         result = subprocess.run(
             ['Rscript', '--vanilla', str(tmp_r)],
@@ -6381,18 +6424,24 @@ def run_friedman_milestone_days_r(
         if result.returncode != 0:
             print(f"R exited with code {result.returncode}.")
         if r_stderr:
-            # filter out benign R warnings/messages
             non_trivial = [
                 ln for ln in r_stderr.splitlines()
                 if not ln.startswith('Loading') and ln.strip()
             ]
             if non_trivial:
                 print("R messages:\n" + '\n'.join(non_trivial))
-    except FileNotFoundError:
-        print(
-            "ERROR: 'Rscript' not found. "
-            "Install R and ensure Rscript is on the system PATH."
+        # Parse chi-sq, df, p from R output
+        _m = _re.search(
+            r'Friedman chi-squared\s*=\s*([\d.e+\-]+),\s*df\s*=\s*([\d.e+\-]+),'
+            r'\s*p-value\s*[=<]\s*([\d.e+\-]+)',
+            r_output,
         )
+        if _m:
+            chi_sq = float(_m.group(1))
+            df_fr  = float(_m.group(2))
+            p_omni = float(_m.group(3))
+    except FileNotFoundError:
+        print("ERROR: 'Rscript' not found.  Install R and add Rscript to PATH.")
         tmp_csv.unlink(missing_ok=True)
         tmp_r.unlink(missing_ok=True)
         return {}
@@ -6405,44 +6454,186 @@ def run_friedman_milestone_days_r(
         tmp_csv.unlink(missing_ok=True)
         tmp_r.unlink(missing_ok=True)
 
-    print(r_output)
+    # ── Python: descriptive statistics per day ───────────────────────────────
+    desc_stats: dict = {}
+    for d in _days:
+        vals  = long_df[long_df['Day'] == d].sort_values('ID')['DailyChange'].values
+        n     = len(vals)
+        _mean = float(np.mean(vals))
+        _sem  = float(np.std(vals, ddof=1) / np.sqrt(n)) if n > 1 else float('nan')
+        _ci   = stats.t.interval(0.95, df=n - 1, loc=_mean, scale=_sem) if n > 1 else (float('nan'), float('nan'))
+        desc_stats[d] = {
+            'n': n, 'mean': _mean, 'sem': _sem,
+            'ci_lo': float(_ci[0]), 'ci_hi': float(_ci[1]),
+        }
 
-    # Save text report
+    # ── Python: pairwise Wilcoxon signed-rank + HL estimate + bootstrap CI ──
+    def _fmt_p(p) -> str:
+        if p != p: return 'N/A'      # nan check
+        return '< 0.001' if p < 0.001 else f'{p:.4f}'
+
+    def _sig(p) -> str:
+        if p != p: return '   '
+        if p < 0.001: return '***'
+        if p < 0.01:  return '** '
+        if p < 0.05:  return '*  '
+        if p < 0.1:   return '.  '
+        return 'ns '
+
+    def _holm(pvals: list) -> list:
+        """Holm-Bonferroni step-down correction."""
+        n = len(pvals)
+        if n == 0:
+            return []
+        order    = sorted(range(n), key=lambda i: pvals[i])
+        adj      = [0.0] * n
+        prev_adj = 0.0
+        for step, idx in enumerate(order):
+            adj_p       = min(1.0, max(prev_adj, pvals[idx] * (n - step)))
+            adj[idx]    = adj_p
+            prev_adj    = adj_p
+        return adj
+
+    pair_results = []
+    _raw_ps      = []
+    _rng         = np.random.default_rng(0)
+    N_BOOT       = 4999
+
+    for d1, d2 in combinations(_days, 2):
+        x1    = long_df[long_df['Day'] == d1].sort_values('ID')['DailyChange'].values
+        x2    = long_df[long_df['Day'] == d2].sort_values('ID')['DailyChange'].values
+        diffs = x1 - x2
+        n_pr  = len(diffs)
+
+        try:
+            _W, _p_raw = _wilcoxon(
+                x1, x2, alternative='two-sided',
+                method='exact' if n_pr <= 25 else 'approx',
+            )
+        except ValueError:
+            # wilcoxon raises if all differences are zero (no variability)
+            _W, _p_raw = float('nan'), float('nan')
+
+        # Hodges-Lehmann estimator for paired data = median of within-subject diffs
+        _hl = float(np.median(diffs))
+
+        # Bootstrapped 95 % CI on the HL estimate
+        _boot    = [float(np.median(_rng.choice(diffs, size=n_pr, replace=True)))
+                    for _ in range(N_BOOT)]
+        _ci_lo, _ci_hi = float(np.percentile(_boot, 2.5)), float(np.percentile(_boot, 97.5))
+
+        pair_results.append({
+            'd1': d1, 'd2': d2, 'n': n_pr,
+            'W': _W, 'p_raw': _p_raw,
+            'hl_est': _hl, 'ci_lo': _ci_lo, 'ci_hi': _ci_hi,
+        })
+        _raw_ps.append(_p_raw if _p_raw == _p_raw else 1.0)
+
+    _adj_ps = _holm(_raw_ps)
+    for i, p_adj in enumerate(_adj_ps):
+        pair_results[i]['p_adj'] = p_adj
+
+    # ── Format report ────────────────────────────────────────────────────────
+    def _fmt_omni_p(p) -> str:
+        if p != p: return 'N/A'
+        return '< 0.001' if p < 0.001 else f'{p:.4e}'
+
+    def _sig_omni(p) -> str:
+        if p != p: return ''
+        if p < 0.001: return '***'
+        if p < 0.01:  return '**'
+        if p < 0.05:  return '*'
+        if p < 0.1:   return '.'
+        return 'ns'
+
+    _ts_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    _chi_str = f'{chi_sq:.4f}' if chi_sq == chi_sq else 'N/A'
+    _df_str  = str(int(df_fr)) if df_fr == df_fr else '?'
+
+    _lines = [
+        '=' * W_RPT,
+        'FRIEDMAN TEST — DAILY WEIGHT CHANGE AT MILESTONE DAYS',
+        '=' * W_RPT,
+        f"Generated  : {_ts_str}",
+        f"Mode       : {EXPERIMENT_MODE}",
+        f"Days       : {_days}",
+        f"N subjects : {len(complete_ids)} (complete cases only)",
+        f"Subjects   : {', '.join(complete_ids)}",
+        '',
+        'Test        : Friedman rank-sum test (non-parametric repeated measures)',
+        'Factor      : Day (time, categorical within-subjects)',
+        'Block       : Animal ID (repeated measures)',
+        'Post-hoc    : Pairwise Wilcoxon signed-rank (scipy; exact for n ≤ 25)',
+        'Correction  : Holm-Bonferroni (Python)',
+        'HL estimate : Hodges-Lehmann = median(x_day1 − x_day2) per subject pair',
+        '95% CI      : Bootstrap (4 999 resamples, seed = 0) on HL estimate',
+        '',
+        'Omnibus Friedman result:',
+        f"  χ²({_df_str}) = {_chi_str},  p = {_fmt_omni_p(p_omni)}  {_sig_omni(p_omni)}",
+        '',
+        'R OUTPUT (omnibus Friedman only)',
+        '-' * W_RPT,
+        r_output.strip(),
+        '-' * W_RPT,
+        '',
+        'Descriptive statistics  (95% CI = t-based, two-tailed):',
+        f"  {'Day':>5}    {'n':>4}   {'Mean (%/day)':>13}       {'SEM':>8}  {'95% CI':>25}",
+        f"  {'─'*5}  {'─'*4}   {'─'*13}  {'─'*8}  {'─'*25}",
+    ]
+    for d in _days:
+        ds = desc_stats[d]
+        _ci_str = (
+            f"[{ds['ci_lo']:>9.4f}, {ds['ci_hi']:>9.4f}]"
+            if ds['ci_lo'] == ds['ci_lo'] else '   [N/A]'
+        )
+        _lines.append(
+            f"  {d:>5}    {ds['n']:>4}   {ds['mean']:>13.4f}    {ds['sem']:>8.4f}  {_ci_str}"
+        )
+
+    _lines += [
+        '',
+        f"  {'Pair':<20}  {'n':>4}  {'W':>10}  {'p_raw':>10}  {'p_adj (Holm)':>13}  "
+        f"{'sig':<4}  {'HL_est':>8}  {'95% CI (HL)':>22}",
+        '  ' + '─' * (W_RPT - 2),
+    ]
+    for pr in pair_results:
+        _lbl    = f"Day {pr['d1']}  vs  Day {pr['d2']}"
+        _ci_str = f"[{pr['ci_lo']:>8.4f}, {pr['ci_hi']:>8.4f}]"
+        _W_str  = f"{pr['W']:.1f}" if pr['W'] == pr['W'] else 'N/A'
+        _lines.append(
+            f"  {_lbl:<20}  {pr['n']:>4}  {_W_str:>10}  "
+            f"{_fmt_p(pr['p_raw']):>10}  {_fmt_p(pr['p_adj']):>13}  "
+            f"{_sig(pr['p_adj']):<4}  {pr['hl_est']:>8.4f}  {_ci_str:>22}"
+        )
+
+    _lines += [
+        '',
+        '  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10  ns p≥.10',
+        '=' * W_RPT,
+        'END OF REPORT',
+        '=' * W_RPT,
+    ]
+
+    full_report = '\n'.join(_lines)
+    print('\n' + full_report)
+
     _report_path: Optional[Path] = None
     if save_report:
-        _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        _report_path = Path.cwd() / f"friedman_milestone_days_report_{_ts}.txt"
-        _lines = [
-            "=" * 72,
-            "FRIEDMAN TEST — DAILY WEIGHT CHANGE AT MILESTONE DAYS",
-            "=" * 72,
-            f"Generated : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"Mode      : {EXPERIMENT_MODE}",
-            f"Days      : {_days}",
-            f"N subjects: {len(complete_ids)} (complete cases only)",
-            f"Subjects  : {', '.join(complete_ids)}",
-            "",
-            "Test       : Friedman rank-sum test (non-parametric repeated measures)",
-            "Factor     : Day (time, categorical within-subjects)",
-            "Block      : Animal ID (repeated measures)",
-            "Post-hoc   : Pairwise Wilcoxon signed-rank, Holm-Bonferroni correction",
-            "",
-            "R OUTPUT",
-            "-" * 72,
-            r_output,
-            "",
-            "=" * 72,
-            "END OF REPORT",
-            "=" * 72,
-        ]
-        _report_path.write_text('\n'.join(_lines), encoding='utf-8')
+        _ts_fn = datetime.now().strftime('%Y%m%d_%H%M%S')
+        _report_path = Path.cwd() / f"friedman_milestone_days_report_{_ts_fn}.txt"
+        _report_path.write_text(full_report, encoding='utf-8')
         print(f"Report saved -> {_report_path}")
 
     return {
-        'r_output': r_output,
-        'report_path': _report_path,
+        'r_output'    : r_output,
+        'chi_sq'      : chi_sq,
+        'df'          : df_fr,
+        'p_omnibus'   : p_omni,
+        'desc_stats'  : desc_stats,
+        'pair_results': pair_results,
+        'report_path' : _report_path,
         'complete_ids': complete_ids,
-        'n_subjects': len(complete_ids),
+        'n_subjects'  : len(complete_ids),
     }
 
 
