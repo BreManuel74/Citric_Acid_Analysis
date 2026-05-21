@@ -3902,6 +3902,24 @@ def plot_total_change_r_fit(
 	scatter_df['x_factor'] = pd.to_numeric(scatter_df['x_factor'], errors='coerce')
 	scatter_df = scatter_df.dropna(subset=['x_factor'])
 
+	# ── Input data validation ────────────────────────────────────────────────
+	_n_pts  = len(plot_df)
+	_n_ids  = plot_df['ID'].nunique()
+	_x_min  = plot_df['x_factor'].min()
+	_x_max  = plot_df['x_factor'].max()
+	_y_min  = plot_df['total_change'].min()
+	_y_max  = plot_df['total_change'].max()
+	_per_id = plot_df.groupby('ID').size().sort_index()
+	_balanced = _per_id.nunique() == 1
+	print(f"\n[R fit] Input data for model fits ({x_label} axis):")
+	print(f"  Animals     : {_n_ids}")
+	print(f"  Data points : {_n_pts}  ({'balanced' if _balanced else 'UNBALANCED'})")
+	print(f"  x range     : [{int(_x_min)}, {int(_x_max)}]")
+	print(f"  y range     : [{_y_min:.4f}, {_y_max:.4f}]  (Total Change %)")
+	print(f"  Per-animal n: {', '.join(f'{k}={v}' for k, v in _per_id.items())}")
+	if not _balanced:
+		print("  [WARNING] Unequal observations per animal — check for missing data.")
+
 	# ── Locate Rscript ────────────────────────────────────────────────────────
 	rscript = shutil.which('Rscript') or shutil.which('Rscript.exe')
 	if rscript is None:
@@ -4060,9 +4078,32 @@ if (m_exp_ok) {{
 	_c_lin = np.polyfit(x_vals, y_vals, 1)
 	y_lin  = np.polyval(_c_lin, x_seq)
 
+	# ── Linear fit validation ────────────────────────────────────────────────
+	_y_hat_lin = np.polyval(_c_lin, x_vals)
+	_ss_res_l  = float(np.sum((y_vals - _y_hat_lin) ** 2))
+	_ss_tot    = float(np.sum((y_vals - np.mean(y_vals)) ** 2))
+	_r2_lin_py = 1.0 - _ss_res_l / _ss_tot if _ss_tot > 0 else float('nan')
+	_spot_xs   = [int(_x_min), int(round((_x_min + _x_max) / 2)), int(_x_max)]
+	print(f"\n[R fit] Linear fit (Python numpy.polyfit, for validation):")
+	print(f"  slope     : {_c_lin[0]:.4f}")
+	print(f"  intercept : {_c_lin[1]:.4f}")
+	print(f"  R²        : {_r2_lin_py:.4f}")
+	print("  Predicted at spot-check x values:")
+	for _sx in _spot_xs:
+		print(f"    x={_sx:>4}: {np.polyval(_c_lin, _sx):.4f}%")
+	# Cross-check against R's adj R² if available
+	if r_stats.get('adj_r2_lin') is not None:
+		_r2_r = r_stats['adj_r2_lin']
+		print(f"  R adj.R²  : {_r2_r:.4f}  (Python plain R²: {_r2_lin_py:.4f})")
+		if abs(_r2_lin_py - _r2_r) > 0.05:
+			print("  [WARNING] Python R² vs R adj.R² differ by > 0.05 — expected (adj vs plain), but worth checking.")
+		else:
+			print("  [OK] Python R² and R adj.R² are consistent.")
+
 	# exponential decay: use R coefficients if available, else scipy fallback
 	y_exp: Optional[np.ndarray] = None
 	exp_label = 'Exp decay fit'
+	_popt_scipy: Optional[tuple] = None
 	if r_stats.get('exp_A') is not None:
 		_A, _B, _k = r_stats['exp_A'], r_stats['exp_B'], r_stats['exp_k']
 		y_exp = _A + _B * np.exp(-_k * x_seq)
@@ -4072,10 +4113,58 @@ if (m_exp_ok) {{
 			def _exp_model(x, A, B, k): return A + B * np.exp(-k * x)
 			_y0 = y_vals.min()
 			_p0 = [_y0, y_vals.max() - _y0, 0.1]
-			_popt, _ = _cfit(_exp_model, x_vals, y_vals, p0=_p0, maxfev=5000)
-			y_exp = _exp_model(x_seq, *_popt)
+			_popt_scipy, _ = _cfit(_exp_model, x_vals, y_vals, p0=_p0, maxfev=5000)
+			y_exp = _exp_model(x_seq, *_popt_scipy)
 		except Exception:
 			exp_label = 'Exp decay (no fit)'
+
+	# ── Exponential fit validation ─────────────────────────────────────────────
+	print(f"\n[R fit] Exponential decay fit  (y = A + B*exp(-k*x)):")
+	if r_stats.get('exp_A') is not None:
+		_A_r, _B_r, _k_r = r_stats['exp_A'], r_stats['exp_B'], r_stats['exp_k']
+		print(f"  R NLS    : A={_A_r:.4f},  B={_B_r:.4f},  k={_k_r:.4f}")
+		if r_stats.get('r2_exp') is not None and r_stats['r2_exp'] == r_stats['r2_exp']:
+			print(f"  R pseudo-R\u00b2: {r_stats['r2_exp']:.4f}")
+		_y_hat_exp_r = _A_r + _B_r * np.exp(-_k_r * x_vals)
+		_ss_res_er   = float(np.sum((y_vals - _y_hat_exp_r) ** 2))
+		_r2_exp_py   = 1.0 - _ss_res_er / _ss_tot if _ss_tot > 0 else float('nan')
+		print(f"  Python R\u00b2 (using R coefficients on fit data): {_r2_exp_py:.4f}")
+		print("  Predicted at spot-check x values (R NLS):")
+		for _sx in _spot_xs:
+			print(f"    x={_sx:>4}: {_A_r + _B_r * np.exp(-_k_r * _sx):.4f}%")
+		# Cross-check R NLS against scipy
+		try:
+			from scipy.optimize import curve_fit as _cfit_v
+			def _exp_model_v(x, A, B, k): return A + B * np.exp(-k * x)
+			_popt_v, _ = _cfit_v(_exp_model_v, x_vals, y_vals,
+			                     p0=[y_vals.min(), y_vals.max() - y_vals.min(), 0.1],
+			                     maxfev=5000)
+			_A_sc, _B_sc, _k_sc = _popt_v
+			print(f"  scipy    : A={_A_sc:.4f},  B={_B_sc:.4f},  k={_k_sc:.4f}  (cross-check)")
+			_discrepancies = []
+			for _pname, _pR, _pSc in [('A', _A_r, _A_sc), ('B', _B_r, _B_sc), ('k', _k_r, _k_sc)]:
+				_rel = abs(_pR - _pSc) / (abs(_pR) + 1e-12)
+				if _rel > 0.05:
+					_discrepancies.append(f"{_pname}: R={_pR:.4f} vs scipy={_pSc:.4f} (rel \u0394={_rel:.1%})")
+			if _discrepancies:
+				print("  [WARNING] R NLS vs scipy differ by >5% on: " + "; ".join(_discrepancies))
+			else:
+				print("  [OK] R NLS and scipy coefficients agree within 5%.")
+		except Exception as _e_xc:
+			print(f"  [INFO] scipy cross-check skipped: {_e_xc}")
+	elif _popt_scipy is not None:
+		_A_sc, _B_sc, _k_sc = _popt_scipy
+		print(f"  scipy    : A={_A_sc:.4f},  B={_B_sc:.4f},  k={_k_sc:.4f}  (R unavailable; scipy used)")
+		_y_hat_exp_sc = _A_sc + _B_sc * np.exp(-_k_sc * x_vals)
+		_ss_res_esc   = float(np.sum((y_vals - _y_hat_exp_sc) ** 2))
+		_r2_exp_sc    = 1.0 - _ss_res_esc / _ss_tot if _ss_tot > 0 else float('nan')
+		print(f"  R\u00b2 (scipy fit on data): {_r2_exp_sc:.4f}")
+		print("  Predicted at spot-check x values (scipy):")
+		for _sx in _spot_xs:
+			print(f"    x={_sx:>4}: {_A_sc + _B_sc * np.exp(-_k_sc * _sx):.4f}%")
+	else:
+		print("  [WARNING] Exponential fit did not converge (neither R NLS nor scipy).")
+	print()
 
 	title_str = f"Total Change (%) by {x_label} \u2014 Linear / Exp Decay"
 
