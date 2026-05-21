@@ -14441,8 +14441,9 @@ def run_art_behavior_r(
     for label, df in cohort_dfs.items():
         cdf = clean_cohort(df.copy())
         if 'Day' not in cdf.columns:
-            cdf['Cohort'] = label  # ensure ramp day-numbering and Day 1 exclusion are applied correctly
-            cdf = add_day_column_across_cohorts(cdf)
+            cdf['Cohort'] = label
+            # drop_ramp_baseline=False: Day 1 behavioral observations are valid
+            cdf = add_day_column_across_cohorts(cdf, drop_ramp_baseline=False)
         cdf = cdf[cdf['Day'] >= 1].copy()
         cdf = _add_week_column_across_cohorts(cdf)
 
@@ -14714,8 +14715,9 @@ def run_nparld_behavior_r(
     for label, df in cohort_dfs.items():
         cdf = clean_cohort(df.copy())
         if 'Day' not in cdf.columns:
-            cdf['Cohort'] = label  # ensure ramp day-numbering and Day 1 exclusion are applied correctly
-            cdf = add_day_column_across_cohorts(cdf)
+            cdf['Cohort'] = label
+            # drop_ramp_baseline=False: Day 1 behavioral observations are valid
+            cdf = add_day_column_across_cohorts(cdf, drop_ramp_baseline=False)
         cdf = cdf[cdf['Day'] >= 1].copy()
         cdf = _add_week_column_across_cohorts(cdf)
 
@@ -14724,7 +14726,8 @@ def run_nparld_behavior_r(
                 cdf[f'_bin_{col_key}'] = _to_bool_series(cdf[col])
 
         for (animal_id, week_num), grp in cdf.groupby(['ID', 'Week']):
-            row: dict = {'ID': str(animal_id), 'Cohort': label, 'Week': int(week_num)}
+            row: dict = {'ID': str(animal_id), 'Cohort': label, 'Week': int(week_num),
+                         '_n_days': len(grp)}
             for col, aberrant_val, _, col_key in BEHAVIORS:
                 bcol = f'_bin_{col_key}'
                 if bcol not in grp.columns:
@@ -14768,6 +14771,138 @@ def run_nparld_behavior_r(
           f"x {len(cohort_levels)} cohorts")
     print(f"  Cohorts : {cohort_levels}")
     print(f"  Weeks   : {week_levels}")
+
+    # ── Input validation ─────────────────────────────────────────────────────
+    col_keys = [ck for _, _, _, ck in BEHAVIORS]
+
+    # 1. Subject-cohort assignment — confirm each animal belongs to exactly one cohort
+    _id_cohort = weekly.drop_duplicates('ID').set_index('ID')['Cohort']
+    _multi_co  = weekly.groupby('ID')['Cohort'].nunique()
+    _multi_ids = _multi_co[_multi_co > 1].index.tolist()
+    print("\n  [Subject-cohort assignment]")
+    for _co in cohort_levels:
+        _ids_in = sorted(_id_cohort[_id_cohort == _co].index.tolist())
+        print(f"    {_co} (n={len(_ids_in)}): {', '.join(_ids_in)}")
+    if _multi_ids:
+        print(f"  [WARNING] Animal(s) appear in >1 cohort: {_multi_ids}")
+    else:
+        print("  [OK] All animals belong to exactly one cohort.")
+
+    # 2. Balance: animals per cohort per week
+    _n_cw = (
+        weekly.groupby(['Cohort', 'Week'])['ID'].nunique()
+        .unstack('Week').reindex(columns=week_levels).fillna(0).astype(int)
+    )
+    _wk_hdr = "".join(f"  Wk{w:>2}" for w in week_levels)
+    _co_w   = max(len(str(c)) for c in cohort_levels) + 2
+    print(f"\n  [Animals per cohort per week]")
+    print(f"    {'Cohort':<{_co_w}}{_wk_hdr}")
+    for _co in cohort_levels:
+        _row = f"    {str(_co):<{_co_w}}"
+        for _wk in week_levels:
+            _n = int(_n_cw.loc[_co, _wk]) if (_co in _n_cw.index and _wk in _n_cw.columns) else 0
+            _row += f"  {_n:>4}"
+        print(_row)
+    _expected_n = weekly.groupby('Cohort')['ID'].nunique()
+    _unbalanced = [
+        f"{_co} Wk{_wk} (n={int(_n_cw.loc[_co, _wk])} vs expected {_expected_n.get(_co, '?')})"
+        for _co in cohort_levels for _wk in week_levels
+        if (_co in _n_cw.index and _wk in _n_cw.columns and
+            int(_n_cw.loc[_co, _wk]) != _expected_n.get(_co, 0))
+    ]
+    if _unbalanced:
+        print("  [WARNING] Missing observations: " + "; ".join(_unbalanced))
+    else:
+        print("  [OK] Design is balanced — all animals observed in all weeks.")
+
+    # 3. Zero-inflation per metric (% of non-NaN values that are exactly 0.0)
+    print(f"\n  [Zero-inflation: % of values == 0.0 per metric per cohort]")
+    _ck_label = {ck: lbl for _, _, lbl, ck in BEHAVIORS}
+    for _ck in col_keys:
+        if _ck not in weekly.columns:
+            continue
+        _vals_all = weekly[['Cohort', _ck]].dropna(subset=[_ck])
+        _n_tot = len(_vals_all); _n_z = (_vals_all[_ck] == 0.0).sum()
+        _pz_all = 100 * _n_z / _n_tot if _n_tot > 0 else float('nan')
+        print(f"    {_ck_label.get(_ck, _ck):<32}: overall {_n_z}/{_n_tot} = {_pz_all:.1f}% zeros")
+        for _co in cohort_levels:
+            _cv = _vals_all.loc[_vals_all['Cohort'] == _co, _ck]
+            _pz = 100 * (_cv == 0.0).sum() / len(_cv) if len(_cv) > 0 else float('nan')
+            _flag = "  ← high (>80%)" if _pz > 80 else ""
+            print(f"      {_co:<30}: {(_cv == 0.0).sum():>3}/{len(_cv):>3} = {_pz:>5.1f}%{_flag}")
+        if _pz_all > 80:
+            print(f"    [WARNING] {_ck}: >80% zeros overall — nparLD will still run but "
+                  f"RTEs will cluster near 0.5 and power will be low.")
+
+    # 4. Per-metric pivot table (Cohort/Animal × Week) — exact values going into R
+    _col_w = 8
+    for _ck, (_, _, _metric_lbl, _) in zip(col_keys, BEHAVIORS):
+        if _ck not in weekly.columns:
+            continue
+        _piv = (
+            weekly.pivot_table(index=['Cohort', 'ID'], columns='Week',
+                               values=_ck, aggfunc='first')
+            .reindex(columns=week_levels)
+        )
+        _id_w  = max(len(str(idx[1])) for idx in _piv.index) + 2
+        _co_w2 = max(len(str(idx[0])) for idx in _piv.index) + 2
+        _sep   = "  " + "─" * (_co_w2 + _id_w + (_col_w + 2) * len(week_levels) + 4)
+        print(f"\n  [{_metric_lbl} — values fed to R (%/week)]")
+        print("  " + f"{'Cohort':<{_co_w2}}  {'Animal':<{_id_w}}" +
+              "".join(f"  {'Wk'+str(w):>{_col_w}}" for w in week_levels))
+        print(_sep)
+        _prev_co = None
+        for (_co, _aid) in _piv.index:
+            if _co != _prev_co and _prev_co is not None:
+                print("  " + "·" * (_co_w2 + _id_w + (_col_w + 2) * len(week_levels) + 4))
+            _row = f"  {str(_co):<{_co_w2}}  {str(_aid):<{_id_w}}"
+            for _wk in week_levels:
+                _v = _piv.loc[(_co, _aid), _wk]
+                _row += f"  {_v:>{_col_w}.1f}" if pd.notna(_v) else f"  {'---':>{_col_w}}"
+            print(_row)
+            _prev_co = _co
+        print(_sep)
+
+    # 5. Days-per-week going into each animal's proportion
+    _dpiv = (
+        weekly.pivot_table(index=['Cohort', 'ID'], columns='Week',
+                           values='_n_days', aggfunc='first')
+        .reindex(columns=week_levels)
+    )
+    _id_w2  = max(len(str(idx[1])) for idx in _dpiv.index) + 2
+    _co_w3  = max(len(str(idx[0])) for idx in _dpiv.index) + 2
+    _col_wd = 6
+    _sep2   = "  " + "─" * (_co_w3 + _id_w2 + (_col_wd + 2) * len(week_levels) + 4)
+    print(f"\n  [Days per week going into % averages]")
+    print("  " + f"{'Cohort':<{_co_w3}}  {'Animal':<{_id_w2}}" +
+          "".join(f"  {'Wk'+str(w):>{_col_wd}}" for w in week_levels))
+    print(_sep2)
+    _prev_co2 = None
+    _expected_days = 7
+    _flagged = []
+    for (_co, _aid) in _dpiv.index:
+        if _co != _prev_co2 and _prev_co2 is not None:
+            print("  " + "·" * (_co_w3 + _id_w2 + (_col_wd + 2) * len(week_levels) + 4))
+        _row = f"  {str(_co):<{_co_w3}}  {str(_aid):<{_id_w2}}"
+        for _wk in week_levels:
+            _d = _dpiv.loc[(_co, _aid), _wk]
+            if pd.notna(_d):
+                _flag = "*" if int(_d) != _expected_days else " "
+                _row += f"  {int(_d):>{_col_wd-1}}{_flag}"
+                if int(_d) != _expected_days:
+                    _flagged.append(f"{_co} / {_aid} Wk{_wk}: {int(_d)} days")
+            else:
+                _row += f"  {'---':>{_col_wd}}"
+        print(_row)
+        _prev_co2 = _co
+    print(_sep2)
+    if _flagged:
+        print("  [WARNING] Weeks with != 7 days (marked *):")
+        for _f in _flagged:
+            print(f"    {_f}")
+    else:
+        print("  [OK] All animal-weeks have exactly 7 days.")
+    print()
 
     # ── Write temp CSV ───────────────────────────────────────────────────
     col_keys = [ck for _, _, _, ck in BEHAVIORS]
