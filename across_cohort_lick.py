@@ -5301,6 +5301,14 @@ def test_nparLD_lick_analysis(
         adf = combined_df[['ID', 'Week', 'CA_group', measure]].dropna().copy()
         adf['Week'] = adf['Week'].astype(int)
 
+        # nparLD requires exactly 1 observation per (subject, time) cell.
+        # Warn and drop extra rows for any duplicated (ID, Week) pairs.
+        _n_dups = adf.duplicated(subset=['ID', 'Week']).sum()
+        if _n_dups > 0:
+            print(f"  [WARNING] Found {_n_dups} duplicate (ID, Week) rows for '{measure}' — "
+                  f"keeping first occurrence per cell (nparLD requires balanced unique cells).")
+            adf = adf.drop_duplicates(subset=['ID', 'Week'], keep='first').copy()
+
         # nparLD requires balanced data: keep only subjects with all time points
         _week_set = set(adf['Week'].unique())
         _complete_ids = [
@@ -5315,6 +5323,50 @@ def test_nparLD_lick_analysis(
         if adf['ID'].nunique() < 3:
             print(f"  [WARNING] < 3 subjects with complete data for '{measure}' — skipping.")
             continue
+
+        # ── nparLD input validation table ────────────────────────────────────
+        # Print the (animal, cohort, week, value) grid so you can verify that
+        # subjects and time points are correctly aligned before data enters R.
+        _val_weeks   = sorted(adf['Week'].unique())
+        _val_groups  = sorted(adf['CA_group'].unique())
+        _col_w = 9   # width per week column
+        print(f"\n{'─'*72}")
+        print(f"nparLD INPUT VALIDATION — {measure_label}  ({measure})")
+        print(f"  Animals : {adf['ID'].nunique()}   Weeks : {[int(w) for w in _val_weeks]}   "
+              f"Groups : {_val_groups}")
+        print(f"{'─'*72}")
+        # Header row: Animal | Group | Week0 | Week1 | ...
+        _hdr = f"  {'Animal':<12}  {'Group':<14}" + "".join(
+            f"  {'Wk'+str(int(w)):>{_col_w}}" for w in _val_weeks
+        )
+        print(_hdr)
+        print(f"  {'─'*12}  {'─'*14}" + ("  " + "─"*_col_w) * len(_val_weeks))
+        _adf_pivot = (
+            adf.set_index(['ID', 'CA_group', 'Week'])[measure]
+               .unstack('Week')
+               .reset_index()
+               .sort_values(['CA_group', 'ID'])
+        )
+        for _, _vrow in _adf_pivot.iterrows():
+            _vals_str = "".join(
+                f"  {_vrow.get(w, np.nan):>{_col_w}.1f}"
+                if not pd.isna(_vrow.get(w, np.nan)) else f"  {'NaN':>{_col_w}}"
+                for w in _val_weeks
+            )
+            print(f"  {str(_vrow['ID']):<12}  {str(_vrow['CA_group']):<14}{_vals_str}")
+        print(f"{'─'*72}")
+        # Cross-check: flag any animal appearing in multiple groups
+        _id_groups = adf.groupby('ID')['CA_group'].nunique()
+        _multi_grp = _id_groups[_id_groups > 1]
+        if not _multi_grp.empty:
+            print(f"  [WARNING] These animals appear in >1 CA_group — check cohort labelling:")
+            for _aid in _multi_grp.index:
+                _gs = adf[adf['ID'] == _aid]['CA_group'].unique().tolist()
+                print(f"    {_aid}: {_gs}")
+        else:
+            print(f"  [OK] Each animal appears in exactly one group.")
+        print(f"{'─'*72}\n")
+        # ── end validation ───────────────────────────────────────────────────
 
         n_subj = adf['ID'].nunique()
         n_obs  = len(adf)
