@@ -2173,7 +2173,7 @@ def plot_aberrant_behaviors_lines(
 		('Lethargy?',          True,  'Lethargy', '#6DBF67'),
 	]
 
-	fig, axes = plt.subplots(1, 3, figsize=(15, 3), sharey=True)
+	fig, axes = plt.subplots(1, 3, sharey=True)
 	fig.suptitle(
 		'Aberrant Behavioral Observations — ' + _MLB.get('plot_suffix', ''),
 		weight='bold', y=0.98
@@ -2196,7 +2196,7 @@ def plot_aberrant_behaviors_lines(
 
 		ax.plot(x, pcts, color=color, marker='o',
 		        markerfacecolor='white',
-		        markeredgecolor=color, markeredgewidth=2)
+		        markeredgecolor=color)
 		ax.set_xticks(x)
 		ax.set_xticklabels(x_labels_display)
 		ax.set_xlabel(x_label, weight='bold')
@@ -3270,6 +3270,7 @@ def generate_descriptive_stats_report(
 	df: pd.DataFrame,
 	*,
 	save_report: bool = True,
+	verbose: bool = True,
 ) -> dict:
 	"""
 	Generate per-week (or per-CA%) descriptive statistics for:
@@ -3294,9 +3295,14 @@ def generate_descriptive_stats_report(
 		cdf = _add_day_number_column(cdf)
 		cdf = _add_week_column(cdf)
 	elif EXPERIMENT_MODE == 'ramp':
-		# Exclude the baseline day (Day 1) from all CA% averages
+		# 2-week ramp has only 3 days per CA% level — include Day 1 so no data is lost.
+		# Standard ramp has 7 days per CA% level — exclude Day 1 (transition day).
+		# Auto-detect via the loaded CSV filename.
 		cdf = _add_day_number_column(cdf)
-		cdf = cdf[cdf["Day"] > 1]
+		_ramp_path_str = str(_MASTER_PATH).lower() if _MASTER_PATH is not None else ''
+		_is_2wk_ramp = any(kw in _ramp_path_str for kw in ('2wk', '2_wk', '2_week', '2week'))
+		if not _is_2wk_ramp:
+			cdf = cdf[cdf["Day"] > 1]
 
 	if wc not in cdf.columns:
 		print(f"  Column '{wc}' not found in data.")
@@ -3308,7 +3314,7 @@ def generate_descriptive_stats_report(
 		if (EXPERIMENT_MODE != 'nonramp' or w > 0)
 	)
 
-	# ── Helper: 95% CI of the mean (t-distribution) ───────────────────────────
+	# ── Helper: 95% CI of the mean (t-distribution) — use for continuous DVs ─
 	def _ci95(arr):
 		n = len(arr)
 		if n < 2:
@@ -3317,6 +3323,22 @@ def generate_descriptive_stats_report(
 		margin = float(_t_dist.ppf(0.975, df=n - 1)) * se
 		mean = float(np.mean(arr))
 		return mean - margin, mean + margin
+
+	# ── Helper: bootstrap 95% CI of the mean — use for bounded proportion data
+	# Non-parametric; makes no normality assumption; respects skew near 0/1.
+	def _bootstrap_ci95(arr, n_boot: int = 5000, seed: int = 42):
+		n = len(arr)
+		if n < 2:
+			return float('nan'), float('nan')
+		rng = np.random.default_rng(seed)
+		boot_means = np.array([
+			np.mean(rng.choice(arr, size=n, replace=True))
+			for _ in range(n_boot)
+		])
+		lo = float(np.percentile(boot_means, 2.5))
+		hi = float(np.percentile(boot_means, 97.5))
+		# Clamp to valid proportion range [0, 1]
+		return max(0.0, lo), min(1.0, hi)
 
 	# ── Helper: Wilson score CI for a proportion ──────────────────────────────
 	def _wilson_ci(k, n, z=1.96):
@@ -3339,12 +3361,18 @@ def generate_descriptive_stats_report(
 		      f"{'SD':>8}  {'Var':>10}  {'95% CI':>22}")
 		print(f"  {'-'*76}")
 		for wk in weeks:
-			if "ID" in cdf.columns:
-				grp = cdf.loc[cdf[wc] == wk].groupby("ID")[col].mean().dropna().values
-			else:
-				grp = cdf.loc[cdf[wc] == wk, col].dropna().values
-			n = len(grp)
 			lbl = _group_label(wk)
+			_wk_rows = cdf.loc[cdf[wc] == wk]
+			if "ID" in cdf.columns:
+				_per_id_mean = _wk_rows.groupby("ID")[col].mean()
+				_per_id_ndays = _wk_rows.groupby("ID")[col].count()
+				_per_id_valid = _per_id_mean.dropna()
+				grp = _per_id_valid.values
+			else:
+				grp = _wk_rows[col].dropna().values
+				_per_id_valid = None
+				_per_id_ndays = None
+			n = len(grp)
 			if n == 0:
 				results_cont[col][wk] = {'n': 0}
 				print(f"  {lbl:>8}  {n:>4}  {'\u2014':>8}  {'\u2014':>8}  {'\u2014':>8}  {'\u2014':>10}  {'\u2014':>22}")
@@ -3361,9 +3389,21 @@ def generate_descriptive_stats_report(
 			}
 			print(f"  {lbl:>8}  {n:>4}  {mean:>8.3f}  {median:>8.3f}  "
 			      f"{sd:>8.3f}  {var:>10.3f}  {ci_str:>22}")
-		# Collapsed row
+			if verbose:
+				print(f"    {'--- per-animal means ---'}")
+				if _per_id_valid is not None:
+					for _aid, _aval in _per_id_valid.items():
+						_nd = int(_per_id_ndays.get(_aid, 0))
+						print(f"      {str(_aid):<14} {_aval:>8.4f}  (n_days={_nd})")
+				else:
+					print(f"      raw values: {[round(v, 4) for v in grp.tolist()]}")
+				_se = sd / np.sqrt(n) if n >= 2 else float('nan')
+				_t  = float(_t_dist.ppf(0.975, df=n - 1)) if n >= 2 else float('nan')
+				_mg = _t * _se if n >= 2 else float('nan')
+				print(f"    CI: SE={_se:.4f}  t(df={n-1})={_t:.4f}  margin={_mg:.4f}")
+		# Collapsed row — one mean per animal (across all weeks)
 		if "ID" in cdf.columns:
-			_all = cdf.loc[cdf[wc].isin(weeks)].groupby(["ID", wc])[col].mean().dropna().values
+			_all = cdf.loc[cdf[wc].isin(weeks)].groupby("ID")[col].mean().dropna().values
 		else:
 			_all = cdf.loc[cdf[wc].isin(weeks), col].dropna().values
 		_an = len(_all)
@@ -3381,6 +3421,16 @@ def generate_descriptive_stats_report(
 			print(f"  {'-'*76}")
 			print(f"  {'All':>8}  {_an:>4}  {_am:>8.3f}  {_amed:>8.3f}  "
 			      f"{_asd:>8.3f}  {_avar:>10.3f}  {_aci_str:>22}")
+			if verbose:
+				print(f"    --- per-animal means (averaged across all {fl} levels) ---")
+				if "ID" in cdf.columns:
+					_all_series = cdf.loc[cdf[wc].isin(weeks)].groupby("ID")[col].mean().dropna()
+					for _aid, _aval in _all_series.items():
+						print(f"      {str(_aid):<14} {_aval:>8.4f}")
+				_se_a = _asd / np.sqrt(_an) if _an >= 2 else float('nan')
+				_t_a  = float(_t_dist.ppf(0.975, df=_an - 1)) if _an >= 2 else float('nan')
+				_mg_a = _t_a * _se_a if _an >= 2 else float('nan')
+				print(f"    CI: SE={_se_a:.4f}  t(df={_an-1})={_t_a:.4f}  margin={_mg_a:.4f}")
 
 	# ── Aberrant behaviors ────────────────────────────────────────────────────
 	_beh_candidates = ['Nest Made?', 'Lethargy?', 'Anxious Behaviors?', 'CA Spot Digging?']
@@ -3390,16 +3440,25 @@ def generate_descriptive_stats_report(
 	for col in beh_cols:
 		results_beh[col] = {}
 		print(f"\n  {col} (mean % of days per animal, per {fl}):")
+		print(f"  Note: 95% CI = bootstrap percentile (n=5000) \u2014 t-CI is invalid near 0%/100%")
 		print(f"  {'Level':>8}  {'n':>4}  {'n≥once':>7}  {'Mean%':>7}  "
-		      f"{'95% CI (mean)':>22}  {'Median%':>8}  {'SD':>8}  {'Var':>10}")
+		      f"{'95% CI (boot)':>22}  {'Median%':>8}  {'SD':>8}  {'Var':>10}")
 		print(f"  {'-'*85}")
 		for wk in weeks:
-			if "ID" in cdf.columns:
-				grp = cdf.loc[cdf[wc] == wk].groupby("ID")[col].mean().dropna().values
-			else:
-				grp = cdf.loc[cdf[wc] == wk, col].dropna().astype(float).values
-			n = len(grp)
 			lbl = _group_label(wk)
+			_wk_rows_b = cdf.loc[cdf[wc] == wk]
+			if "ID" in cdf.columns:
+				_per_id_prop  = _wk_rows_b.groupby("ID")[col].mean()
+				_per_id_ndaysb = _wk_rows_b.groupby("ID")[col].count()
+				_per_id_ntrue  = _wk_rows_b.groupby("ID")[col].sum()
+				_per_id_validb = _per_id_prop.dropna()
+				grp = _per_id_validb.values
+			else:
+				grp = _wk_rows_b[col].dropna().astype(float).values
+				_per_id_validb = None
+				_per_id_ndaysb = None
+				_per_id_ntrue  = None
+			n = len(grp)
 			if n == 0:
 				results_beh[col][wk] = {'n': 0}
 				print(f"  {lbl:>8}  {n:>4}  {'\u2014':>7}  {'\u2014':>7}  {'\u2014':>22}  {'\u2014':>8}  {'\u2014':>8}  {'\u2014':>10}")
@@ -3407,7 +3466,7 @@ def generate_descriptive_stats_report(
 			n_true   = int((grp > 0).sum())
 			pct      = 100.0 * float(np.mean(grp))
 			median_p = 100.0 * float(np.median(grp))
-			ci_lo_p, ci_hi_p = _ci95(grp)
+			ci_lo_p, ci_hi_p = _bootstrap_ci95(grp)
 			ci_str   = (f"[{100*ci_lo_p:.1f}%, {100*ci_hi_p:.1f}%]"
 			            if not np.isnan(ci_lo_p) else "N/A")
 			sd       = float(np.std(grp, ddof=1))  if n >= 2 else float('nan')
@@ -3419,9 +3478,19 @@ def generate_descriptive_stats_report(
 			}
 			print(f"  {lbl:>8}  {n:>4}  {n_true:>7}  {pct:>6.1f}%  "
 			      f"{ci_str:>22}  {median_p:>7.1f}%  {sd:>8.3f}  {var:>10.3f}")
-		# Collapsed row
+			if verbose:
+				print(f"    {'--- per-animal proportions ---'}")
+				if _per_id_validb is not None:
+					for _aid, _aprop in _per_id_validb.items():
+						_nd  = int(_per_id_ndaysb.get(_aid, 0))
+						_nt  = int(_per_id_ntrue.get(_aid, 0))
+						print(f"      {str(_aid):<14} {100*_aprop:>6.1f}%  ({_nt}/{_nd} days True)")
+				else:
+					print(f"      raw proportions: {[round(v, 4) for v in grp.tolist()]}")
+				print(f"    CI: bootstrap percentile (n_boot=5000, seed=42), clamped to [0%, 100%]")
+		# Collapsed row — one mean per animal (across all weeks)
 		if "ID" in cdf.columns:
-			_all_b = cdf.loc[cdf[wc].isin(weeks)].groupby(["ID", wc])[col].mean().dropna().values
+			_all_b = cdf.loc[cdf[wc].isin(weeks)].groupby("ID")[col].mean().dropna().values
 		else:
 			_all_b = cdf.loc[cdf[wc].isin(weeks), col].dropna().astype(float).values
 		_abn = len(_all_b)
@@ -3429,7 +3498,7 @@ def generate_descriptive_stats_report(
 			_ab_ntrue  = int((_all_b > 0).sum())
 			_ab_pct    = 100.0 * float(np.mean(_all_b))
 			_ab_med_p  = 100.0 * float(np.median(_all_b))
-			_ab_ci_lo, _ab_ci_hi = _ci95(_all_b)
+			_ab_ci_lo, _ab_ci_hi = _bootstrap_ci95(_all_b)
 			_ab_ci_str = (f"[{100*_ab_ci_lo:.1f}%, {100*_ab_ci_hi:.1f}%]"
 			              if not np.isnan(_ab_ci_lo) else "N/A")
 			_ab_sd  = float(np.std(_all_b, ddof=1)) if _abn >= 2 else float('nan')
@@ -3442,6 +3511,13 @@ def generate_descriptive_stats_report(
 			print(f"  {'-'*85}")
 			print(f"  {'All':>8}  {_abn:>4}  {_ab_ntrue:>7}  {_ab_pct:>6.1f}%  "
 			      f"{_ab_ci_str:>22}  {_ab_med_p:>7.1f}%  {_ab_sd:>8.3f}  {_ab_var:>10.3f}")
+			if verbose:
+				print(f"    --- per-animal proportions (averaged across all {fl} levels) ---")
+				if "ID" in cdf.columns:
+					_all_b_series = cdf.loc[cdf[wc].isin(weeks)].groupby("ID")[col].mean().dropna()
+					for _aid, _aprop in _all_b_series.items():
+						print(f"      {str(_aid):<14} {100*_aprop:>6.1f}%")
+				print(f"    CI: bootstrap percentile (n_boot=5000, seed=42), clamped to [0%, 100%]")
 
 	# ── Prevalence: proportion of animals showing behavior ≥ once ────────────
 	print(f"\n{'─'*90}")
@@ -3473,7 +3549,7 @@ def generate_descriptive_stats_report(
 			print(f"  {lbl:>8}  {n:>4}  {n_true:>7}  {prev:>6.1f}%  {ci_str:>22}")
 		# Collapsed All row
 		if "ID" in cdf.columns:
-			_all_p = cdf.loc[cdf[wc].isin(weeks)].groupby(["ID", wc])[col].mean().dropna().values
+			_all_p = cdf.loc[cdf[wc].isin(weeks)].groupby("ID")[col].mean().dropna().values
 		else:
 			_all_p = cdf.loc[cdf[wc].isin(weeks), col].dropna().astype(float).values
 		_apn = len(_all_p)
@@ -3557,14 +3633,34 @@ def generate_descriptive_stats_report(
 			f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
 			f"Within-subjects factor: {fl}  |  Levels: {[_group_label(w) for w in weeks]}",
 			"="*80, "",
+			"CONFIDENCE INTERVAL METHODS",
+			"-"*60,
+			"  Continuous DVs (Total Change, Daily Change):",
+			"    95% CI = t-distribution  (x\u0305 \u00b1 t\u2080.\u2097\u2085 * SD/\u221an)",
+			"    Assumes approximate normality of animal-level means.",
+			"",
+			"  Behavioral mean% per animal (Nest Made?, Lethargy?, etc.):",
+			"    95% CI = bootstrap percentile  (n_boot=5000, seed=42)",
+			"    Non-parametric; no normality assumption; clamped to [0%, 100%].",
+			"    Used because t-CI produces invalid bounds near 0% or 100%.",
+			"",
+			"  Behavioral prevalence (proportion of animals showing \u22651 event):",
+			"    95% CI = Wilson score  (binomial proportion CI)",
+			"    Appropriate for k/n counts; valid at extreme proportions.",
+			"",
+			"  Starting weight by sex:",
+			"    95% CI = t-distribution  (x\u0305 \u00b1 t\u2080.\u2097\u2085 * SD/\u221an)",
+			"-"*60,
+			"",
 		]
 		for col, col_data in results_cont.items():
 			lines += [
 				"\u2500"*60,
 				f"  {col.upper()}",
 				"\u2500"*60,
+				"  Note: 95% CI = t-distribution (x\u0305 \u00b1 t\u2080.\u2097\u2085 * SD/\u221an)",
 				f"  {'Level':>8}  {'n':>4}  {'Mean':>8}  {'Median':>8}  "
-				f"{'SD':>8}  {'Var':>10}  {'95% CI':>22}",
+				f"{'SD':>8}  {'Var':>10}  {'95% CI (t)':>22}",
 				f"  {'-'*76}",
 			]
 			for wk, s in col_data.items():
@@ -3595,8 +3691,9 @@ def generate_descriptive_stats_report(
 				"\u2500"*60,
 				f"  {col.upper()}",
 				"\u2500"*60,
-				f"  {'Level':>8}  {'n':>4}  {'n≥once':>7}  {'Mean%':>7}  "
-				f"{'95% CI (mean)':>22}  {'Median%':>8}  {'SD':>8}  {'Var':>10}",
+				"  Note: 95% CI = bootstrap percentile (n_boot=5000, seed=42), clamped to [0%, 100%]",
+				f"  {'Level':>8}  {'n':>4}  {'n\u2265once':>7}  {'Mean%':>7}  "
+				f"{'95% CI (boot)':>22}  {'Median%':>8}  {'SD':>8}  {'Var':>10}",
 				f"  {'-'*85}",
 			]
 			for wk, s in col_data.items():
@@ -3667,6 +3764,7 @@ def generate_descriptive_stats_report(
 				"STARTING WEIGHT BY SEX",
 				"="*80,
 				"Note: starting weight = first recorded weight per animal (earliest date)",
+				"Note: 95% CI = t-distribution (x\u0305 \u00b1 t\u2080.\u2097\u2085 * SD/\u221an)",
 				"",
 				"Individual starting weights:",
 				"-"*44,
