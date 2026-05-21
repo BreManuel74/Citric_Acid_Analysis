@@ -138,7 +138,7 @@ try:
         "figure.titlesize": 10,
         "lines.linewidth": 0.9,
         "lines.markersize": 3,
-        "figure.figsize": (4.5, 2.5),
+        "figure.figsize": (4, 2.5),
     })
 except ImportError:
     HAS_MATPLOTLIB = False
@@ -15013,7 +15013,7 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
       2. Daily Change grouped by cohort (mean ± SEM)
       3. Export Daily Change to CSV for external plotting
       4. Day-1 / transition-day bar chart -- 4 cohorts, canonical colours,
-         scatter points, mean ± SEM, all-pairs MWU (Holm-Bonferroni)
+         scatter points, mean ± SEM, Kruskal-Wallis + pairwise Wilcoxon (R/Holm)
       5. Run all (1-4)
     """
     from datetime import datetime
@@ -15071,7 +15071,7 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("  1. Daily Change per-animal plots  -- individual lines per cohort")
     print("  2. Daily Change by cohort         -- mean \u00b1 SEM per cohort across days")
     print("  3. Export Daily Change CSV        -- long-format CSV for all 4 cohorts")
-    print("  4. Day-1/transition bar chart     -- 4 cohorts, scatter + MWU (Holm-Bonferroni)")
+    print("  4. Day-1/transition bar chart     -- 4 cohorts, scatter + KW + pairwise Wilcoxon (R, Holm)")
     print("  5. Run all (1-4)")
     print()
 
@@ -15282,51 +15282,9 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     )
 
                 # -------------------------------------------------------- #
-                # All-pairs Mann-Whitney U + Holm-Bonferroni                #
+                # Kruskal-Wallis omnibus (R) + pairwise Wilcoxon post-hoc  #
+                # Falls back to pairwise MWU + Holm (Python) if rpy2 N/A   #
                 # -------------------------------------------------------- #
-                pairs = [
-                    (cohort_order[i], cohort_order[j])
-                    for i in range(len(cohort_order))
-                    for j in range(i + 1, len(cohort_order))
-                ]
-                pair_results = []
-                _rng_ci = _np.random.default_rng(0)
-                for a, b in pairs:
-                    va, vb = bar_vals.get(a, _np.array([])), bar_vals.get(b, _np.array([]))
-                    pr = {'a': a, 'b': b, 'na': len(va), 'nb': len(vb),
-                          'U': float('nan'), 'p_raw': float('nan'), 'p_adj': float('nan'),
-                          'hl_est': float('nan'), 'hl_ci_lo': float('nan'), 'hl_ci_hi': float('nan')}
-                    if len(va) >= 2 and len(vb) >= 2:
-                        U, p = _stats.mannwhitneyu(va, vb, alternative='two-sided')
-                        pr['U'] = float(U)
-                        pr['p_raw'] = float(p)
-                        # Hodges-Lehmann estimator = median of all pairwise differences
-                        _diffs = (va[:, _np.newaxis] - vb[_np.newaxis, :]).ravel()
-                        pr['hl_est'] = float(_np.median(_diffs))
-                        # 95% bootstrap CI of the HL estimator (4999 resamples)
-                        _boot_hl = _np.empty(4999)
-                        for _bi in range(4999):
-                            _ba = _rng_ci.choice(va, size=len(va), replace=True)
-                            _bb = _rng_ci.choice(vb, size=len(vb), replace=True)
-                            _boot_hl[_bi] = float(_np.median(
-                                (_ba[:, _np.newaxis] - _bb[_np.newaxis, :]).ravel()))
-                        pr['hl_ci_lo'] = float(_np.percentile(_boot_hl, 2.5))
-                        pr['hl_ci_hi'] = float(_np.percentile(_boot_hl, 97.5))
-                    pair_results.append(pr)
-
-                # Holm-Bonferroni step-down correction
-                valid_pr = [r for r in pair_results if not _np.isnan(r['p_raw'])]
-                k_pairs = len(valid_pr)
-                if k_pairs > 0:
-                    valid_sorted = sorted(valid_pr, key=lambda x: x['p_raw'])
-                    for rank, pr in enumerate(valid_sorted):
-                        pr['p_adj'] = min(pr['p_raw'] * (k_pairs - rank), 1.0)
-                    for i in range(1, len(valid_sorted)):
-                        valid_sorted[i]['p_adj'] = max(
-                            valid_sorted[i]['p_adj'],
-                            valid_sorted[i - 1]['p_adj'],
-                        )
-
                 def _fmt_p(p):
                     if _np.isnan(p): return 'N/A'
                     if p < 0.001:    return '< 0.001'
@@ -15338,6 +15296,135 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     if p < 0.01:  return '**'
                     if p < 0.05:  return '*'
                     return 'ns'
+
+                _r_groups = []
+                _r_values = []
+                for _lbl in cohort_order:
+                    for _v in bar_vals.get(_lbl, _np.array([])):
+                        _r_groups.append(_lbl)
+                        _r_values.append(float(_v))
+
+                kw_H  = float('nan')
+                kw_df = 0
+                kw_p  = float('nan')
+                pw_table = []    # list of {a, b, na, nb, p_adj}
+                _used_r_kw = False
+
+                if HAS_RPY2 and len(_r_values) >= 4:
+                    try:
+                        import rpy2.robjects as _ro
+                        _ensure_r_path()
+                        _ro.r.assign('kw_y', _ro.FloatVector(_r_values))
+                        _ro.r.assign('kw_g', _ro.StrVector(_r_groups))
+                        _ro.r('kw_g <- as.factor(kw_g)')
+                        _kw_out = _ro.r('kruskal.test(kw_y, kw_g)')
+                        kw_H  = float(_kw_out.rx2('statistic')[0])
+                        kw_df = int(_kw_out.rx2('parameter')[0])
+                        kw_p  = float(_kw_out.rx2('p.value')[0])
+                        _pw_out = _ro.r(
+                            'pairwise.wilcox.test(kw_y, kw_g, '
+                            'p.adjust.method="holm", exact=FALSE)'
+                        )
+                        _p_mat   = _np.array(_pw_out.rx2('p.value'))
+                        _row_nms = list(_pw_out.rx2('p.value').rownames)
+                        _col_nms = list(_pw_out.rx2('p.value').colnames)
+                        for _ri, _rn in enumerate(_row_nms):
+                            for _ci, _cn in enumerate(_col_nms):
+                                _pp = _p_mat[_ri, _ci]
+                                if not _np.isnan(_pp):
+                                    pw_table.append({
+                                        'a': _cn, 'b': _rn,
+                                        'na': len(bar_vals.get(_cn, _np.array([]))),
+                                        'nb': len(bar_vals.get(_rn, _np.array([]))),
+                                        'p_adj': float(_pp),
+                                    })
+                        _used_r_kw = True
+                        print(f"  [R] Kruskal-Wallis: H({kw_df}) = {kw_H:.4f}, "
+                              f"p = {_fmt_p(kw_p)}  {_sig(kw_p)}")
+                    except Exception as _rpy_err:
+                        print(f"  [WARNING] R Kruskal-Wallis failed ({_rpy_err}); "
+                              f"falling back to Python MWU + Holm-Bonferroni")
+
+                if not _used_r_kw:
+                    # Fallback: pairwise MWU + Holm-Bonferroni (Python)
+                    _pairs_fb = [
+                        (cohort_order[i], cohort_order[j])
+                        for i in range(len(cohort_order))
+                        for j in range(i + 1, len(cohort_order))
+                    ]
+                    _pair_raw = []
+                    for _a, _b in _pairs_fb:
+                        _va = bar_vals.get(_a, _np.array([]))
+                        _vb = bar_vals.get(_b, _np.array([]))
+                        _pr = {'a': _a, 'b': _b,
+                               'na': len(_va), 'nb': len(_vb),
+                               'p_raw': float('nan')}
+                        if len(_va) >= 2 and len(_vb) >= 2:
+                            _, _p = _stats.mannwhitneyu(
+                                _va, _vb, alternative='two-sided')
+                            _pr['p_raw'] = float(_p)
+                        _pair_raw.append(_pr)
+                    _valid_fb = [r for r in _pair_raw if not _np.isnan(r['p_raw'])]
+                    _valid_fb_s = sorted(_valid_fb, key=lambda x: x['p_raw'])
+                    _k_fb = len(_valid_fb_s)
+                    for _rank, _r in enumerate(_valid_fb_s):
+                        _r['p_adj'] = min(_r['p_raw'] * (_k_fb - _rank), 1.0)
+                    for _i in range(1, len(_valid_fb_s)):
+                        _valid_fb_s[_i]['p_adj'] = max(
+                            _valid_fb_s[_i]['p_adj'],
+                            _valid_fb_s[_i - 1]['p_adj'],
+                        )
+                    for _r in _pair_raw:
+                        if _np.isnan(_r['p_raw']):
+                            _r['p_adj'] = float('nan')
+                    pw_table = [
+                        {'a': _r['a'], 'b': _r['b'],
+                         'na': _r['na'], 'nb': _r['nb'],
+                         'p_adj': _r.get('p_adj', float('nan'))}
+                        for _r in _pair_raw
+                    ]
+
+                # -------------------------------------------------------- #
+                # Augment pw_table: U, p_raw, HL estimate, bootstrap 95% CI#
+                # Always computed via scipy / numpy for consistency.        #
+                # p_adj stays as-is from R (Holm) or Python (Holm) above.  #
+                # -------------------------------------------------------- #
+                def _pair_detail(va, vb, n_boot=4999, seed=0):
+                    """Return (U, p_raw, hl_est, ci_lo, ci_hi) for one pair."""
+                    if len(va) < 2 or len(vb) < 2:
+                        _nan = float('nan')
+                        return _nan, _nan, _nan, _nan, _nan
+                    _U, _pr = _stats.mannwhitneyu(
+                        _np.asarray(va, dtype=float),
+                        _np.asarray(vb, dtype=float),
+                        alternative='two-sided',
+                    )
+                    _diffs = _np.subtract.outer(
+                        _np.asarray(va, dtype=float),
+                        _np.asarray(vb, dtype=float),
+                    ).ravel()
+                    _hl = float(_np.median(_diffs))
+                    _rng2 = _np.random.default_rng(seed)
+                    _boots = []
+                    for _ in range(n_boot):
+                        _ab = _rng2.choice(va, size=len(va), replace=True)
+                        _bb = _rng2.choice(vb, size=len(vb), replace=True)
+                        _boots.append(float(_np.median(
+                            _np.subtract.outer(
+                                _np.asarray(_ab, dtype=float),
+                                _np.asarray(_bb, dtype=float),
+                            ).ravel()
+                        )))
+                    return (float(_U), float(_pr), _hl,
+                            float(_np.percentile(_boots, 2.5)),
+                            float(_np.percentile(_boots, 97.5)))
+
+                for _pw in pw_table:
+                    _va2 = bar_vals.get(_pw['a'], _np.array([]))
+                    _vb2 = bar_vals.get(_pw['b'], _np.array([]))
+                    (_pw['U'], _pw['p_raw'],
+                     _pw['hl_est'], _pw['ci_lo'], _pw['ci_hi']) = \
+                        _pair_detail(_va2, _vb2)
 
                 # -------------------------------------------------------- #
                 # Bar chart: 4 bars, scatter points, significance brackets  #
@@ -15417,10 +15504,18 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 # -------------------------------------------------------- #
                 # Print and save stats report                               #
                 # -------------------------------------------------------- #
-                W = 115
+                W = 135
+                _stat_hdr = (
+                    "Kruskal-Wallis (R) + Pairwise Wilcoxon (Holm)"
+                    if _used_r_kw else
+                    "Pairwise MWU + Holm-Bonferroni (Python fallback)"
+                )
                 print("\n" + "=" * W)
-                print("MANN-WHITNEY U TESTS \u2014 Day-1 / Transition-Day Daily Change")
-                print(f"Correction: Holm-Bonferroni (k={k_pairs} pairs)")
+                print("STATISTICAL TESTS \u2014 Day-1 / Transition-Day Daily Change")
+                print(f"Method: {_stat_hdr}")
+                if _used_r_kw:
+                    print(f"Kruskal-Wallis: H({kw_df}) = {kw_H:.4f},  "
+                          f"p = {_fmt_p(kw_p)}  {_sig(kw_p)}")
                 print("=" * W)
                 report_lines = [
                     "=" * W,
@@ -15432,9 +15527,16 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     f"  5-wk ramp   : Day 8 (1-based) = 0%\u21921% transition",
                     f"  2-wk ramp   : Day 4 (1-based) = 0%\u21921% transition",
                     "",
-                    "Statistical test  : Mann-Whitney U (two-sided)",
-                    f"Correction        : Holm-Bonferroni (k={k_pairs} pairs)",
-                    "CI method (HL)    : 4999-resample bootstrap (seed=0)",
+                    f"Omnibus test      : {'Kruskal-Wallis H-test (base R)' if _used_r_kw else 'N/A (rpy2 unavailable)'}",
+                    f"Post-hoc          : {'Pairwise Wilcoxon (R, Holm correction)' if _used_r_kw else 'Pairwise MWU + Holm-Bonferroni (Python)'}",
+                ]
+                if _used_r_kw:
+                    report_lines += [
+                        "",
+                        "Kruskal-Wallis result:",
+                        f"  H({kw_df}) = {kw_H:.4f},  p = {_fmt_p(kw_p)}  {_sig(kw_p)}",
+                    ]
+                report_lines += [
                     "",
                     "Descriptive statistics  (95% CI = t-based, two-tailed):",
                     f"  {'Cohort':<30}  {'n':>4}  {'Mean (%/day)':>13}  {'SEM':>8}  {'95% CI':>21}",
@@ -15447,7 +15549,7 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     s_v   = (float(_np.std(vals, ddof=1) / _np.sqrt(n_v))
                              if n_v > 1 else float('nan'))
                     if n_v > 1:
-                        _t_c   = float(_stats.t.ppf(0.975, df=n_v - 1))
+                        _t_c    = float(_stats.t.ppf(0.975, df=n_v - 1))
                         ci_lo_v = m_v - _t_c * s_v
                         ci_hi_v = m_v + _t_c * s_v
                         ci_str_v = f"[{ci_lo_v:.4f}, {ci_hi_v:.4f}]"
@@ -15459,31 +15561,34 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     print(f"  {lbl:<30}  n={n_v}  mean={m_v:.4f} \u00b1 {s_v:.4f} SEM  95% CI {ci_str_v}")
                 report_lines += [
                     "",
-                    f"{'Pair':<45}  {'n_A':>4}  {'n_B':>4}  {'U':>8}  {'p_raw':>9}  {'p_adj':>9}  "
-                    f"{'sig':<4}  {'HL_est':>8}  {'95% CI (HL)':>22}",
+                    f"{'Pair':<48}  {'n_A':>4}  {'n_B':>4}  {'U':>8}  {'p_raw':>9}  {'p_adj (Holm)':>13}  {'sig':<4}  {'HL_est':>8}  {'95% CI (HL)':>24}",
                     "-" * W,
                 ]
-                for pr in pair_results:
-                    U_str  = f"{pr['U']:.1f}"    if not _np.isnan(pr['U'])       else 'N/A'
-                    hl_str = f"{pr['hl_est']:.4f}" if not _np.isnan(pr['hl_est']) else 'N/A'
-                    ci_str = (f"[{pr['hl_ci_lo']:.4f}, {pr['hl_ci_hi']:.4f}]"
-                              if not _np.isnan(pr['hl_ci_lo']) else 'N/A')
-                    pair_label = f"{pr['a']}  vs  {pr['b']}"
+                for _pw in pw_table:
+                    _pair_label = f"{_pw['a']}  vs  {_pw['b']}"
+                    _ci_str = (
+                        f"[{_pw['ci_lo']:.4f}, {_pw['ci_hi']:.4f}]"
+                        if not _np.isnan(_pw.get('ci_lo', float('nan')))
+                        else 'N/A'
+                    )
                     report_lines.append(
-                        f"{pair_label:<45}  {pr['na']:>4}  {pr['nb']:>4}  "
-                        f"{U_str:>8}  {_fmt_p(pr['p_raw']):>9}  "
-                        f"{_fmt_p(pr['p_adj']):>9}  {_sig(pr['p_adj']):<4}  "
-                        f"{hl_str:>8}  {ci_str:>22}"
+                        f"{_pair_label:<48}  {_pw['na']:>4}  {_pw['nb']:>4}  "
+                        f"{_pw.get('U', float('nan')):>8.1f}  "
+                        f"{_fmt_p(_pw.get('p_raw', float('nan'))):>9}  "
+                        f"{_fmt_p(_pw['p_adj']):>13}  {_sig(_pw['p_adj']):<4}  "
+                        f"{_pw.get('hl_est', float('nan')):>8.4f}  {_ci_str:>24}"
                     )
                     print(
-                        f"  {pair_label}\n"
-                        f"    U={U_str}  p_raw={_fmt_p(pr['p_raw'])}  "
-                        f"p_adj={_fmt_p(pr['p_adj'])}  {_sig(pr['p_adj'])}\n"
-                        f"    HL_est={hl_str}  95% CI {ci_str}"
+                        f"  {_pair_label}\n"
+                        f"    U={_pw.get('U', float('nan')):.1f}  "
+                        f"p_raw={_fmt_p(_pw.get('p_raw', float('nan')))}  "
+                        f"p_adj={_fmt_p(_pw['p_adj'])}  {_sig(_pw['p_adj'])}  "
+                        f"HL={_pw.get('hl_est', float('nan')):.4f}  "
+                        f"CI={_ci_str}"
                     )
                 report_lines.append("=" * W)
                 report_text = "\n".join(report_lines)
-                rpt_path = plot_dir / f"day1_transition_mwu_all4_{timestamp}.txt"
+                rpt_path = plot_dir / f"day1_transition_kw_all4_{timestamp}.txt"
                 rpt_path.write_text(report_text, encoding='utf-8')
                 print(f"\n[OK] Stats report saved -> {rpt_path}")
 
