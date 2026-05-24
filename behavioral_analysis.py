@@ -3953,12 +3953,24 @@ def plot_total_change_r_fit(
 df <- read.csv("{dat_r}", stringsAsFactors=FALSE)
 df <- df[!is.na(df$x_factor) & !is.na(df$total_change), ]
 df$x_factor <- as.numeric(df$x_factor)
-m_lin  <- lm(total_change ~ x_factor, data=df)
+df$ID <- as.factor(df$ID)
+
+# Linear mixed model with random intercept per animal
+library(lme4)
+library(lmerTest)
+m_lin  <- lmer(total_change ~ x_factor + (1 | ID), data=df, REML=FALSE)
 s_lin  <- summary(m_lin)
 aic_l  <- AIC(m_lin)
 bic_l  <- BIC(m_lin)
+# Marginal R² (fixed effects only) — Nakagawa & Schielzeth 2013
+var_f   <- var(as.vector(model.matrix(m_lin) %*% fixef(m_lin)))
+var_r   <- as.numeric(VarCorr(m_lin)$ID)
+var_e   <- sigma(m_lin)^2
+r2_marg <- var_f / (var_f + var_r + var_e)
+r2_cond <- (var_f + var_r) / (var_f + var_r + var_e)
 
-# Exponential decay: y = A + B * exp(-k * x)
+# Exponential decay mixed model: y = A + B * exp(-k * x), random intercept on A
+library(nlme)
 y_r <- range(df$total_change)
 A0  <- y_r[1]
 B0  <- y_r[2] - y_r[1]
@@ -3971,10 +3983,12 @@ r2_exp    <- NA_real_
 for (k0 in c(0.05, 0.1, 0.2, 0.5)) {{
   if (m_exp_ok) break
   tryCatch({{
-    m_exp <- nls(total_change ~ A + B * exp(-k * x_factor),
-                 data=df,
-                 start=list(A=A0, B=B0, k=k0),
-                 control=nls.control(maxiter=500, warnOnly=FALSE))
+    m_exp <- nlme(total_change ~ A + B * exp(-k * x_factor),
+                  data=df,
+                  fixed  = A + B + k ~ 1,
+                  random = A ~ 1 | ID,
+                  start  = c(A=A0, B=B0, k=k0),
+                  control=nlmeControl(maxIter=500, msMaxIter=500))
     s_exp    <- summary(m_exp)
     aic_exp  <- AIC(m_exp)
     bic_exp  <- BIC(m_exp)
@@ -3987,11 +4001,13 @@ for (k0 in c(0.05, 0.1, 0.2, 0.5)) {{
 
 sink("{res_r}")
 cat("========================================\\n")
-cat("LINEAR MODEL  (total_change ~ {x_label})\\n")
+cat("LINEAR MIXED MODEL  (total_change ~ {x_label} + (1|ID))\\n")
 cat("========================================\\n")
 print(s_lin)
+cat(sprintf("Marginal R2 (fixed effects only): %.4f\\n", r2_marg))
+cat(sprintf("Conditional R2 (fixed + random):  %.4f\\n", r2_cond))
 cat("\\n========================================\\n")
-cat("EXPONENTIAL DECAY  (total_change ~ A + B*exp(-k*{x_label}))\\n")
+cat("EXPONENTIAL DECAY MIXED MODEL  (total_change ~ A + B*exp(-k*{x_label}), random = A ~ 1|ID)\\n")
 cat("========================================\\n")
 if (m_exp_ok) {{
   print(s_exp)
@@ -4006,17 +4022,17 @@ cat(sprintf("AIC  -- Linear: %.3f  |  Exponential: %s\\n",
             aic_l, ifelse(m_exp_ok, sprintf("%.3f", aic_exp), "N/A")))
 cat(sprintf("BIC  -- Linear: %.3f  |  Exponential: %s\\n",
             bic_l, ifelse(m_exp_ok, sprintf("%.3f", bic_exp), "N/A")))
-cat(sprintf("Adj R2 -- Linear: %.4f  |  Exp pseudo-R2: %s\\n",
-            s_lin$adj.r.squared,
+cat(sprintf("Marginal R2 -- Linear: %.4f  |  Exp pseudo-R2: %s\\n",
+            r2_marg,
             ifelse(m_exp_ok, sprintf("%.4f", r2_exp), "N/A")))
 sink()
 # machine-readable summary for Python
 cat(sprintf("__STATS__:%.4f:%.4f:%s:%s\\n",
-            s_lin$adj.r.squared, aic_l,
+            r2_marg, aic_l,
             ifelse(m_exp_ok, sprintf("%.4f", aic_exp), "NA"),
             ifelse(m_exp_ok, sprintf("%.4f", r2_exp),  "NA")))
 if (m_exp_ok) {{
-  cf <- coef(m_exp)
+  cf <- fixef(m_exp)
   cat(sprintf("__EXP_COEF__:%.6f:%.6f:%.6f\\n", cf["A"], cf["B"], cf["k"]))
 }}
 """
@@ -4091,14 +4107,14 @@ if (m_exp_ok) {{
 	print("  Predicted at spot-check x values:")
 	for _sx in _spot_xs:
 		print(f"    x={_sx:>4}: {np.polyval(_c_lin, _sx):.4f}%")
-	# Cross-check against R's adj R² if available
+	# Cross-check against R's marginal R² if available
 	if r_stats.get('adj_r2_lin') is not None:
 		_r2_r = r_stats['adj_r2_lin']
-		print(f"  R adj.R²  : {_r2_r:.4f}  (Python plain R²: {_r2_lin_py:.4f})")
+		print(f"  R marginal R²: {_r2_r:.4f}  (Python plain R²: {_r2_lin_py:.4f})")
 		if abs(_r2_lin_py - _r2_r) > 0.05:
-			print("  [WARNING] Python R² vs R adj.R² differ by > 0.05 — expected (adj vs plain), but worth checking.")
+			print("  [NOTE] Python R² vs R marginal R² differ — expected, as marginal R² excludes random-effect variance.")
 		else:
-			print("  [OK] Python R² and R adj.R² are consistent.")
+			print("  [OK] Python R² and R marginal R² are consistent.")
 
 	# exponential decay: use R coefficients if available, else scipy fallback
 	y_exp: Optional[np.ndarray] = None
@@ -4239,10 +4255,10 @@ if (m_exp_ok) {{
 			'-' * 60,
 			'MODEL FIT SUMMARY (from R)',
 			'-' * 60,
-			f'  Adj R²   — Linear:    {r_stats.get("adj_r2_lin", float("nan")):.4f}',
-			f'  Pseudo R²— Exp decay: {r_stats.get("r2_exp",     float("nan")):.4f}',
-			f'  AIC      — Linear:    {r_stats.get("aic_lin",    float("nan")):.3f}',
-			f'  AIC      — Exp decay: {r_stats.get("aic_exp",    float("nan")):.3f}',
+			f'  Marginal R² — Linear:  {r_stats.get("adj_r2_lin", float("nan")):.4f}  (fixed effects only; excludes random intercept variance)',
+			f'  Pseudo R²  — Exp decay: {r_stats.get("r2_exp",   float("nan")):.4f}',
+			f'  AIC        — Linear:    {r_stats.get("aic_lin",  float("nan")):.3f}',
+			f'  AIC        — Exp decay: {r_stats.get("aic_exp",  float("nan")):.3f}',
 		]
 
 	rpt_path.write_text('\n'.join(rpt_lines), encoding='utf-8')
@@ -6559,7 +6575,8 @@ def run_friedman_milestone_days_r(
     # ── Python: pairwise Wilcoxon signed-rank + HL estimate + bootstrap CI ──
     def _fmt_p(p) -> str:
         if p != p: return 'N/A'      # nan check
-        return '< 0.001' if p < 0.001 else f'{p:.4f}'
+        if p < 0.001: return f'{p:.2e}'
+        return f'{p:.4f}'
 
     def _sig(p) -> str:
         if p != p: return '   '
@@ -6586,7 +6603,7 @@ def run_friedman_milestone_days_r(
     pair_results = []
     _raw_ps      = []
     _rng         = np.random.default_rng(0)
-    N_BOOT       = 4999
+    N_BOOT       = 2000
 
     for d1, d2 in combinations(_days, 2):
         x1    = long_df[long_df['Day'] == d1].sort_values('ID')['DailyChange'].values
@@ -6611,10 +6628,19 @@ def run_friedman_milestone_days_r(
                     for _ in range(N_BOOT)]
         _ci_lo, _ci_hi = float(np.percentile(_boot, 2.5)), float(np.percentile(_boot, 97.5))
 
+        # Rank-biserial correlation: r_rb = sign(HL) * (1 - 2W / T_max)
+        # where T_max = n_nz*(n_nz+1)/2, n_nz = number of non-zero differences
+        _n_nz  = int(np.sum(diffs != 0))
+        _T_max = _n_nz * (_n_nz + 1) / 2.0 if _n_nz > 0 else float('nan')
+        _sign  = float(np.sign(_hl)) if _hl != 0.0 else 1.0
+        _r_rb  = (_sign * (1.0 - 2.0 * float(_W) / _T_max)
+                  if (_T_max > 0 and _W == _W) else float('nan'))
+
         pair_results.append({
             'd1': d1, 'd2': d2, 'n': n_pr,
             'W': _W, 'p_raw': _p_raw,
             'hl_est': _hl, 'ci_lo': _ci_lo, 'ci_hi': _ci_hi,
+            'r_rb': _r_rb,
         })
         _raw_ps.append(_p_raw if _p_raw == _p_raw else 1.0)
 
@@ -6625,7 +6651,7 @@ def run_friedman_milestone_days_r(
     # ── Format report ────────────────────────────────────────────────────────
     def _fmt_omni_p(p) -> str:
         if p != p: return 'N/A'
-        return '< 0.001' if p < 0.001 else f'{p:.4e}'
+        return f'{p:.4e}'
 
     def _sig_omni(p) -> str:
         if p != p: return ''
@@ -6634,6 +6660,14 @@ def run_friedman_milestone_days_r(
         if p < 0.05:  return '*'
         if p < 0.1:   return '.'
         return 'ns'
+
+    # Kendall's W: omnibus effect size for Friedman = chi^2 / (N * (k-1))
+    _n_subs  = len(complete_ids)
+    _n_conds = len(_days)
+    _kendall_w = (chi_sq / (_n_subs * (_n_conds - 1))
+                  if (chi_sq == chi_sq and _n_subs > 0 and _n_conds > 1)
+                  else float('nan'))
+    _kw_str  = f'{_kendall_w:.3f}' if _kendall_w == _kendall_w else 'N/A'
 
     _ts_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     _chi_str = f'{chi_sq:.4f}' if chi_sq == chi_sq else 'N/A'
@@ -6655,10 +6689,13 @@ def run_friedman_milestone_days_r(
         'Post-hoc    : Pairwise Wilcoxon signed-rank (scipy; exact for n ≤ 25)',
         'Correction  : Holm-Bonferroni (Python)',
         'HL estimate : Hodges-Lehmann = median(x_day1 − x_day2) per subject pair',
-        '95% CI      : Bootstrap (4 999 resamples, seed = 0) on HL estimate',
+        '95% CI      : Bootstrap (2 000 resamples, seed = 0) on HL estimate',
+        'Effect size : Omnibus: Kendall\'s W = χ²/(N·(k−1)); range [0,1]; ≥0.10 small, ≥0.30 medium, ≥0.50 large',
+        '              Pairwise: rank-biserial r_rb = sign(HL)·(1−2W/T_max); range [−1, 1]',
         '',
         'Omnibus Friedman result:',
         f"  χ²({_df_str}) = {_chi_str},  p = {_fmt_omni_p(p_omni)}  {_sig_omni(p_omni)}",
+        f"  Kendall's W = {_kw_str}  (0 = no concordance, 1 = perfect concordance)",
         '',
         'R OUTPUT (omnibus Friedman only)',
         '-' * W_RPT,
@@ -6682,22 +6719,26 @@ def run_friedman_milestone_days_r(
     _lines += [
         '',
         f"  {'Pair':<20}  {'n':>4}  {'W':>10}  {'p_raw':>10}  {'p_adj (Holm)':>13}  "
-        f"{'sig':<4}  {'HL_est':>8}  {'95% CI (HL)':>22}",
+        f"{'sig':<4}  {'r_rb':>6}  {'HL_est':>8}  {'95% CI (HL)':>22}",
         '  ' + '─' * (W_RPT - 2),
     ]
     for pr in pair_results:
-        _lbl    = f"Day {pr['d1']}  vs  Day {pr['d2']}"
-        _ci_str = f"[{pr['ci_lo']:>8.4f}, {pr['ci_hi']:>8.4f}]"
-        _W_str  = f"{pr['W']:.1f}" if pr['W'] == pr['W'] else 'N/A'
+        _lbl     = f"Day {pr['d1']}  vs  Day {pr['d2']}"
+        _ci_str  = f"[{pr['ci_lo']:>8.4f}, {pr['ci_hi']:>8.4f}]"
+        _W_str   = f"{pr['W']:.1f}" if pr['W'] == pr['W'] else 'N/A'
+        _rrb_str = f"{pr['r_rb']:>6.3f}" if pr['r_rb'] == pr['r_rb'] else '   N/A'
         _lines.append(
             f"  {_lbl:<20}  {pr['n']:>4}  {_W_str:>10}  "
             f"{_fmt_p(pr['p_raw']):>10}  {_fmt_p(pr['p_adj']):>13}  "
-            f"{_sig(pr['p_adj']):<4}  {pr['hl_est']:>8.4f}  {_ci_str:>22}"
+            f"{_sig(pr['p_adj']):<4}  {_rrb_str}  {pr['hl_est']:>8.4f}  {_ci_str:>22}"
         )
 
     _lines += [
         '',
         '  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10  ns p≥.10',
+        '  Effect size : r_rb = rank-biserial correlation = sign(HL)·(1−2W/T_max);'
+        ' range [−1, 1]; |r_rb|: ≥0.10 small, ≥0.30 medium, ≥0.50 large',
+        f"  Omnibus ES  : Kendall's W = {_kw_str}  (χ²/(N·(k−1)) = {_chi_str}/({_n_subs}·{_n_conds-1}))",
         '=' * W_RPT,
         'END OF REPORT',
         '=' * W_RPT,

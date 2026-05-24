@@ -138,7 +138,7 @@ try:
         "figure.titlesize": 10,
         "lines.linewidth": 0.9,
         "lines.markersize": 3,
-        "figure.figsize": (4, 2.5),
+        "figure.figsize": (3, 3),
     })
 except ImportError:
     HAS_MATPLOTLIB = False
@@ -9781,6 +9781,7 @@ def _format_mwu_slope_report(
     pair_results: list,
     measure: str,
     time_unit: str,
+    kw_result: Optional[dict] = None,
 ) -> str:
     """Format MWU bracket-test results for slope comparison as a text report."""
     n_pairs = len(pair_results)
@@ -9807,6 +9808,34 @@ def _format_mwu_slope_report(
         "  95% CI   : Bootstrap CI (n=2 000 resamples) on Hodges-Lehmann estimator",
         "",
     ]
+
+    def _fp(p: float) -> str:
+        return f"{p:.2e}" if p < 0.001 else f"{p:.4f}"
+
+    # ------------------------------------------------------------------ #
+    # Omnibus Kruskal-Wallis block (only present for 3+ cohorts)           #
+    # ------------------------------------------------------------------ #
+    if kw_result is not None:
+        _kw_H   = kw_result['H']
+        _kw_df  = kw_result['df']
+        _kw_p   = kw_result['p']
+        _eta2h  = kw_result['eta2h']
+        _eta_lbl = ("negligible" if _eta2h < 0.01 else
+                    "small"      if _eta2h < 0.06 else
+                    "moderate"   if _eta2h < 0.14 else "large")
+        _kw_sig = ("***" if _kw_p < 0.001 else
+                   "**"  if _kw_p < 0.01  else
+                   "*"   if _kw_p < 0.05  else "ns")
+        lines += [
+            "Omnibus test : Kruskal-Wallis H-test (scipy)",
+            f"  H({_kw_df}) = {_kw_H:.4f},  p = {_fp(_kw_p)}  {_kw_sig}",
+            f"  eta2_H = {_eta2h:.4f}  ({_eta_lbl})",
+            f"  Interpretation: eta2_H <0.01 negligible, 0.01-0.06 small, 0.06-0.14 moderate, >=0.14 large",
+            "",
+            "Post-hoc     : Pairwise Mann-Whitney U (Holm-Bonferroni corrected)",
+            "",
+        ]
+
     hdr = (
         f"{'Comparison':<38} {'nA':>4} {'nB':>4}  "
         f"{'U':>9}  {'p(raw)':>9}  {'p(adj)':>9}  "
@@ -9814,9 +9843,6 @@ def _format_mwu_slope_report(
     )
     lines.append(hdr)
     lines.append("-" * 100)
-
-    def _fp(p: float) -> str:
-        return "< 0.001" if p < 0.001 else f"{p:.4f}"
 
     for r in pair_results:
         comp = f"{r['label_a']} vs {r['label_b']}"
@@ -9983,8 +10009,17 @@ def plot_slopes_comparison(
                 ha='center', va='bottom', fontsize=7)
 
     if save_mwu_path is not None and _mwu_bracket_results:
+        # Omnibus KW on all slope values (only meaningful for 3+ groups)
+        _kw_result = None
+        if len(box_data) >= 3 and all(len(d) >= 2 for d in box_data):
+            _kw_H, _kw_p = stats.kruskal(*box_data)
+            _n_kw = sum(len(d) for d in box_data)
+            _k_kw = len(box_data)
+            _eta2h = max(0.0, (_kw_H - _k_kw + 1) / (_n_kw - _k_kw))
+            _kw_result = {'H': _kw_H, 'df': _k_kw - 1, 'p': _kw_p,
+                          'eta2h': _eta2h, 'n': _n_kw, 'k': _k_kw}
         _mwu_lines = _format_mwu_slope_report(
-            _mwu_bracket_results, measure, time_unit
+            _mwu_bracket_results, measure, time_unit, kw_result=_kw_result
         )
         Path(save_mwu_path).write_text(_mwu_lines, encoding='utf-8')
         print(f"  [OK] MWU report saved -> {save_mwu_path}")
@@ -10154,7 +10189,7 @@ def generate_slope_analysis_report(
             lines.append("-" * 80)
 
             def _fp(p: float) -> str:
-                return "< 0.001" if p < 0.001 else f"{p:.4f}"
+                return f'{p:.2e}' if p < 0.001 else f"{p:.4f}"
 
             hdr = (f"  {'Comparison':<38} {'nA':>4} {'nB':>4}  "
                    f"{'U':>9}  {'p(raw)':>9}  {'p(adj)':>9}  "
@@ -13031,15 +13066,16 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print(" 10. R: nparLD behavioral  -- nparLD F1-LD-F1 for No Nest / Anxious / Lethargy (comparison to ART)")
     print(" 11. Daily Change bar chart -- mean ± SEM bars at Days 5, 12, 19, 26, 33 per cohort")
     print(" 12. R: nparLD water-access daily change -- nparLD Cohort x Week on Day-5/12/19/26/33 Daily Change")
-    print(" 13. Run all (1-12)")
+    print(" 13. R: Kruskal-Wallis behavioral (collapsed) -- KW + pairwise Wilcoxon on per-animal mean % across all weeks")
+    print(" 14. Run all (1-13)")
     print()
 
-    user_input = input("Select option (1-13) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-14) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_all = (user_input == '13')
+    run_all = (user_input == '14')
 
     plot_dir = Path(f"all3_plots_{timestamp}")
 
@@ -13446,6 +13482,24 @@ def _run_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
             print(f"  [WARNING] nparLD water-access analysis failed: {e}")
             import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 13: R Kruskal-Wallis -- behavioral metrics, weeks collapsed
+    # ------------------------------------------------------------------ #
+    if user_input == '13' or run_all:
+        print("\n" + "=" * 80)
+        print("RUNNING: R Kruskal-Wallis -- Behavioral metrics (weeks collapsed)")
+        print("         Per-animal mean % across all weeks; KW + pairwise Wilcoxon (Holm)")
+        print("=" * 80)
+        try:
+            run_kruskal_behavior_collapsed_r(
+                cohort_dfs=cohorts,
+                save_report=True,
+                prefix="all3",
+            )
+        except Exception as e:
+            print(f"  [WARNING] Kruskal-Wallis collapsed behavior analysis failed: {e}")
+            import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("0% vs 2% vs Ramp analysis complete.")
     print("=" * 80)
@@ -13484,7 +13538,7 @@ def _run_rampramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
         ramp_label:  {'0%->1%': 8,  '1%->2%': 15},
         twowk_label: {'0%->1%': 4,  '1%->2%': 7},
     }
-    TRANSITIONS = ['0%->1%', '1%->2%']
+    TRANSITIONS = ['1%->2%']
 
     RAMP_COLOR  = _COLOR_RAMP   # "#2da048" green
     TWOWK_COLOR = _COLOR_OTHER  # "#7f3f98" purple
@@ -13543,6 +13597,8 @@ def _run_rampramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         continue
 
                     for transition, tday in TRANSITION_DAYS[label].items():
+                        if transition not in TRANSITIONS:
+                            continue
                         day_df = cdf[cdf['Day'] == tday]
                         if day_df.empty:
                             print(
@@ -13559,7 +13615,7 @@ def _run_rampramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     if _np.isnan(p):
                         return 'N/A'
                     if p < 0.001:
-                        return '< 0.001'
+                        return f'{p:.2e}'
                     return f'{p:.4f}'
 
                 def _sig(p):
@@ -13595,11 +13651,34 @@ def _run_rampramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         'U':           float('nan'),
                         'p_raw':       float('nan'),
                         'p_adj':       float('nan'),
+                        'r_rb':        float('nan'),
+                        'hl_est':      float('nan'),
+                        'ci_lo':       float('nan'),
+                        'ci_hi':       float('nan'),
                     }
                     if len(ramp_vals) >= 2 and len(twowk_vals) >= 2:
                         U, p_raw = _stats.mannwhitneyu(ramp_vals, twowk_vals, alternative='two-sided')
                         sr['U']     = float(U)
                         sr['p_raw'] = float(p_raw)
+                        _n_a, _n_b = len(ramp_vals), len(twowk_vals)
+                        sr['r_rb'] = 1.0 - 2.0 * float(U) / (_n_a * _n_b)
+                        _diffs = _np.subtract.outer(
+                            _np.asarray(ramp_vals, dtype=float),
+                            _np.asarray(twowk_vals, dtype=float),
+                        ).ravel()
+                        sr['hl_est'] = float(_np.median(_diffs))
+                        _rng_hl = _np.random.default_rng(0)
+                        _boots = [
+                            float(_np.median(
+                                _np.subtract.outer(
+                                    _rng_hl.choice(ramp_vals, _n_a, replace=True),
+                                    _rng_hl.choice(twowk_vals, _n_b, replace=True),
+                                ).ravel()
+                            ))
+                            for _ in range(2000)
+                        ]
+                        sr['ci_lo'] = float(_np.percentile(_boots, 2.5))
+                        sr['ci_hi'] = float(_np.percentile(_boots, 97.5))
                     stat_results.append(sr)
 
                 # Holm-Bonferroni
@@ -13615,11 +13694,13 @@ def _run_rampramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                             valid_sorted[i - 1]['p_adj'],
                         )
 
-                # --- Bar plot: 2 panels, 2 bars each, with sig brackets ---
-                fig, axes = plt.subplots(1, 2, sharey=True)
+                # --- Bar plot: single panel (1%->2% transition only) ---
+                fig, _ax_single = plt.subplots(1, 1)
+                axes = [_ax_single]
                 fig.suptitle(
-                    'Daily Weight Change at CA% Transition Days\n'
-                    'Ramp (Day 8, 15) vs 2-Week Ramp (Day 4, 7)',
+                    '1%\u21922% Transition Day \u2014 Daily Weight Change\n'
+                    f'Ramp (Day {TRANSITION_DAYS[ramp_label]["1%->2%"]}) vs 2-Week Ramp'
+                    f' (Day {TRANSITION_DAYS[twowk_label]["1%->2%"]})',
                 )
                 rng = _np.random.default_rng(42)
                 bar_width = 0.35
@@ -13638,8 +13719,8 @@ def _run_rampramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         _global_plotted.append(mean_val + sem_val)
                         _global_plotted.append(mean_val - sem_val)
 
-                _ylim_bot = -12.5
-                _ylim_top = 2.5
+                _ylim_bot = -8.0
+                _ylim_top = 2.0
                 _g_span  = _ylim_top - _ylim_bot
                 _tick_h  = 0.04 * _g_span
                 _bkt_y   = _ylim_top - _tick_h * 3.5
@@ -13701,30 +13782,37 @@ def _run_rampramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
 
                 # --- Print and save stats report ---
                 print("\n" + "=" * 80)
-                print("MANN-WHITNEY U TESTS \u2014 Transition Day Daily Change")
-                print("Correction: Holm-Bonferroni (family = 2 comparisons)")
+                print("MANN-WHITNEY U TEST \u2014 Transition Day Daily Change (1%\u21922%)")
+                print("No correction (k=1 comparison)")
                 print("=" * 80)
 
-                W = 74
+                W = 108
                 report_lines = [
                     "=" * W,
                     "RAMP vs 2-WEEK RAMP \u2014 CA% TRANSITION DAY DAILY CHANGE",
                     f"Cohorts: {ramp_label}  vs  {twowk_label}",
                     "",
-                    f"Transition days  \u2014  Ramp    : Day  8 (0%\u21921%),  Day 15 (1%\u21922%)",
-                    f"                   2-Wk Ramp: Day  4 (0%\u21921%),  Day  7 (1%\u21922%)",
+                    f"Transition days  \u2014  Ramp    : Day 15 (1%\u21922%)",
+                    f"                   2-Wk Ramp: Day  7 (1%\u21922%)",
                     "",
                     "Statistical test  : Mann-Whitney U (two-sided)",
-                    "Correction        : Holm-Bonferroni (k=2 comparisons)",
+                    "Correction        : None (k=1 comparison; no correction needed)",
+                    "Effect size       : r_rb = 1 - 2U/(n_A*n_B); range [-1, 1], positive = Ramp > 2-Wk Ramp",
+                    "CI                : Hodges-Lehmann estimator \u00b1 95% bootstrap CI (2000 resamples, seed=0)",
                     "",
-                    f"{'Transition':<10}  {'n_Ramp':>6}  {'n_2Wk':>6}  {'U':>8}  {'p_raw':>9}  {'p_adj':>9}  sig",
+                    f"{'Transition':<10}  {'n_Ramp':>6}  {'n_2Wk':>6}  {'U':>8}  {'p_raw':>10}  {'p_adj':>10}  {'r_rb':>6}  {'HL_est':>8}  {'95%_CI':>20}  sig",
                     "-" * W,
                 ]
                 for sr in stat_results:
-                    U_str = f"{sr['U']:.1f}" if not _np.isnan(sr['U']) else 'N/A'
+                    U_str   = f"{sr['U']:.1f}"    if not _np.isnan(sr['U'])     else 'N/A'
+                    rrb_str = f"{sr['r_rb']:.3f}" if not _np.isnan(sr['r_rb'])  else 'N/A'
+                    hl_str  = f"{sr['hl_est']:.4f}" if not _np.isnan(sr['hl_est']) else 'N/A'
+                    ci_str  = (f"[{sr['ci_lo']:.4f}, {sr['ci_hi']:.4f}]"
+                               if not _np.isnan(sr['ci_lo']) else 'N/A')
                     report_lines.append(
                         f"{sr['transition']:<10}  {sr['ramp_n']:>6}  {sr['twowk_n']:>6}  "
-                        f"{U_str:>8}  {_fmt_p(sr['p_raw']):>9}  {_fmt_p(sr['p_adj']):>9}  {_sig(sr['p_adj'])}"
+                        f"{U_str:>8}  {_fmt_p(sr['p_raw']):>10}  {_fmt_p(sr['p_adj']):>10}  "
+                        f"{rrb_str:>6}  {hl_str:>8}  {ci_str:>20}  {_sig(sr['p_adj'])}"
                     )
                     print(
                         f"\n  Transition {sr['transition']}:"
@@ -13734,6 +13822,7 @@ def _run_rampramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         f"mean={sr['twowk_mean']:.4f} \u00b1 {sr['twowk_sem']:.4f} SEM"
                         f"\n    U={U_str}, p_raw={_fmt_p(sr['p_raw'])}, "
                         f"p_adj (Holm)={_fmt_p(sr['p_adj'])}  {_sig(sr['p_adj'])}"
+                        f"\n    r_rb={rrb_str}, HL_est={hl_str}, 95%CI={ci_str}"
                     )
 
                 report_lines += [
@@ -13930,7 +14019,8 @@ def run_nparld_cohort_week_r(
 
     # ── Write diagnostic report (before R runs, so it's available even if R fails) ─
     _diag_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    _diag_path = Path.cwd() / f"{prefix}_nparld_diag_{_diag_ts}.txt"
+    _safe_measure = measure.replace(' ', '_').lower()
+    _diag_path = Path.cwd() / f"{prefix}_nparld_diag_{_safe_measure}_{_diag_ts}.txt"
     _diag_path.write_text('\n'.join(_diag_lines), encoding='utf-8')
     print(f"  [DIAG] Weekly-average diagnostic → {_diag_path.name}")
 
@@ -13950,11 +14040,20 @@ def run_nparld_cohort_week_r(
     tmp_csv = Path(tempfile.mktemp(suffix='.csv'))
     weekly[['ID', 'Cohort', 'Week', 'TotalChange']].to_csv(str(tmp_csv), index=False)
 
-    _csv_r        = str(tmp_csv).replace('\\', '/')
-    tmp_pvals_csv = Path(tempfile.mktemp(suffix='_pvals.csv'))
-    _pvals_csv_r  = str(tmp_pvals_csv).replace('\\', '/')
+    import os as _os
+    _csv_r     = str(tmp_csv).replace('\\', '/')
     _wk_levels = ', '.join(str(w) for w in week_levels)
     _co_levels = ', '.join(f'"{c}"' for c in cohort_levels)
+
+    _td  = tempfile.gettempdir().replace('\\', '/')
+    _uid = str(id(weekly))[-6:]
+    _ats_csv   = f"{_td}/nwt_ats_{_uid}.csv"
+    _box_csv   = f"{_td}/nwt_box_{_uid}.csv"
+    _wts_csv   = f"{_td}/nwt_wts_{_uid}.csv"
+    _rte_csv   = f"{_td}/nwt_rte_{_uid}.csv"
+    _pair_csv  = f"{_td}/nwt_pair_{_uid}.csv"
+    _time_csv  = f"{_td}/nwt_time_{_uid}.csv"
+    _wkmwu_csv = f"{_td}/nwt_wkmwu_{_uid}.csv"
 
     r_script = (
         'options(warn=1, scipen=999)\n'
@@ -13962,114 +14061,73 @@ def run_nparld_cohort_week_r(
         '  install.packages("nparLD", repos="https://cran.r-project.org", quiet=TRUE)\n'
         '  library(nparLD)\n'
         '}\n'
-        '\n'
         f'data <- read.csv("{_csv_r}")\n'
         f'data$Week   <- factor(data$Week,   levels=c({_wk_levels}))\n'
         f'data$Cohort <- factor(data$Cohort, levels=c({_co_levels}))\n'
-        'data$ID     <- factor(data$ID)\n'
-        '\n'
-        'cat("\\n================================================================\\n")\n'
-        f'cat("nparLD: {measure} -- Cohort x Week (F1-LD-F1 design)\\n")\n'
-        'cat("================================================================\\n")\n'
-        'cat("N subjects :", nlevels(data$ID), "\\n")\n'
-        'cat("Cohorts    :", paste(levels(data$Cohort), collapse=", "), "\\n")\n'
-        'cat("Weeks      :", paste(levels(data$Week),  collapse=", "), "\\n\\n")\n'
-        '\n'
+        'data$ID <- factor(data$ID)\n'
         'result <- f1.ld.f1(\n'
-        '  y          = data$TotalChange,\n'
-        '  time       = data$Week,\n'
-        '  group      = data$Cohort,\n'
-        '  subject    = data$ID,\n'
-        '  time.name  = "Week",\n'
-        '  group.name = "Cohort",\n'
-        '  description = FALSE\n'
+        '  y=data$TotalChange, time=data$Week, group=data$Cohort, subject=data$ID,\n'
+        '  time.name="Week", group.name="Cohort", description=FALSE\n'
         ')\n'
-        '\n'
-        f'write.csv(data.frame(\n'
-        f'  Effect    = rownames(result$ANOVA.test),\n'
-        f'  Statistic = result$ANOVA.test[, 1],\n'
-        f'  df        = result$ANOVA.test[, 2],\n'
-        f'  p_value   = result$ANOVA.test[, ncol(result$ANOVA.test)]\n'
-        f'), "{_pvals_csv_r}", row.names=FALSE)\n'
-        '\n'
-        'cat("\\n--- ANOVA-Type Statistic (ATS) ---\\n")\n'
-        'print(result$ANOVA.test)\n'
-        '\n'
-        'cat("\\n--- ATS with Box approximation ---\\n")\n'
-        'print(result$ANOVA.test.mod.Box)\n'
-        '\n'
-        'cat("\\n--- Wald-Type Statistic (WTS) ---\\n")\n'
-        'print(result$Wald.test)\n'
-        '\n'
-        'cat("\\n--- Relative Treatment Effects (RTE) ---\\n")\n'
-        'print(result$RTE)\n'
-        '\n'
-        'cat("\\n================================================================\\n")\n'
-        'cat("POST-HOC: Between-cohort (Mann-Whitney U, Holm corrected)\\n")\n'
-        'cat("  (per-animal mean across all weeks)\\n")\n'
-        'cat("================================================================\\n")\n'
-        'per_animal <- aggregate(TotalChange ~ ID + Cohort, data=data, FUN=mean)\n'
-        'ph_grp <- pairwise.wilcox.test(\n'
-        '  per_animal$TotalChange, per_animal$Cohort,\n'
-        '  p.adjust.method="holm", exact=FALSE\n'
-        ')\n'
-        'print(ph_grp)\n'
-        '\n'
-        'cat("\\n================================================================\\n")\n'
-        'cat("POST-HOC: Between-cohort comparisons at each week\\n")\n'
-        'cat("  (Mann-Whitney U, Holm corrected within each week)\\n")\n'
-        'cat("================================================================\\n")\n'
+        # ATS
+        f'ats <- as.data.frame(result$ANOVA.test); ats$effect <- rownames(ats)\n'
+        f'write.csv(ats, "{_ats_csv}", row.names=FALSE)\n'
+        # Box
+        f'if (!is.null(result$ANOVA.test.mod.Box)) {{\n'
+        f'  box <- as.data.frame(result$ANOVA.test.mod.Box); box$effect <- rownames(box)\n'
+        f'  write.csv(box, "{_box_csv}", row.names=FALSE)\n'
+        f'}} else write.csv(data.frame(), "{_box_csv}", row.names=FALSE)\n'
+        # WTS
+        f'wts <- as.data.frame(result$Wald.test); wts$effect <- rownames(wts)\n'
+        f'write.csv(wts, "{_wts_csv}", row.names=FALSE)\n'
+        # RTE
+        f'write.csv(as.data.frame(result$RTE), "{_rte_csv}", row.names=TRUE)\n'
+        # pair.comparison
+        f'if (!is.null(result$pair.comparison)) {{\n'
+        f'  write.csv(result$pair.comparison, "{_pair_csv}", row.names=FALSE)\n'
+        f'}} else write.csv(data.frame(), "{_pair_csv}", row.names=FALSE)\n'
+        # ANOVA.test.time
+        f'if (!is.null(result$ANOVA.test.time)) {{\n'
+        f'  att <- as.data.frame(result$ANOVA.test.time); att$cohort <- rownames(att)\n'
+        f'  write.csv(att, "{_time_csv}", row.names=FALSE)\n'
+        f'}} else write.csv(data.frame(), "{_time_csv}", row.names=FALSE)\n'
+        # Per-week MWU with HL and CI
+        'wk_rows <- list(); k_row <- 1\n'
         'for (wk in levels(data$Week)) {\n'
         '  sub <- data[data$Week == wk, ]\n'
-        '  cat("\\nWeek:", wk, "\\n")\n'
-        '  cohs <- levels(sub$Cohort)\n'
-        '  if (length(cohs) < 2) { cat("  (only 1 cohort -- no pairwise test)\\n"); next }\n'
-        '  pairs_idx <- combn(length(cohs), 2)\n'
-        '  p_raw <- apply(pairs_idx, 2, function(idx) {\n'
-        '    x <- sub$TotalChange[sub$Cohort == cohs[idx[1]]]\n'
-        '    y <- sub$TotalChange[sub$Cohort == cohs[idx[2]]]\n'
-        '    if (length(x) < 1 || length(y) < 1) return(NA_real_)\n'
-        '    tryCatch(\n'
-        '      wilcox.test(x, y, exact=FALSE)$p.value,\n'
-        '      error = function(e) NA_real_\n'
-        '    )\n'
-        '  })\n'
-        '  p_holm <- p.adjust(p_raw, method="holm")\n'
-        '  n_pairs <- ncol(pairs_idx)\n'
-        '  for (k in seq_len(n_pairs)) {\n'
-        '    ca <- cohs[pairs_idx[1, k]]\n'
-        '    cb <- cohs[pairs_idx[2, k]]\n'
-        '    na_ca <- sum(!is.na(sub$TotalChange[sub$Cohort == ca]))\n'
-        '    nb_cb <- sum(!is.na(sub$TotalChange[sub$Cohort == cb]))\n'
-        '    if (is.na(p_raw[k])) {\n'
-        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : NA\\n", ca, na_ca, cb, nb_cb))\n'
-        '    } else {\n'
-        '      sig <- ifelse(p_holm[k] < 0.001, "***",\n'
-        '               ifelse(p_holm[k] < 0.01, "**",\n'
-        '                 ifelse(p_holm[k] < 0.05, "*", "ns")))\n'
-        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : p_raw=%.4f  p_holm=%.4f  %s\\n",\n'
-        '                  ca, na_ca, cb, nb_cb, p_raw[k], p_holm[k], sig))\n'
-        '    }\n'
+        '  cohs <- as.character(levels(droplevels(sub$Cohort)))\n'
+        '  if (length(cohs) < 2) next\n'
+        '  pm <- combn(length(cohs), 2)\n'
+        '  for (k in seq_len(ncol(pm))) {\n'
+        '    g1 <- cohs[pm[1,k]]; g2 <- cohs[pm[2,k]]\n'
+        '    x  <- sub$TotalChange[sub$Cohort == g1]\n'
+        '    y  <- sub$TotalChange[sub$Cohort == g2]\n'
+        '    x  <- x[!is.na(x)]; y <- y[!is.na(y)]\n'
+        '    if (length(x)<1 || length(y)<1) next\n'
+        '    tryCatch({\n'
+        '      wt <- wilcox.test(x, y, exact=FALSE, conf.int=TRUE)\n'
+        '      wk_rows[[k_row]] <- data.frame(\n'
+        '        week=as.integer(wk), g1=g1, n1=length(x), g2=g2, n2=length(y),\n'
+        '        U=as.numeric(wt$statistic), p_raw=wt$p.value,\n'
+        '        hl=as.numeric(wt$estimate), ci_lo=wt$conf.int[1], ci_hi=wt$conf.int[2],\n'
+        '        stringsAsFactors=FALSE)\n'
+        '      k_row <- k_row + 1\n'
+        '    }, error=function(e) {\n'
+        '      tryCatch({\n'
+        '        wt2 <- wilcox.test(x, y, exact=FALSE, conf.int=FALSE)\n'
+        '        wk_rows[[k_row]] <<- data.frame(\n'
+        '          week=as.integer(wk), g1=g1, n1=length(x), g2=g2, n2=length(y),\n'
+        '          U=as.numeric(wt2$statistic), p_raw=wt2$p.value,\n'
+        '          hl=NA_real_, ci_lo=NA_real_, ci_hi=NA_real_,\n'
+        '          stringsAsFactors=FALSE)\n'
+        '        k_row <<- k_row + 1\n'
+        '      }, error=function(e2) NULL)\n'
+        '    })\n'
         '  }\n'
         '}\n'
-        '\n'
-        'cat("\\n================================================================\\n")\n'
-        'cat("OMNIBUS SUMMARY -- ATS (single DV; BH-FDR across DVs not applicable)\\n")\n'
-        'cat("================================================================\\n")\n'
-        'sig_fn3 <- function(p) { if(is.na(p)) return(""); if(p<0.001) return("***"); if(p<0.01) return("**"); if(p<0.05) return("*"); if(p<0.1) return("."); return("") }\n'
-        'fmt_p3  <- function(p) { if(is.na(p)) return("     NA"); if(p<0.0001) return("< .0001"); sprintf("%.4f", p) }\n'
-        'cat(sprintf("  %-20s  %10s  %8s  %12s  %s\\n", "Effect", "ATS", "df", "p-value", "Sig"))\n'
-        'cat("  ", strrep("-", 57), "\\n", sep="")\n'
-        'ats_df3 <- result$ANOVA.test\n'
-        'for (i3 in seq_len(nrow(ats_df3))) {\n'
-        '  eff3 <- rownames(ats_df3)[i3]\n'
-        '  pv3  <- ats_df3[i3, ncol(ats_df3)]\n'
-        '  cat(sprintf("  %-20s  %10.4f  %8.4f  %12s  %s\\n",\n'
-        '    eff3, ats_df3[i3,1], ats_df3[i3,2], fmt_p3(pv3), sig_fn3(pv3)))\n'
-        '}\n'
-        '\n'
-        'cat("\\n================================================================\\n")\n'
-        'cat("END\\n")\n'
+        f'if (length(wk_rows)>0) write.csv(do.call(rbind,wk_rows),"{_wkmwu_csv}",row.names=FALSE)\n'
+        f'else write.csv(data.frame(),"{_wkmwu_csv}",row.names=FALSE)\n'
+        'cat("NPARLD_WT_DONE\\n")\n'
     )
 
     tmp_r = Path(tempfile.mktemp(suffix='.R'))
@@ -14120,64 +14178,416 @@ def run_nparld_cohort_week_r(
     finally:
         tmp_csv.unlink(missing_ok=True)
         tmp_r.unlink(missing_ok=True)
-        # note: tmp_pvals_csv is cleaned below after parsing (also safe on early return) ────────────────────────────────────
+
+    # ── Read back result CSVs ───────────────────────────────────────────────
+    def _safe_read_csv(fp):
+        try:    return pd.read_csv(fp) if _os.path.exists(fp) else pd.DataFrame()
+        except Exception: return pd.DataFrame()
+
+    ats_df   = _safe_read_csv(_ats_csv)
+    box_df   = _safe_read_csv(_box_csv)
+    wts_df   = _safe_read_csv(_wts_csv)
+    rte_df   = _safe_read_csv(_rte_csv)
+    pair_df  = _safe_read_csv(_pair_csv)
+    time_df  = _safe_read_csv(_time_csv)
+    wkmwu_df = _safe_read_csv(_wkmwu_csv)
+
+    for _fp in [_ats_csv, _box_csv, _wts_csv, _rte_csv, _pair_csv, _time_csv, _wkmwu_csv]:
+        try:    _os.unlink(_fp)
+        except Exception: pass
+
+    # ── Re-derive zero p-values using scipy (R underflows for extreme statistics) ──
+    # When nparLD's pf()/pchisq() returns exactly 0, write.csv writes 0 to the CSV.
+    # Recompute from the test statistic + df using scipy, which handles sub-1e-30 values.
+    def _fix_zero_pvals_df(df, stat_cols, df1_cols, p_col, mode='ats', df2_col=None):
+        if df.empty or p_col not in df.columns:
+            return df
+        s_col  = next((c for c in stat_cols if c in df.columns), None)
+        d1_col = next((c for c in df1_cols  if c in df.columns), None)
+        if s_col is None or d1_col is None:
+            return df
+        df = df.copy()
+        for idx in df.index:
+            try:
+                pv = float(df.at[idx, p_col])
+            except (TypeError, ValueError):
+                continue
+            if np.isnan(pv) or pv != 0.0:
+                continue
+            try:
+                st = float(df.at[idx, s_col])
+                d1 = float(df.at[idx, d1_col])
+                if mode == 'ats' and d1 > 0:
+                    df.at[idx, p_col] = float(stats.chi2.sf(st * d1, d1))
+                elif mode == 'wts' and d1 > 0:
+                    df.at[idx, p_col] = float(stats.chi2.sf(st, d1))
+                elif mode == 'box' and df2_col and df2_col in df.columns:
+                    d2 = float(df.at[idx, df2_col])
+                    if d2 > 0:
+                        df.at[idx, p_col] = float(stats.f.sf(st, d1, d2))
+            except Exception:
+                pass
+        return df
+
+    _ats_pcol  = next((c for c in ['p-value', 'p.value', 'Pr(>F)']       if c in ats_df.columns),  None)
+    _wts_pcol  = next((c for c in ['p-value', 'p.value', 'Pr(>Chisq)']   if c in wts_df.columns),  None)
+    _box_pcol  = next((c for c in ['p-value', 'p.value']                  if c in box_df.columns),  None)
+    _pair_pcol = next((c for c in ['p-value', 'p.value']                  if c in pair_df.columns), None)
+    _time_pcol = next((c for c in ['p-value', 'p.value']                  if c in time_df.columns), None)
+    if _ats_pcol:
+        ats_df  = _fix_zero_pvals_df(ats_df,  ['Statistic','ATS','F'],  ['df','df1','Df'], _ats_pcol,  'ats')
+    if _wts_pcol:
+        wts_df  = _fix_zero_pvals_df(wts_df,  ['Statistic','WTS','Chisq'], ['df','Df'],   _wts_pcol,  'wts')
+    if _box_pcol:
+        box_df  = _fix_zero_pvals_df(box_df,  ['Statistic','ATS','F'],  ['df1','df','Df'], _box_pcol, 'box', df2_col='df2')
+    if _pair_pcol:
+        pair_df = _fix_zero_pvals_df(pair_df, ['Statistic','ATS'],      ['df','df1'],     _pair_pcol, 'ats')
+    if _time_pcol:
+        time_df = _fix_zero_pvals_df(time_df, ['Statistic','ATS'],      ['df','df1'],     _time_pcol, 'ats')
+
+    # ── ATS p_values (backward compatibility) ──────────────────────────────
     p_values: Optional[pd.DataFrame] = None
-    if tmp_pvals_csv.exists():
+    if not ats_df.empty:
+        _p_col_ats  = next((c for c in ['p-value', 'p.value', 'Pr(>F)'] if c in ats_df.columns), None)
+        _s_col_ats  = next((c for c in ['Statistic', 'ATS', 'F'] if c in ats_df.columns), None)
+        _d1_col_ats = next((c for c in ['df1', 'df', 'Df'] if c in ats_df.columns), None)
+        if _p_col_ats and 'effect' in ats_df.columns:
+            _pv_cols   = ['effect', _p_col_ats]
+            _pv_rename = {'effect': 'Effect', _p_col_ats: 'p_value'}
+            if _s_col_ats:
+                _pv_cols.append(_s_col_ats)
+                _pv_rename[_s_col_ats] = 'Statistic'
+            if _d1_col_ats:
+                _pv_cols.append(_d1_col_ats)
+                _pv_rename[_d1_col_ats] = 'df'
+            p_values = ats_df[_pv_cols].rename(columns=_pv_rename)
+
+    # ── Local formatting helpers ────────────────────────────────────────────
+    def _fmt_p_nw(p: float) -> str:
         try:
-            p_values = pd.read_csv(str(tmp_pvals_csv))
-        except Exception as _pv_err:
-            print(f"  [WARNING] Could not parse nparLD p-values CSV: {_pv_err}")
-    tmp_pvals_csv.unlink(missing_ok=True)
+            if np.isnan(p): return 'n/a'
+        except (TypeError, ValueError):
+            return 'n/a'
+        p = float(p)
+        if p < 0.0001:  return f'{p:.2e}'
+        return f'{p:.4f}'
 
-    # Clean up R output: rename Wilcoxon label, strip trailing whitespace and leading tabs
-    r_output = r_output.replace(
-        'Pairwise comparisons using Wilcoxon rank sum test with continuity correction',
-        'Pairwise comparisons using Mann-Whitney U test with continuity correction'
-    )
-    r_output = '\n'.join(ln.rstrip() for ln in r_output.replace('\t', '  ').splitlines())
+    def _sig_nw(p: float) -> str:
+        if np.isnan(p): return ''
+        if p < 0.001: return '***'
+        if p < 0.01:  return '**'
+        if p < 0.05:  return '*'
+        if p < 0.10:  return '.'
+        return ''
 
-    print(r_output)
+    def _holm_nw(p_list):
+        n = len(p_list)
+        if n == 0: return []
+        order = sorted(range(n), key=lambda i: p_list[i])
+        adj = [0.0] * n
+        running_min = 1.0
+        for rank, idx in enumerate(reversed(order)):
+            k = n - rank
+            adj[idx] = min(running_min, p_list[idx] * k)
+            running_min = adj[idx]
+        return adj
+
+    # ── Build formatted report ──────────────────────────────────────────────
+    W = 80
+    _ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    lines: List[str] = [
+        '=' * W,
+        '  NONPARAMETRIC REPEATED MEASURES ANALYSIS  (R: nparLD)',
+        '  Design: F1-LD-F1  (1 between-subjects \u00d7 1 within-subjects factor)',
+        '=' * W,
+        f'  Generated         : {_ts}',
+        f'  Measure           : {measure}',
+        f'  Between factor    : Cohort  ({", ".join(cohort_levels)})',
+        f'  Within factor     : Week    ({", ".join(str(w) for w in week_levels)})',
+        f'  N subjects        : {n_subjects} (complete cases across all weeks)',
+        '',
+        '  Test statistics:',
+        '    ATS = ANOVA-Type Statistic (F-approximation, recommended for small n)',
+        '    WTS = Wald-Type Statistic  (Chi-sq, asymptotic, shown for reference)',
+        '    RTE = Relative Treatment Effect (rank-based mean, 0-1 scale)',
+        '',
+        '  Post-hoc (per week): Mann-Whitney U + Holm correction',
+        '    HL = Hodges-Lehmann estimator (x \u2212 y); 95% CI via wilcox.test',
+        '    r_rb = rank-biserial correlation = 1 \u2212 2U/(n\u2081\u00b7n\u2082)',
+        '=' * W,
+        '',
+        '  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10',
+        '',
+        '\u2550' * W,
+        f'  DEPENDENT VARIABLE:  {measure}',
+        '\u2550' * W,
+        '',
+        '  Model Information',
+        f'    {"Model (R)":<40} F1 LD F1 Model',
+        f'    {"Method":<40} Nonparametric rank-based (nparLD)',
+        f'    {"Between-subjects factor":<40} Cohort  ({", ".join(cohort_levels)})',
+        f'    {"Within-subjects factor":<40} Week    ({", ".join(str(w) for w in week_levels)})',
+        f'    {"N subjects (complete data)":<40} {n_subjects}',
+        f'    {"N subjects dropped":<40} {n_dropped}',
+        '',
+        '  Note: nparLD uses rank transformation; no parametric model is fit.',
+        '  Residuals, R\u00b2, AIC/BIC are not applicable. Inference is based on',
+        '  Relative Treatment Effects (RTEs) which are bounded in [0, 1].',
+        '',
+    ]
+
+    # ATS table
+    if not ats_df.empty:
+        _s_col  = next((c for c in ['Statistic', 'ATS', 'F'] if c in ats_df.columns), None)
+        _d1_col = next((c for c in ['df1', 'df', 'Df'] if c in ats_df.columns), None)
+        _d2_col = next((c for c in ['df2'] if c in ats_df.columns), None)
+        _p_col  = next((c for c in ['p-value', 'p.value', 'Pr(>F)'] if c in ats_df.columns), None)
+        lines += [
+            '  ANOVA-Type Statistics (ATS)  \u2014  F-approximation, recommended for small n',
+            f"  {'Effect':<30}  {'ATS':>10}  {'df1':>8}  {'df2':>8}  {'p-value':>10}  Sig",
+            '  ' + '\u2500' * 74,
+        ]
+        for _, row in ats_df.iterrows():
+            eff  = str(row.get('effect', '')).strip()
+            stat = float(row[_s_col])  if _s_col  else np.nan
+            df1  = float(row[_d1_col]) if _d1_col else np.nan
+            df2  = float(row[_d2_col]) if _d2_col else np.nan
+            pv   = float(row[_p_col])  if _p_col  else np.nan
+            df2s = f'{df2:>8.2f}' if not np.isnan(df2) else f'{"—":>8}'
+            lines.append(
+                f'  {eff:<30}  {stat:>10.4f}  {df1:>8.2f}  {df2s}  {_fmt_p_nw(pv):>10}  {_sig_nw(pv)}'
+            )
+        lines.append('')
+
+    # Box approximation table
+    if not box_df.empty:
+        _bs_col  = next((c for c in ['Statistic', 'ATS', 'F'] if c in box_df.columns), None)
+        _bd1_col = next((c for c in ['df1', 'df', 'Df'] if c in box_df.columns), None)
+        _bd2_col = next((c for c in ['df2'] if c in box_df.columns), None)
+        _bp_col  = next((c for c in ['p-value', 'p.value', 'Pr(>F)'] if c in box_df.columns), None)
+        lines += [
+            '  ATS with Box approximation  \u2014  preferred for small between-subjects N',
+            f"  {'Effect':<30}  {'Statistic':>10}  {'df1':>8}  {'df2':>8}  {'p-value':>10}  Sig",
+            '  ' + '\u2500' * 74,
+        ]
+        for _, row in box_df.iterrows():
+            eff  = str(row.get('effect', '')).strip()
+            stat = float(row[_bs_col])  if _bs_col  else np.nan
+            df1  = float(row[_bd1_col]) if _bd1_col else np.nan
+            df2  = float(row[_bd2_col]) if _bd2_col else np.nan
+            pv   = float(row[_bp_col])  if _bp_col  else np.nan
+            df2s = f'{df2:>8.4f}' if not np.isnan(df2) else f'{"—":>8}'
+            lines.append(
+                f'  {eff:<30}  {stat:>10.4f}  {df1:>8.4f}  {df2s}  {_fmt_p_nw(pv):>10}  {_sig_nw(pv)}'
+            )
+        lines.append('')
+
+    # WTS table
+    if not wts_df.empty:
+        _ws_col = next((c for c in ['Statistic', 'WTS', 'Chisq'] if c in wts_df.columns), None)
+        _wd_col = next((c for c in ['df', 'Df'] if c in wts_df.columns), None)
+        _wp_col = next((c for c in ['p-value', 'p.value', 'Pr(>Chisq)'] if c in wts_df.columns), None)
+        lines += [
+            '  Wald-Type Statistics (WTS)  \u2014  Chi-square, asymptotic (shown for reference)',
+            f"  {'Effect':<30}  {'WTS (chi-sq)':>12}  {'df':>6}  {'p-value':>10}  Sig",
+            '  ' + '\u2500' * 66,
+        ]
+        for _, row in wts_df.iterrows():
+            eff  = str(row.get('effect', '')).strip()
+            stat = float(row[_ws_col]) if _ws_col else np.nan
+            df_  = float(row[_wd_col]) if _wd_col else np.nan
+            pv   = float(row[_wp_col]) if _wp_col else np.nan
+            lines.append(
+                f'  {eff:<30}  {stat:>12.4f}  {df_:>6.2f}  {_fmt_p_nw(pv):>10}  {_sig_nw(pv)}'
+            )
+        lines.append('')
+
+    # RTE section
+    if not rte_df.empty:
+        if 'Unnamed: 0' in rte_df.columns:
+            rte_df = rte_df.rename(columns={'Unnamed: 0': 'label'})
+        _lbl_col  = 'label' if 'label' in rte_df.columns else rte_df.columns[0]
+        _est_col  = next((c for c in ['RTE', 'Estimate', 'rte'] if c in rte_df.columns), None)
+        _nobs_col = next((c for c in ['Nobs', 'nobs', 'N'] if c in rte_df.columns), None)
+        lines += [
+            '  Relative Treatment Effects (RTEs)  \u2014  rank-based effect sizes (0-1 scale)',
+            '  Interpretation: RTE near 0.5 = no effect; >0.5 = higher ranks in this cell',
+            '',
+        ]
+        cohort_rows_rte, week_rows_rte, cell_rows_rte = [], [], []
+        for _, row in rte_df.iterrows():
+            lbl = str(row.get(_lbl_col, '')).strip()
+            if ':' in lbl:
+                cell_rows_rte.append((lbl, row))
+            elif lbl.startswith('Week'):
+                week_rows_rte.append((lbl, row))
+            else:
+                cohort_rows_rte.append((lbl, row))
+
+        def _rte_line_nw(lbl, row, ind=4):
+            est  = float(row[_est_col]) if _est_col else np.nan
+            nobs = int(row[_nobs_col])  if (_nobs_col and not pd.isna(row.get(_nobs_col))) else None
+            ns   = f'  n={nobs}' if nobs is not None else ''
+            return f'  {" "*ind}{lbl:<36}  {est:>6.4f}{ns}'
+
+        if cohort_rows_rte:
+            lines.append('  Between-subjects (Cohort marginal):')
+            for lbl, row in cohort_rows_rte: lines.append(_rte_line_nw(lbl, row))
+            lines.append('')
+        if week_rows_rte:
+            lines.append('  Within-subjects (Week marginal):')
+            for lbl, row in week_rows_rte: lines.append(_rte_line_nw(lbl, row))
+            lines.append('')
+        if cell_rows_rte:
+            lines.append('  Cell RTEs (Cohort \u00d7 Week):')
+            for lbl, row in cell_rows_rte: lines.append(_rte_line_nw(lbl, row))
+            lines.append('')
+
+    # Pairwise group comparisons
+    if not pair_df.empty:
+        _pc_pair = next((c for c in pair_df.columns if 'pair' in c.lower()), pair_df.columns[0])
+        _pc_test = next((c for c in pair_df.columns if 'test' in c.lower()), None)
+        _pc_stat = next((c for c in ['Statistic', 'ATS'] if c in pair_df.columns), None)
+        _pc_df   = next((c for c in ['df', 'Df'] if c in pair_df.columns), None)
+        _pc_p    = next((c for c in ['p-value', 'p.value'] if c in pair_df.columns), None)
+
+        _cohort_rte_map: Dict[str, float] = {}
+        if not rte_df.empty and _est_col:
+            for _, _crrow in rte_df.iterrows():
+                _crlbl = str(_crrow.get(_lbl_col, '')).strip()
+                if ':' not in _crlbl and not _crlbl.startswith('Week'):
+                    _crgrp = _crlbl.replace('Cohort', '', 1).strip()
+                    try: _cohort_rte_map[_crgrp] = float(_crrow[_est_col])
+                    except Exception: pass
+
+        _parsed_pairs: List[dict] = []
+        for _, row in pair_df.iterrows():
+            try:
+                pair_lbl = str(row.get(_pc_pair, '')).replace('Cohort', '').replace(':', ' vs ')
+                test_lbl = str(row.get(_pc_test, '')) if _pc_test else ''
+                stat     = float(row[_pc_stat]) if _pc_stat else np.nan
+                df_v     = float(row[_pc_df])   if _pc_df   else np.nan
+                pv       = float(row[_pc_p])    if _pc_p    else np.nan
+                _parsed_pairs.append({'pair': pair_lbl, 'test': test_lbl, 'stat': stat, 'df': df_v, 'p_raw': pv})
+            except Exception:
+                _parsed_pairs.append({'raw': str(row.to_dict())})
+
+        _ttype_idx: Dict[str, list] = {}
+        for _pi, _pr in enumerate(_parsed_pairs):
+            if 'test' in _pr and 'p_raw' in _pr:
+                _ttype_idx.setdefault(_pr['test'], []).append(_pi)
+        for _tt, _tidxs in _ttype_idx.items():
+            _adjs = _holm_nw([_parsed_pairs[i]['p_raw'] for i in _tidxs])
+            for _ti, _ap in zip(_tidxs, _adjs):
+                _parsed_pairs[_ti]['p_adj'] = _ap
+
+        lines += [
+            '  Pairwise Group Comparisons  (from nparLD $pair.comparison)',
+            '  Holm-Bonferroni correction applied within each test type (Cohort / Week / Cohort:Week)',
+            '  Effect size: |\u0394RTE| = absolute difference in marginal RTEs (Cohort tests only)',
+            f"  {'Pair':<28}  {'Test':<12}  {'ATS':>11}  {'df':>6}  {'p (raw)':>10}  {'p (Holm)':>10}  {'|\u0394RTE|':>8}  Sig",
+            '  ' + '\u2500' * 102,
+        ]
+        for _pr in _parsed_pairs:
+            if 'raw' in _pr:
+                lines.append('  ' + _pr['raw'])
+            else:
+                _p_adj = _pr.get('p_adj', _pr['p_raw'])
+                if 'Cohort' in _pr['test'] and 'Week' not in _pr['test'] and _cohort_rte_map:
+                    _pp = [p.strip() for p in _pr['pair'].split(' vs ')]
+                    if len(_pp) == 2:
+                        _r1 = _cohort_rte_map.get(_pp[0], float('nan'))
+                        _r2 = _cohort_rte_map.get(_pp[1], float('nan'))
+                        _dv = abs(_r1 - _r2) if not (np.isnan(_r1) or np.isnan(_r2)) else float('nan')
+                        _ds = f'{_dv:.3f}' if not np.isnan(_dv) else 'N/A'
+                    else:
+                        _ds = 'N/A'
+                else:
+                    _ds = '\u2014'
+                lines.append(
+                    f"  {_pr['pair']:<28}  {_pr['test']:<12}  ATS={_pr['stat']:>9.4f}  "
+                    f"df={_pr['df']:>6.2f}  {_fmt_p_nw(_pr['p_raw']):>10}  "
+                    f"{_fmt_p_nw(_p_adj):>10}  {_ds:>8}  {_sig_nw(_p_adj)}"
+                )
+        lines.append('')
+
+    # Within-group time effects
+    if not time_df.empty:
+        _tc_coh  = 'cohort' if 'cohort' in time_df.columns else time_df.columns[-1]
+        _tc_stat = next((c for c in ['Statistic', 'ATS'] if c in time_df.columns), None)
+        _tc_df   = next((c for c in ['df', 'Df'] if c in time_df.columns), None)
+        _tc_p    = next((c for c in ['p-value', 'p.value'] if c in time_df.columns), None)
+        lines += [
+            '  Within-Group Time Effects  (ATS per cohort, from nparLD $ANOVA.test.time)',
+            '  \u2500' + '\u2500' * 77,
+            f"  {'Cohort':<18}  {'ATS':>10}  {'df':>8}  {'p-value':>12}  Sig",
+            '  ' + '\u2500' * 56,
+        ]
+        for _, row in time_df.iterrows():
+            coh  = str(row.get(_tc_coh, '')).strip()
+            stat = float(row[_tc_stat]) if _tc_stat else np.nan
+            df_  = float(row[_tc_df])   if _tc_df   else np.nan
+            pv   = float(row[_tc_p])    if _tc_p    else np.nan
+            lines.append(
+                f'  {coh:<18}  {stat:>10.4f}  {df_:>8.4f}  {_fmt_p_nw(pv):>12}  {_sig_nw(pv)}'
+            )
+        lines.append('')
+
+    # Per-week between-cohort MWU with HL and CI
+    if not wkmwu_df.empty:
+        lines += [
+            '  Between-Cohort Comparisons at Each Week  (Mann-Whitney U, Holm corrected within each week)',
+            '  Effect size: r_rb = rank-biserial correlation = 1 \u2212 2U/(n\u2081\u00b7n\u2082); range [\u22121, 1], positive = group1 > group2',
+            '  HL = Hodges-Lehmann estimator of location shift (x \u2212 y); 95% CI via wilcox.test',
+            '  ' + '\u2500' * 88,
+        ]
+        for _wk_val in sorted(wkmwu_df['week'].unique()):
+            _wk_sub = wkmwu_df[wkmwu_df['week'] == _wk_val].copy()
+            _p_adjs = _holm_nw(_wk_sub['p_raw'].tolist())
+            lines.append(f'  Week: {int(_wk_val)}')
+            for (_idx, _row), _pa in zip(_wk_sub.iterrows(), _p_adjs):
+                _g1, _n1 = str(_row['g1']), int(_row['n1'])
+                _g2, _n2 = str(_row['g2']), int(_row['n2'])
+                _U       = float(_row['U'])
+                _pr_v    = float(_row['p_raw'])
+                _hl      = float(_row['hl'])
+                _ci_lo   = float(_row['ci_lo'])
+                _ci_hi   = float(_row['ci_hi'])
+                _rrb     = 1.0 - 2.0 * _U / (_n1 * _n2)
+                lines.append(
+                    f'    {_g1} (n={_n1}) vs {_g2} (n={_n2}) :  '
+                    f'U={_U:.0f}  p_raw={_fmt_p_nw(_pr_v)}  p_holm={_fmt_p_nw(_pa)}  '
+                    f'r_rb={_rrb:+.3f}  {_sig_nw(_pa)}'
+                )
+                if np.isnan(_hl):
+                    lines.append(f'      HL=[N/A]  95%CI [N/A, N/A]  (ties prevented CI)')
+                else:
+                    lines.append(f'      HL={_hl:+.4f}  95%CI [{_ci_lo:+.4f}, {_ci_hi:+.4f}]')
+            lines.append('')
+
+    lines += [
+        '  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10', '',
+        '=' * W, '  End of nparLD Report', '=' * W,
+    ]
+    report_str = '\n'.join(lines)
+    print(report_str)
 
     # ── Save report ────────────────────────────────────────────────────────
     report_path: Optional[Path] = None
-    if save_report and r_output.strip():
-        _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_path = Path.cwd() / f"{prefix}_nparld_cohort_week_{_ts}.txt"
-        header_lines = [
-            "=" * 72,
-            f"nparLD: {measure} -- Cohort x Week (F1-LD-F1 nonparametric ANOVA)",
-            "=" * 72,
-            f"Generated   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"Measure     : {measure}",
-            f"Cohorts     : {', '.join(cohort_levels)}",
-            f"Weeks       : {week_levels}",
-            f"N subjects  : {n_subjects} (complete cases across all weeks)",
-            "",
-            "Design      : F1-LD-F1 (one between-subjects x one within-subjects factor)",
-            "Between     : Cohort  (CA% schedule)",
-            "Within      : Week    (1-indexed chronological week)",
-            "Response    : Per-animal per-week mean of measure",
-            "",
-            "Statistics  : ANOVA-Type Statistic (ATS, chi-sq approx.) -- primary",
-            "              Box approximation of ATS -- secondary",
-            "              Wald-Type Statistic (WTS) -- reference only",
-            "Post-hoc    : Between-cohort: pairwise Mann-Whitney U, Holm corrected",
-            "              Per-week     : pairwise Mann-Whitney U between cohorts at each week, Holm corrected",
-            "",
-            "R output:",
-            "-" * 72,
-            "",
-        ]
-        report_path.write_text('\n'.join(header_lines) + r_output, encoding='utf-8')
-        print(f"\n[OK] Report saved -> {report_path}")
+    if save_report:
+        _ts2 = datetime.now().strftime('%Y%m%d_%H%M%S')
+        report_path = Path.cwd() / f'{prefix}_nparld_cohort_week_{_ts2}.txt'
+        report_path.write_text(report_str, encoding='utf-8')
+        print(f'\n[OK] Report saved -> {report_path}')
 
     return {
-        'r_output': r_output,
+        'r_output'   : r_output,
+        'report_str' : report_str,
         'report_path': report_path,
-        'n_subjects': n_subjects,
-        'cohorts': cohort_levels,
-        'weeks': week_levels,
-        'p_values': p_values,   # pd.DataFrame: Effect, Statistic, df, p_value (ATS)
+        'n_subjects' : n_subjects,
+        'cohorts'    : cohort_levels,
+        'weeks'      : week_levels,
+        'p_values'   : p_values,
     }
 
 
@@ -14304,9 +14714,13 @@ def run_nparld_omnibus_r(
         return ""
 
     def _fp(p: float) -> str:
-        if p != p: return "      NA"
-        if p < 0.0001: return "< .0001"
-        return f"{p:.4f}"
+        try:
+            if np.isnan(p): return 'n/a'
+        except (TypeError, ValueError):
+            return 'n/a'
+        p = float(p)
+        if p < 0.0001: return f'{p:.2e}'
+        return f'{p:.4f}'
 
     report_lines = [
         sep,
@@ -14345,12 +14759,12 @@ def run_nparld_omnibus_r(
         "─" * 72,
         "DV 1 FULL OUTPUT: Total Change (weekly mean)",
         "─" * 72,
-        tc_result.get('r_output', '(no output)'),
+        tc_result.get('report_str', tc_result.get('r_output', '(no output)')),
         "",
         "─" * 72,
         f"DV 2 FULL OUTPUT: Daily Change at days {target_days}",
         "─" * 72,
-        dc_result.get('r_output', '(no output)'),
+        dc_result.get('report_str', dc_result.get('r_output', '(no output)')),
         "",
         sep,
         "END",
@@ -14916,31 +15330,92 @@ def run_nparld_behavior_r(
     # Build post-hoc block identical to weight nparLD (between-cohort per week, MWU Holm)
     _posthoc = (
         'cat("\\n--- POST-HOC: Between-cohort at each week (Mann-Whitney U, Holm) ---\\n")\n'
+        'cat("  Effect size: r_rb = 1 - 2W/(nA*nB); |r|: <0.1 negligible, 0.1-0.3 small, 0.3-0.5 medium, >=0.5 large\\n")\n'
         'for (wk in levels(sub$Week)) {\n'
         '  sw <- sub[sub$Week == wk, ]\n'
         '  cat("\\nWeek:", wk, "\\n")\n'
         '  cohs <- levels(sw$Cohort)\n'
         '  if (length(cohs) < 2) { cat("  (only 1 cohort)\\n"); next }\n'
-        '  pidx <- combn(length(cohs), 2)\n'
-        '  p_raw <- apply(pidx, 2, function(idx) {\n'
-        '    x <- sw$Value[sw$Cohort == cohs[idx[1]]]\n'
-        '    y <- sw$Value[sw$Cohort == cohs[idx[2]]]\n'
-        '    if (length(x) < 1 || length(y) < 1) return(NA_real_)\n'
-        '    tryCatch(wilcox.test(x, y, exact=FALSE)$p.value, error=function(e) NA_real_)\n'
-        '  })\n'
-        '  p_holm <- p.adjust(p_raw, method="holm")\n'
+        '  pidx    <- combn(length(cohs), 2)\n'
+        '  p_raw_w <- numeric(ncol(pidx))\n'
+        '  r_rb_wv <- numeric(ncol(pidx))\n'
         '  for (k in seq_len(ncol(pidx))) {\n'
-        '    ca <- cohs[pidx[1, k]]; cb <- cohs[pidx[2, k]]\n'
-        '    na <- sum(!is.na(sw$Value[sw$Cohort == ca]))\n'
-        '    nb <- sum(!is.na(sw$Value[sw$Cohort == cb]))\n'
-        '    if (is.na(p_raw[k])) {\n'
-        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : NA\\n", ca, na, cb, nb))\n'
+        '    x  <- sw$Value[sw$Cohort == cohs[pidx[1, k]]]\n'
+        '    y  <- sw$Value[sw$Cohort == cohs[pidx[2, k]]]\n'
+        '    if (length(x) < 1 || length(y) < 1) { p_raw_w[k] <- NA_real_; r_rb_wv[k] <- NA_real_; next }\n'
+        '    wt <- tryCatch(wilcox.test(x, y, exact=FALSE), error=function(e) NULL)\n'
+        '    if (!is.null(wt)) {\n'
+        '      p_raw_w[k]  <- wt$p.value\n'
+        '      r_rb_wv[k]  <- 1 - 2 * as.numeric(wt$statistic) / (length(x) * length(y))\n'
+        '    } else { p_raw_w[k] <- NA_real_; r_rb_wv[k] <- NA_real_ }\n'
+        '  }\n'
+        '  p_holm_w <- p.adjust(p_raw_w, method="holm")\n'
+        '  for (k in seq_len(ncol(pidx))) {\n'
+        '    ca  <- cohs[pidx[1, k]]; cb <- cohs[pidx[2, k]]\n'
+        '    na_ <- sum(!is.na(sw$Value[sw$Cohort == ca]))\n'
+        '    nb_ <- sum(!is.na(sw$Value[sw$Cohort == cb]))\n'
+        '    if (is.na(p_raw_w[k])) {\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : NA\\n", ca, na_, cb, nb_))\n'
         '    } else {\n'
-        '      sig <- ifelse(p_holm[k]<0.001,"***",ifelse(p_holm[k]<0.01,"**",ifelse(p_holm[k]<0.05,"*","ns")))\n'
-        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : p_raw=%.4f  p_holm=%.4f  %s\\n",\n'
-        '                  ca, na, cb, nb, p_raw[k], p_holm[k], sig))\n'
+        '      sig <- ifelse(p_holm_w[k]<0.001,"***",ifelse(p_holm_w[k]<0.01,"**",ifelse(p_holm_w[k]<0.05,"*","ns")))\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : p_raw=%s  p_holm=%s  %s  r_rb=%+.3f\\n",\n'
+        '                  ca, na_, cb, nb_, fmt_p(p_raw_w[k]), fmt_p(p_holm_w[k]), sig, r_rb_wv[k]))\n'
         '    }\n'
         '  }\n'
+        '}\n'
+    )
+
+    _posthoc_collapsed = (
+        'cat("\\n--- POST-HOC (collapsed across weeks): Between-cohort omnibus follow-up ---\\n")\n'
+        'cat("  Per-animal mean across all weeks; MWU pairwise, Holm corrected\\n")\n'
+        'cat("  Effect size: r_rb = 1 - 2W/(nA*nB); |r|: <0.1 negligible, 0.1-0.3 small, 0.3-0.5 medium, >=0.5 large\\n")\n'
+        'cat("  HL = Hodges-Lehmann estimator of location shift (x - y); 95% CI via wilcox.test\\n")\n'
+        'id_means   <- tapply(sub$Value, sub$ID, mean, na.rm=TRUE)\n'
+        'id_cohorts <- sub$Cohort[match(names(id_means), as.character(sub$ID))]\n'
+        'coll_df    <- data.frame(ID=names(id_means), mean_val=as.numeric(id_means),\n'
+        '                         Cohort=id_cohorts, stringsAsFactors=FALSE)\n'
+        'cohs_c <- levels(droplevels(factor(coll_df$Cohort)))\n'
+        'if (length(cohs_c) >= 2) {\n'
+        '  pidx_c  <- combn(length(cohs_c), 2)\n'
+        '  p_raw_c <- numeric(ncol(pidx_c))\n'
+        '  r_rb_c  <- numeric(ncol(pidx_c))\n'
+        '  u_c     <- numeric(ncol(pidx_c))\n'
+        '  hl_c    <- numeric(ncol(pidx_c))\n'
+        '  ci_lo_c <- numeric(ncol(pidx_c))\n'
+        '  ci_hi_c <- numeric(ncol(pidx_c))\n'
+        '  for (k in seq_len(ncol(pidx_c))) {\n'
+        '    x  <- coll_df$mean_val[coll_df$Cohort == cohs_c[pidx_c[1, k]]]\n'
+        '    y  <- coll_df$mean_val[coll_df$Cohort == cohs_c[pidx_c[2, k]]]\n'
+        '    wt <- tryCatch(wilcox.test(x, y, exact=FALSE, conf.int=TRUE), error=function(e) NULL)\n'
+        '    if (!is.null(wt)) {\n'
+        '      p_raw_c[k] <- wt$p.value\n'
+        '      u_c[k]     <- as.numeric(wt$statistic)\n'
+        '      r_rb_c[k]  <- 1 - 2 * u_c[k] / (length(x) * length(y))\n'
+        '      hl_c[k]    <- as.numeric(wt$estimate)\n'
+        '      ci_lo_c[k] <- wt$conf.int[1]\n'
+        '      ci_hi_c[k] <- wt$conf.int[2]\n'
+        '    } else {\n'
+        '      p_raw_c[k] <- NA_real_; r_rb_c[k] <- NA_real_; u_c[k] <- NA_real_\n'
+        '      hl_c[k] <- NA_real_; ci_lo_c[k] <- NA_real_; ci_hi_c[k] <- NA_real_\n'
+        '    }\n'
+        '  }\n'
+        '  p_holm_c <- p.adjust(p_raw_c, method="holm")\n'
+        '  for (k in seq_len(ncol(pidx_c))) {\n'
+        '    ca  <- cohs_c[pidx_c[1, k]]; cb <- cohs_c[pidx_c[2, k]]\n'
+        '    na_ <- sum(!is.na(coll_df$mean_val[coll_df$Cohort == ca]))\n'
+        '    nb_ <- sum(!is.na(coll_df$mean_val[coll_df$Cohort == cb]))\n'
+        '    if (is.na(p_raw_c[k])) {\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : NA\\n", ca, na_, cb, nb_))\n'
+        '    } else {\n'
+        '      sig <- ifelse(p_holm_c[k]<0.001,"***",ifelse(p_holm_c[k]<0.01,"**",ifelse(p_holm_c[k]<0.05,"*","ns")))\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : p_raw=%s  p_holm=%s  %s  r_rb=%+.3f\\n",\n'
+        '                  ca, na_, cb, nb_, fmt_p(p_raw_c[k]), fmt_p(p_holm_c[k]), sig, r_rb_c[k]))\n'
+        '      cat(sprintf("    U=%.0f  HL=%+.4f  95%%CI [%+.4f, %+.4f]\\n",\n'
+        '                  u_c[k], hl_c[k], ci_lo_c[k], ci_hi_c[k]))\n'
+        '    }\n'
+        '  }\n'
+        '} else {\n'
+        '  cat("  (fewer than 2 cohorts with data)\\n")\n'
         '}\n'
     )
 
@@ -14962,10 +15437,11 @@ def run_nparld_behavior_r(
         '  list(col="Lethargy", label="Lethargy (% days)")\n'
         ')\n'
         '\n'
-        'dv_labels <- character(0)\n'
-        'p_cohort  <- numeric(0)\n'
-        'p_week    <- numeric(0)\n'
-        'p_int     <- numeric(0)\n'
+        'dv_labels    <- character(0)\n'
+        'p_cohort_box <- numeric(0)\n'
+        'p_week       <- numeric(0)\n'
+        'p_int        <- numeric(0)\n'
+        'fmt_p <- function(p) { if (is.na(p)) return("NA"); if (p < 0.001) sprintf("%.4e", p) else sprintf("%.4f", p) }\n'
         '\n'
         'for (m in metrics) {\n'
         '  cat("\\n", strrep("=", 72), "\\n", sep="")\n'
@@ -14998,31 +15474,49 @@ def run_nparld_behavior_r(
         '  if (is.null(result)) next\n'
         '\n'
         '  cat("\\n--- ANOVA-Type Statistic (ATS) ---\\n")\n'
-        '  print(result$ANOVA.test)\n'
+        '  ats <- result$ANOVA.test\n'
+        '  cat(sprintf("  %-14s  %10s  %10s  %14s\\n", "Source", "Statistic", "df", "p-value"))\n'
+        '  for (i in seq_len(nrow(ats))) {\n'
+        '    cat(sprintf("  %-14s  %10.4f  %10.4f  %14s\\n",\n'
+        '                rownames(ats)[i], ats[i,1], ats[i,2], fmt_p(ats[i,3])))\n'
+        '  }\n'
         '  cat("\\n--- ATS with Box approximation ---\\n")\n'
-        '  print(result$ANOVA.test.mod.Box)\n'
+        '  box <- result$ANOVA.test.mod.Box\n'
+        '  cat(sprintf("  %-14s  %10s  %10s  %10s  %14s\\n", "Source", "Statistic", "df1", "df2", "p-value"))\n'
+        '  for (i in seq_len(nrow(box))) {\n'
+        '    cat(sprintf("  %-14s  %10.4f  %10.4f  %10.4f  %14s\\n",\n'
+        '                rownames(box)[i], box[i,1], box[i,2], box[i,3], fmt_p(box[i,4])))\n'
+        '  }\n'
         '  cat("\\n--- Wald-Type Statistic (WTS) ---\\n")\n'
-        '  print(result$Wald.test)\n'
+        '  wts <- result$Wald.test\n'
+        '  cat(sprintf("  %-14s  %10s  %6s  %14s\\n", "Source", "Statistic", "df", "p-value"))\n'
+        '  for (i in seq_len(nrow(wts))) {\n'
+        '    cat(sprintf("  %-14s  %10.4f  %6d  %14s\\n",\n'
+        '                rownames(wts)[i], wts[i,1], as.integer(wts[i,2]), fmt_p(wts[i,3])))\n'
+        '  }\n'
         '  cat("\\n--- Relative Treatment Effects (RTE) ---\\n")\n'
+        '  cat("  (RTEs are effect measures: value near 0.5 = no treatment effect)\\n")\n'
         '  print(result$RTE)\n'
         '  dv_labels <- c(dv_labels, m$label)\n'
-        '  ats_p <- result$ANOVA.test[, ncol(result$ANOVA.test)]\n'
-        '  p_cohort <- c(p_cohort, ats_p[1])\n'
-        '  p_week   <- c(p_week,   ats_p[2])\n'
-        '  p_int    <- c(p_int,    ats_p[3])\n'
+        '  ats_p     <- result$ANOVA.test[, ncol(result$ANOVA.test)]\n'
+        '  box_p     <- result$ANOVA.test.mod.Box[, ncol(result$ANOVA.test.mod.Box)]\n'
+        '  p_cohort_box <- c(p_cohort_box, box_p[1])\n'
+        '  p_week       <- c(p_week,       ats_p[2])\n'
+        '  p_int        <- c(p_int,        ats_p[3])\n'
         + _posthoc +
+        _posthoc_collapsed +
         '}\n'
         '\n'
         'cat("\\n", strrep("=", 72), "\\n", sep="")\n'
         'cat("BH-FDR CORRECTION ACROSS BEHAVIORAL METRICS\\n")\n'
         'cat(strrep("=", 72), "\\n", sep="")\n'
-        'cat("  ATS p-values corrected using Benjamini-Hochberg FDR.\\n")\n'
-        'cat("  Correction applied separately per effect row\\n")\n'
-        'cat("  (one adjusted set for Cohort, Week, and Cohort:Week).\\n\\n")\n'
+        'cat("  Cohort: Box-approximation p-values (preferred for small N), BH-FDR corrected.\\n")\n'
+        'cat("  Week, Cohort:Week: ATS p-values, BH-FDR corrected.\\n")\n'
+        'cat("  Correction applied separately per effect row.\\n\\n")\n'
         'sig_fn <- function(p) { if(is.na(p)) return(""); if(p<0.001) return("***"); if(p<0.01) return("**"); if(p<0.05) return("*"); return("") }\n'
-        'fmt_p  <- function(p) { if(is.na(p)) return("     NA"); if(p<0.0001) return("< .0001"); sprintf("%.4f", p) }\n'
+        'fmt_p <- function(p) { if (is.na(p)) return("NA"); if (p < 0.001) sprintf("%.4e", p) else sprintf("%.4f", p) }\n'
         'effects_smry <- list(\n'
-        '  list(name="Cohort",      p_raw=p_cohort),\n'
+        '  list(name="Cohort",      p_raw=p_cohort_box),\n'
         '  list(name="Week",        p_raw=p_week),\n'
         '  list(name="Cohort:Week", p_raw=p_int)\n'
         ')\n'
@@ -15119,8 +15613,11 @@ def run_nparld_behavior_r(
             "Statistics  : ATS (chi-sq approx.) -- primary",
             "              Box approx. of ATS   -- secondary (preferred for small N)",
             "              WTS                  -- reference only",
-            "              RTE                  -- relative treatment effects",
+            "              RTE                  -- relative treatment effects (serve as effect measures; 0.5 = no effect)",
+            "              p-values in scientific notation when p < 0.001, decimal otherwise",
             "Post-hoc    : Between-cohort at each week: pairwise Mann-Whitney U, Holm corrected",
+            "              Between-cohort collapsed across weeks: pairwise MWU (omnibus follow-up; subsumes KW post-hoc)",
+            "              Effect size: r_rb = 1 - 2W/(nA*nB); range [-1,1]; |r|: <0.1 negligible, 0.1-0.3 small, 0.3-0.5 medium, >=0.5 large",
             "",
             "R output:",
             "-" * 72,
@@ -15135,6 +15632,355 @@ def run_nparld_behavior_r(
         'n_subjects': n_subjects,
         'cohorts': cohort_levels,
         'weeks': week_levels,
+    }
+
+
+def run_kruskal_behavior_collapsed_r(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    weeks: Optional[List[int]] = None,
+    save_report: bool = True,
+    prefix: str = "kruskal_behavior_collapsed",
+) -> dict:
+    """
+    Kruskal-Wallis + pairwise Wilcoxon (Holm) for behavioral metrics
+    collapsed across weeks.
+
+    Design  : Between-subjects only (Cohort), week factor removed.
+    Response: Per-animal mean % across all weeks for each metric:
+                No Nest   = mean weekly % days Nest Made? == No
+                Anxious   = mean weekly % days Anxious Behaviors? == Yes
+                Lethargy  = mean weekly % days Lethargy? == Yes
+    Model   : kruskal.test() + pairwise.wilcox.test(Holm) per metric;
+              BH-FDR correction across metrics.
+
+    Returns
+    -------
+    dict with keys: 'r_output', 'report_path', 'n_subjects', 'cohorts'
+    """
+    BEHAVIORS = [
+        ('Nest Made?',         False, 'No Nest',            'NoNest'),
+        ('Anxious Behaviors?', True,  'Anxious Behaviors',  'Anxious'),
+        ('Lethargy?',          True,  'Lethargy',           'Lethargy'),
+    ]
+
+    def _to_bool_series(s: pd.Series) -> pd.Series:
+        T = {'yes', 'true', '1', 'y'}
+        F = {'no', 'false', '0', 'n'}
+        def _cv(v):
+            if isinstance(v, bool): return v
+            if isinstance(v, (int, float)) and not pd.isna(v): return bool(v)
+            if isinstance(v, str):
+                ls = v.strip().lower()
+                if ls in T: return True
+                if ls in F: return False
+            return None
+        return s.map(_cv)
+
+    # ── Build per-animal per-week records (mirrors run_nparld_behavior_r) ──
+    frames = []
+    for label, df in cohort_dfs.items():
+        cdf = clean_cohort(df.copy())
+        if 'Day' not in cdf.columns:
+            cdf['Cohort'] = label
+            cdf = add_day_column_across_cohorts(cdf, drop_ramp_baseline=False)
+        cdf = cdf[cdf['Day'] >= 1].copy()
+        cdf = _add_week_column_across_cohorts(cdf)
+
+        for col, aberrant_val, _, col_key in BEHAVIORS:
+            if col in cdf.columns:
+                cdf[f'_bin_{col_key}'] = _to_bool_series(cdf[col])
+
+        for (animal_id, week_num), grp in cdf.groupby(['ID', 'Week']):
+            row: dict = {'ID': str(animal_id), 'Cohort': label, 'Week': int(week_num)}
+            for col, aberrant_val, _, col_key in BEHAVIORS:
+                bcol = f'_bin_{col_key}'
+                if bcol not in grp.columns:
+                    row[col_key] = float('nan')
+                    continue
+                valid = grp[bcol].dropna()
+                row[col_key] = (100.0 * (valid == aberrant_val).sum() / len(valid)
+                                if len(valid) > 0 else float('nan'))
+            frames.append(row)
+
+    if not frames:
+        print("  [ERROR] No behavioral data found in any cohort.")
+        return {}
+
+    weekly = pd.DataFrame(frames)
+
+    if weeks is not None:
+        weekly = weekly[weekly['Week'].isin(weeks)].copy()
+
+    # Complete-case filter (same animals as nparLD)
+    week_counts = weekly.groupby('ID')['Week'].nunique()
+    all_weeks_n = weekly['Week'].nunique()
+    complete_ids = week_counts[week_counts == all_weeks_n].index
+    n_dropped = weekly['ID'].nunique() - len(complete_ids)
+    if n_dropped:
+        print(f"  [NOTE] Dropped {n_dropped} animal(s) with incomplete records; "
+              f"{len(complete_ids)} retained")
+    weekly = weekly[weekly['ID'].isin(complete_ids)].copy()
+
+    if weekly.empty or len(complete_ids) < 3:
+        print(f"  [ERROR] Insufficient complete-case animals ({len(complete_ids)}).")
+        return {}
+
+    col_keys      = [ck for _, _, _, ck in BEHAVIORS]
+    cohort_levels = sorted(weekly['Cohort'].unique())
+    week_levels   = sorted(weekly['Week'].unique())
+    n_subjects    = int(weekly['ID'].nunique())
+
+    # ── Collapse: mean % across weeks per animal ──────────────────────────
+    collapsed = (
+        weekly.groupby(['ID', 'Cohort'])[col_keys]
+        .mean()
+        .reset_index()
+    )
+
+    print(f"\nKruskal-Wallis behavior (collapsed): {n_subjects} subjects, "
+          f"{len(week_levels)} weeks averaged")
+    print(f"  Cohorts : {cohort_levels}")
+    print(f"  Weeks   : {week_levels}")
+
+    # Descriptive summary
+    _ck_label = {ck: lbl for _, _, lbl, ck in BEHAVIORS}
+    for _ck in col_keys:
+        if _ck not in collapsed.columns:
+            continue
+        print(f"\n  [{_ck_label.get(_ck, _ck)} — mean % per animal (collapsed across weeks)]")
+        _cw = max(len(str(c)) for c in cohort_levels) + 2
+        print(f"    {'Cohort':<{_cw}}  {'n':>4}  {'Mean':>7}  {'Median':>7}  {'SD':>7}")
+        print(f"    {'-'*_cw}  {'-'*4}  {'-'*7}  {'-'*7}  {'-'*7}")
+        for _co in cohort_levels:
+            _vals = collapsed.loc[collapsed['Cohort'] == _co, _ck].dropna()
+            _n = len(_vals)
+            _m = float(_vals.mean()) if _n > 0 else float('nan')
+            _med = float(_vals.median()) if _n > 0 else float('nan')
+            _sd = float(_vals.std(ddof=1)) if _n > 1 else float('nan')
+            print(f"    {str(_co):<{_cw}}  {_n:>4}  {_m:>7.1f}  {_med:>7.1f}  {_sd:>7.1f}")
+
+    # ── Write temp CSV ─────────────────────────────────────────────────────
+    tmp_csv = Path(tempfile.mktemp(suffix='.csv'))
+    collapsed[['ID', 'Cohort'] + col_keys].to_csv(str(tmp_csv), index=False)
+
+    _csv_r     = str(tmp_csv).replace('\\', '/')
+    _co_levels = ', '.join(f'"{c}"' for c in cohort_levels)
+
+    r_script = (
+        'options(warn=1, scipen=999)\n'
+        f'data <- read.csv("{_csv_r}")\n'
+        f'data$Cohort <- factor(data$Cohort, levels=c({_co_levels}))\n'
+        'data$ID     <- factor(data$ID)\n'
+        '\n'
+        'metrics <- list(\n'
+        '  list(col="NoNest",   label="No Nest (% days nest absent)"),\n'
+        '  list(col="Anxious",  label="Anxious Behaviors (% days)"),\n'
+        '  list(col="Lethargy", label="Lethargy (% days)")\n'
+        ')\n'
+        '\n'
+        '# eta2_H interpretation: <0.01 negligible, 0.01-0.06 small, 0.06-0.14 moderate, >=0.14 large\n'
+        'eta2_label <- function(e) {\n'
+        '  if (is.na(e)) return("")\n'
+        '  if (e < 0.01) return("negligible")\n'
+        '  if (e < 0.06) return("small")\n'
+        '  if (e < 0.14) return("moderate")\n'
+        '  return("large")\n'
+        '}\n'
+        '# r_rb interpretation: <0.1 negligible, 0.1-0.3 small, 0.3-0.5 medium, >=0.5 large\n'
+        'r_rb_label <- function(r) {\n'
+        '  if (is.na(r)) return("")\n'
+        '  a <- abs(r)\n'
+        '  if (a < 0.1) return("negligible")\n'
+        '  if (a < 0.3) return("small")\n'
+        '  if (a < 0.5) return("medium")\n'
+        '  return("large")\n'
+        '}\n'
+        '\n'
+        'dv_labels  <- character(0)\n'
+        'p_kw       <- numeric(0)\n'
+        'eta2_h_vec <- numeric(0)\n'
+        '\n'
+        'for (m in metrics) {\n'
+        '  cat("\\n", strrep("=", 72), "\\n", sep="")\n'
+        '  cat("Kruskal-Wallis: ", m$label, " (weeks collapsed)\\n", sep="")\n'
+        '  cat(strrep("=", 72), "\\n")\n'
+        '\n'
+        '  sub <- data[!is.na(data[[m$col]]), ]\n'
+        '  sub$Cohort <- droplevels(sub$Cohort)\n'
+        '  sub$Value  <- sub[[m$col]]\n'
+        '  cohs       <- levels(sub$Cohort)\n'
+        '  n_tot      <- nrow(sub)\n'
+        '  k_grp      <- nlevels(sub$Cohort)\n'
+        '  cat("N subjects :", n_tot, "\\n")\n'
+        '  cat("Cohorts    :", paste(cohs, collapse=", "), "\\n\\n")\n'
+        '\n'
+        '  # Descriptives per cohort\n'
+        '  cat("Descriptives (mean / median / SD / n):\\n")\n'
+        '  for (co in cohs) {\n'
+        '    v <- sub$Value[sub$Cohort == co]\n'
+        '    cat(sprintf("  %-28s  n=%d  mean=%.1f  median=%.1f  SD=%.1f\\n",\n'
+        '                co, length(v), mean(v), median(v), sd(v)))\n'
+        '  }\n'
+        '\n'
+        '  kw     <- kruskal.test(Value ~ Cohort, data=sub)\n'
+        '  eta2_h <- max(0, (as.numeric(kw$statistic) - k_grp + 1) / (n_tot - k_grp))\n'
+        '  cat(sprintf("\\nKruskal-Wallis: H(%d) = %.4f,  p = %.6f\\n",\n'
+        '              kw$parameter, kw$statistic, kw$p.value))\n'
+        '  cat(sprintf("Effect size   : eta2_H = %.4f  (%s)\\n",\n'
+        '              eta2_h, eta2_label(eta2_h)))\n'
+        '  cat("  Interpretation: eta2_H <0.01 negligible, 0.01-0.06 small,\\n")\n'
+        '  cat("                  0.06-0.14 moderate, >=0.14 large\\n")\n'
+        '  dv_labels  <- c(dv_labels, m$label)\n'
+        '  p_kw       <- c(p_kw, kw$p.value)\n'
+        '  eta2_h_vec <- c(eta2_h_vec, eta2_h)\n'
+        '\n'
+        '  # Pairwise Wilcoxon with Holm correction\n'
+        '  cat("\\nPairwise Wilcoxon (Holm correction):\\n")\n'
+        '  pw <- pairwise.wilcox.test(sub$Value, sub$Cohort,\n'
+        '                             p.adjust.method="holm", exact=FALSE)\n'
+        '  print(pw$p.value)\n'
+        '\n'
+        '  # Verbose pairwise output with r_rb effect size\n'
+        '  cat("\\nPairwise detail \u2014 Mann-Whitney U, independent samples (r_rb = 1\u22122W/(nA\u00b7nB)):\\n")\n'
+        '  cat("  Interpretation: |r_rb| <0.1 negligible, 0.1-0.3 small, 0.3-0.5 medium, >=0.5 large\\n\\n")\n'
+        '  pidx    <- combn(length(cohs), 2)\n'
+        '  p_raw   <- numeric(ncol(pidx))\n'
+        '  r_rb_v  <- numeric(ncol(pidx))\n'
+        '  for (ki in seq_len(ncol(pidx))) {\n'
+        '    x  <- sub$Value[sub$Cohort == cohs[pidx[1, ki]]]\n'
+        '    y  <- sub$Value[sub$Cohort == cohs[pidx[2, ki]]]\n'
+        '    wt <- tryCatch(wilcox.test(x, y, exact=FALSE), error=function(e) NULL)\n'
+        '    if (!is.null(wt)) {\n'
+        '      p_raw[ki]  <- wt$p.value\n'
+        '      r_rb_v[ki] <- 1 - 2 * as.numeric(wt$statistic) / (length(x) * length(y))\n'
+        '    } else {\n'
+        '      p_raw[ki]  <- NA_real_\n'
+        '      r_rb_v[ki] <- NA_real_\n'
+        '    }\n'
+        '  }\n'
+        '  p_holm <- p.adjust(p_raw, method="holm")\n'
+        '  for (ki in seq_len(ncol(pidx))) {\n'
+        '    ca  <- cohs[pidx[1, ki]]; cb <- cohs[pidx[2, ki]]\n'
+        '    na_ <- sum(sub$Cohort == ca); nb_ <- sum(sub$Cohort == cb)\n'
+        '    sig <- ifelse(p_holm[ki]<0.001,"***",ifelse(p_holm[ki]<0.01,"**",\n'
+        '                  ifelse(p_holm[ki]<0.05,"*","ns")))\n'
+        '    cat(sprintf("  %s (n=%d) vs %s (n=%d) : p_raw=%.4f  p_holm=%.4f  %s  r_rb=%+.3f (%s)\\n",\n'
+        '                ca, na_, cb, nb_, p_raw[ki], p_holm[ki], sig,\n'
+        '                r_rb_v[ki], r_rb_label(r_rb_v[ki])))\n'
+        '  }\n'
+        '}\n'
+        '\n'
+        'cat("\\n", strrep("=", 72), "\\n", sep="")\n'
+        'cat("BH-FDR CORRECTION ACROSS BEHAVIORAL METRICS\\n")\n'
+        'cat(strrep("=", 72), "\\n")\n'
+        'cat("  KW p-values corrected using Benjamini-Hochberg FDR.\\n\\n")\n'
+        'adj <- p.adjust(p_kw, method="BH")\n'
+        'sig_fn <- function(p) ifelse(p<0.001,"***",ifelse(p<0.01,"**",ifelse(p<0.05,"*","")))\n'
+        'fmt_p  <- function(p) if(is.na(p)) "     NA" else if(p<0.0001) "< .0001" else sprintf("%.4f",p)\n'
+        'cat(sprintf("  %-38s  %10s  %10s  %7s  %s\\n", "DV", "p_KW (raw)", "p (BH-adj)", "eta2_H", "Sig (adj)"))\n'
+        'cat("  ", strrep("-", 72), "\\n", sep="")\n'
+        'for (i in seq_along(dv_labels)) {\n'
+        '  cat(sprintf("  %-38s  %10s  %10s  %7.4f  %s\\n",\n'
+        '    dv_labels[i], fmt_p(p_kw[i]), fmt_p(adj[i]), eta2_h_vec[i], sig_fn(adj[i])))\n'
+        '}\n'
+        '\n'
+        'cat("\\n", strrep("=", 72), "\\n", sep="")\n'
+        'cat("END\\n")\n'
+    )
+
+    tmp_r = Path(tempfile.mktemp(suffix='.R'))
+    tmp_r.write_text(r_script, encoding='utf-8')
+
+    # ── Locate Rscript ─────────────────────────────────────────────────────
+    import glob as _glob
+    rscript = shutil.which('Rscript') or shutil.which('Rscript.exe')
+    if rscript is None:
+        for _pat in (
+            r'C:\Program Files\R\R-*\bin\Rscript.exe',
+            r'C:\Program Files\R\R-*\bin\x64\Rscript.exe',
+        ):
+            _m = sorted(_glob.glob(_pat))
+            if _m:
+                rscript = _m[-1]
+                break
+
+    if rscript is None:
+        print("ERROR: 'Rscript' not found. Install R and add to PATH.")
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+        return {}
+
+    r_output = ''
+    try:
+        proc = subprocess.run(
+            [rscript, '--vanilla', str(tmp_r)],
+            capture_output=True, text=True, timeout=120,
+        )
+        r_output = proc.stdout
+        r_stderr = proc.stderr.strip()
+        if proc.returncode != 0:
+            print(f"R exited with code {proc.returncode}.")
+        if r_stderr:
+            non_trivial = [
+                ln for ln in r_stderr.splitlines()
+                if not ln.startswith('Loading') and ln.strip()
+            ]
+            if non_trivial:
+                print("R messages:\n" + '\n'.join(non_trivial))
+    except FileNotFoundError:
+        print("ERROR: 'Rscript' not found. Install R and add to the system PATH.")
+        return {}
+    except subprocess.TimeoutExpired:
+        print("ERROR: R script timed out after 120 s.")
+        return {}
+    finally:
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+
+    print(r_output)
+
+    # ── Save report ────────────────────────────────────────────────────────
+    report_path: Optional[Path] = None
+    if save_report and r_output.strip():
+        _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = Path.cwd() / f"{prefix}_kruskal_behavior_collapsed_{_ts}.txt"
+        header_lines = [
+            "=" * 72,
+            "Kruskal-Wallis: Behavioral Metrics -- Cohort (weeks collapsed)",
+            "=" * 72,
+            f"Generated   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Metrics     : No Nest, Anxious Behaviors, Lethargy",
+            f"Cohorts     : {', '.join(cohort_levels)}",
+            f"Weeks       : {week_levels} (averaged into single per-animal score)",
+            f"N subjects  : {n_subjects} (complete cases across all weeks)",
+            "",
+            "Design      : One-way between-subjects (Cohort only; week factor collapsed)",
+            "Between     : Cohort  (CA% schedule)",
+            "Response    : Per-animal mean % across all weeks of aberrant binary observations",
+            "              No Nest   = mean weekly % days Nest Made? == No",
+            "              Anxious   = mean weekly % days Anxious Behaviors? == Yes",
+            "              Lethargy  = mean weekly % days Lethargy? == Yes",
+            "",
+            "Statistics  : Kruskal-Wallis H-test (base R)",
+            "              Effect size: eta2_H = (H - k + 1) / (n - k)",
+            "              Thresholds: <0.01 negligible, 0.01-0.06 small, 0.06-0.14 moderate, >=0.14 large",
+            "Post-hoc    : Pairwise Mann-Whitney U (Wilcoxon rank-sum, independent samples), Holm corrected",
+            "              Effect size: r_rb = 1 - 2W/(nA*nB) (rank-biserial correlation)",
+            "              Thresholds: |r| <0.1 negligible, 0.1-0.3 small, 0.3-0.5 medium, >=0.5 large",
+            "FDR         : BH correction across the three metrics",
+            "",
+            "R output:",
+            "-" * 72,
+            "",
+        ]
+        report_path.write_text('\n'.join(header_lines) + r_output, encoding='utf-8')
+        print(f"\n[OK] Report saved -> {report_path}")
+
+    return {
+        'r_output': r_output,
+        'report_path': report_path,
+        'n_subjects': n_subjects,
+        'cohorts': cohort_levels,
     }
 
 
@@ -15422,7 +16268,7 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 # -------------------------------------------------------- #
                 def _fmt_p(p):
                     if _np.isnan(p): return 'N/A'
-                    if p < 0.001:    return '< 0.001'
+                    if p < 0.001:    return f'{p:.2e}'
                     return f'{p:.4f}'
 
                 def _sig(p):
@@ -15439,9 +16285,10 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         _r_groups.append(_lbl)
                         _r_values.append(float(_v))
 
-                kw_H  = float('nan')
-                kw_df = 0
-                kw_p  = float('nan')
+                kw_H     = float('nan')
+                kw_df    = 0
+                kw_p     = float('nan')
+                kw_eta2h = float('nan')
                 pw_table = []    # list of {a, b, na, nb, p_adj}
                 _used_r_kw = False
 
@@ -15456,6 +16303,9 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         kw_H  = float(_kw_out.rx2('statistic')[0])
                         kw_df = int(_kw_out.rx2('parameter')[0])
                         kw_p  = float(_kw_out.rx2('p.value')[0])
+                        _n_kw = sum(len(v) for v in bar_vals.values() if len(v) > 0)
+                        _k_kw = sum(1 for v in bar_vals.values() if len(v) > 0)
+                        kw_eta2h = max(0.0, (kw_H - _k_kw + 1) / (_n_kw - _k_kw))
                         _pw_out = _ro.r(
                             'pairwise.wilcox.test(kw_y, kw_g, '
                             'p.adjust.method="holm", exact=FALSE)'
@@ -15475,7 +16325,7 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                                     })
                         _used_r_kw = True
                         print(f"  [R] Kruskal-Wallis: H({kw_df}) = {kw_H:.4f}, "
-                              f"p = {_fmt_p(kw_p)}  {_sig(kw_p)}")
+                              f"p = {_fmt_p(kw_p)}  {_sig(kw_p)}  eta2_H = {kw_eta2h:.4f}")
                     except Exception as _rpy_err:
                         print(f"  [WARNING] R Kruskal-Wallis failed ({_rpy_err}); "
                               f"falling back to Python MWU + Holm-Bonferroni")
@@ -15524,11 +16374,11 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 # Always computed via scipy / numpy for consistency.        #
                 # p_adj stays as-is from R (Holm) or Python (Holm) above.  #
                 # -------------------------------------------------------- #
-                def _pair_detail(va, vb, n_boot=4999, seed=0):
-                    """Return (U, p_raw, hl_est, ci_lo, ci_hi) for one pair."""
+                def _pair_detail(va, vb, n_boot=2000, seed=0):
+                    """Return (U, p_raw, hl_est, ci_lo, ci_hi, r_rb) for one pair."""
                     if len(va) < 2 or len(vb) < 2:
                         _nan = float('nan')
-                        return _nan, _nan, _nan, _nan, _nan
+                        return _nan, _nan, _nan, _nan, _nan, _nan
                     _U, _pr = _stats.mannwhitneyu(
                         _np.asarray(va, dtype=float),
                         _np.asarray(vb, dtype=float),
@@ -15550,15 +16400,18 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                                 _np.asarray(_bb, dtype=float),
                             ).ravel()
                         )))
+                    _r_rb = 1.0 - 2.0 * float(_U) / (len(va) * len(vb))
                     return (float(_U), float(_pr), _hl,
                             float(_np.percentile(_boots, 2.5)),
-                            float(_np.percentile(_boots, 97.5)))
+                            float(_np.percentile(_boots, 97.5)),
+                            _r_rb)
 
                 for _pw in pw_table:
                     _va2 = bar_vals.get(_pw['a'], _np.array([]))
                     _vb2 = bar_vals.get(_pw['b'], _np.array([]))
                     (_pw['U'], _pw['p_raw'],
-                     _pw['hl_est'], _pw['ci_lo'], _pw['ci_hi']) = \
+                     _pw['hl_est'], _pw['ci_lo'], _pw['ci_hi'],
+                     _pw['r_rb']) = \
                         _pair_detail(_va2, _vb2)
 
                 # -------------------------------------------------------- #
@@ -15663,13 +16516,20 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     f"  2-wk ramp   : Day 4 (1-based) = 0%\u21921% transition",
                     "",
                     f"Omnibus test      : {'Kruskal-Wallis H-test (base R)' if _used_r_kw else 'N/A (rpy2 unavailable)'}",
+                    f"Omnibus ES        : eta2_H = (H - k + 1) / (n - k); <0.01 negligible, 0.01-0.06 small, 0.06-0.14 moderate, >=0.14 large",
                     f"Post-hoc          : {'Pairwise Wilcoxon (R, Holm correction)' if _used_r_kw else 'Pairwise MWU + Holm-Bonferroni (Python)'}",
+                    f"Post-hoc ES       : r_rb = 1 - 2U/(nA*nB); |r| <0.1 negligible, 0.1-0.3 small, 0.3-0.5 medium, >=0.5 large",
                 ]
                 if _used_r_kw:
+                    _eta2_label = ("negligible" if kw_eta2h < 0.01 else
+                                   "small" if kw_eta2h < 0.06 else
+                                   "moderate" if kw_eta2h < 0.14 else "large")
                     report_lines += [
                         "",
                         "Kruskal-Wallis result:",
                         f"  H({kw_df}) = {kw_H:.4f},  p = {_fmt_p(kw_p)}  {_sig(kw_p)}",
+                        f"  Effect size: eta2_H = {kw_eta2h:.4f}  ({_eta2_label})",
+                        f"  Interpretation: eta2_H <0.01 negligible, 0.01-0.06 small, 0.06-0.14 moderate, >=0.14 large",
                     ]
                 report_lines += [
                     "",
@@ -15696,7 +16556,7 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     print(f"  {lbl:<30}  n={n_v}  mean={m_v:.4f} \u00b1 {s_v:.4f} SEM  95% CI {ci_str_v}")
                 report_lines += [
                     "",
-                    f"{'Pair':<48}  {'n_A':>4}  {'n_B':>4}  {'U':>8}  {'p_raw':>9}  {'p_adj (Holm)':>13}  {'sig':<4}  {'HL_est':>8}  {'95% CI (HL)':>24}",
+                    f"{'Pair':<48}  {'n_A':>4}  {'n_B':>4}  {'U':>8}  {'p_raw':>9}  {'p_adj (Holm)':>13}  {'sig':<4}  {'HL_est':>8}  {'95% CI (HL)':>24}  {'r_rb':>6}",
                     "-" * W,
                 ]
                 for _pw in pw_table:
@@ -15711,7 +16571,8 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         f"{_pw.get('U', float('nan')):>8.1f}  "
                         f"{_fmt_p(_pw.get('p_raw', float('nan'))):>9}  "
                         f"{_fmt_p(_pw['p_adj']):>13}  {_sig(_pw['p_adj']):<4}  "
-                        f"{_pw.get('hl_est', float('nan')):>8.4f}  {_ci_str:>24}"
+                        f"{_pw.get('hl_est', float('nan')):>8.4f}  {_ci_str:>24}  "
+                        f"{_pw.get('r_rb', float('nan')):>+6.3f}"
                     )
                     print(
                         f"  {_pair_label}\n"
@@ -15719,7 +16580,8 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         f"p_raw={_fmt_p(_pw.get('p_raw', float('nan')))}  "
                         f"p_adj={_fmt_p(_pw['p_adj'])}  {_sig(_pw['p_adj'])}  "
                         f"HL={_pw.get('hl_est', float('nan')):.4f}  "
-                        f"CI={_ci_str}"
+                        f"CI={_ci_str}  "
+                        f"r_rb={_pw.get('r_rb', float('nan')):+.3f}"
                     )
                 report_lines.append("=" * W)
                 report_text = "\n".join(report_lines)
