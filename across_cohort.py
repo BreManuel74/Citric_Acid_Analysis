@@ -9585,6 +9585,77 @@ def compare_slopes_within_cohorts(slopes_df: pd.DataFrame) -> Dict:
     return results
 
 
+def _dunn_posthoc(
+    group_data: list,
+    group_labels: list,
+) -> list:
+    """
+    Dunn's post-hoc test following Kruskal-Wallis.
+
+    Uses pooled ranks from the combined dataset, consistent with the KW
+    omnibus test.  Ties are handled with the standard correction factor.
+    Holm-Bonferroni step-down correction is applied across all pairs.
+
+    Parameters
+    ----------
+    group_data   : list of array-like, one entry per group
+    group_labels : list of str, group names matching group_data
+
+    Returns
+    -------
+    list of dicts with keys:
+        label_a, label_b, na, nb, z_stat, p_raw, p_adj
+    """
+    from itertools import combinations as _comb_d
+
+    sizes    = [len(g) for g in group_data]
+    all_data = np.concatenate([np.asarray(g, dtype=float) for g in group_data])
+    N        = len(all_data)
+    all_ranks = stats.rankdata(all_data)
+
+    # Split pooled ranks back to each group
+    group_ranks = []
+    idx = 0
+    for n_g in sizes:
+        group_ranks.append(all_ranks[idx : idx + n_g])
+        idx += n_g
+
+    # Tie-correction factor: C = sum(t_j^3 - t_j) over all tied groups j
+    _, tie_counts  = np.unique(all_ranks, return_counts=True)
+    tie_correction = float(np.sum(tie_counts ** 3 - tie_counts))
+
+    results = []
+    for i, j in _comb_d(range(len(group_data)), 2):
+        n_i, n_j = sizes[i], sizes[j]
+        R_i = float(np.mean(group_ranks[i]))
+        R_j = float(np.mean(group_ranks[j]))
+        denom  = N * (N + 1) / 12.0 - tie_correction / (12.0 * (N - 1))
+        var_ij = denom * (1.0 / n_i + 1.0 / n_j)
+        if var_ij > 0:
+            z     = (R_i - R_j) / np.sqrt(var_ij)
+            p_raw = float(2.0 * (1.0 - stats.norm.cdf(abs(z))))
+        else:
+            z, p_raw = float('nan'), float('nan')
+        results.append({
+            'label_a': group_labels[i], 'label_b': group_labels[j],
+            'na': n_i, 'nb': n_j,
+            'z_stat': float(z), 'p_raw': p_raw, 'p_adj': float('nan'),
+        })
+
+    # Holm-Bonferroni step-down correction
+    valid        = [(k, r) for k, r in enumerate(results) if not np.isnan(r['p_raw'])]
+    valid_sorted = sorted(valid, key=lambda x: x[1]['p_raw'])
+    n_v          = len(valid_sorted)
+    running_max  = 0.0
+    for rank_idx, (orig_idx, r) in enumerate(valid_sorted):
+        adj = min(1.0, r['p_raw'] * (n_v - rank_idx))
+        adj = max(adj, running_max)
+        results[orig_idx]['p_adj'] = adj
+        running_max = adj
+
+    return results
+
+
 def compare_slopes_between_cohorts(slopes_df: pd.DataFrame) -> Dict:
     """
     Statistically compare average slopes between cohorts (2 or more cohorts).
@@ -9595,7 +9666,7 @@ def compare_slopes_between_cohorts(slopes_df: pd.DataFrame) -> Dict:
     For 3+ cohorts:
       - Kruskal-Wallis omnibus test (non-parametric)
       - One-way ANOVA with Welch correction (Brown-Forsythe via scipy)
-      - All pairwise MWU tests with Holm-Bonferroni correction
+      - All pairwise Dunn's post-hoc tests (pooled ranks, Holm-Bonferroni)
       - Per-pair Cohen's d and Hodges-Lehmann shift with bootstrap 95% CI
 
     Parameters:
@@ -9658,22 +9729,26 @@ def compare_slopes_between_cohorts(slopes_df: pd.DataFrame) -> Dict:
     results['anova'] = {'statistic': f_stat, 'p_value': f_p}
 
     # -------------------------------------------------------------------------
-    # 2. Pairwise MWU with Holm-Bonferroni correction + Cohen's d + HL CI
+    # 2. Post-hoc: Dunn's test (Holm-Bonferroni corrected, pooled ranks)
     # -------------------------------------------------------------------------
     print("\n" + "-"*80)
-    print("2. PAIRWISE COMPARISONS (Holm-Bonferroni corrected MWU)")
+    print("2. POST-HOC: DUNN'S TEST (Holm-Bonferroni corrected, pooled ranks)")
     print("-"*80)
 
+    # Pre-compute Dunn's test p-values for 3+ groups (consistent with KW pooled ranks).
+    # For 2 groups no KW is performed, so MWU p-value is used directly.
+    _dunn_map: dict = {}
+    if n_groups >= 3:
+        for _dr in _dunn_posthoc(group_slopes, ca_groups):
+            _dunn_map[(_dr['label_a'], _dr['label_b'])] = _dr
+
     pairs = list(_comb(range(n_groups), 2))
-    _rng = np.random.default_rng(0)
     pair_data = []
     for seed_i, (i, j) in enumerate(pairs):
         a, b = group_slopes[i], group_slopes[j]
         n_a, n_b = len(a), len(b)
         if n_a < 2 or n_b < 2:
             continue
-        u_stat, u_p = stats.mannwhitneyu(a, b, alternative='two-sided')
-        r_rb = 1.0 - 2.0 * float(u_stat) / (n_a * n_b)
         _diffs = (np.asarray(a)[:, None] - np.asarray(b)[None, :]).ravel()
         hl_est = float(np.median(_diffs))
         _rng_pair = np.random.default_rng(seed_i)
@@ -9698,13 +9773,29 @@ def compare_slopes_between_cohorts(slopes_df: pd.DataFrame) -> Dict:
             d_interp = "medium"
         else:
             d_interp = "large"
+        # p-values, z-stat, and r_rb: Dunn's test for 3+ groups; MWU for exactly 2 groups
+        _key = (ca_groups[i], ca_groups[j])
+        if n_groups >= 3 and _key in _dunn_map:
+            _p_raw_use  = _dunn_map[_key]['p_raw']
+            _p_adj_use  = _dunn_map[_key]['p_adj']
+            _z_stat_use = float(_dunn_map[_key]['z_stat'])
+            r_rb        = _z_stat_use / np.sqrt(n_a + n_b)   # z-based r_rb, consistent with Dunn's
+            _u_stat_val = float('nan')
+        else:
+            # 2-group fallback: use MWU directly (no KW/Dunn's)
+            _u_stat_val, _u_p = stats.mannwhitneyu(a, b, alternative='two-sided')
+            _p_raw_use  = float(_u_p)
+            _p_adj_use  = float(_u_p)   # single pair: no correction needed
+            _z_stat_use = float('nan')
+            r_rb        = 1.0 - 2.0 * float(_u_stat_val) / (n_a * n_b)
         pair_data.append({
             'idx_a': i, 'idx_b': j,
             'label_a': ca_groups[i], 'label_b': ca_groups[j],
             'n_a': n_a, 'n_b': n_b,
-            'U': float(u_stat),
-            'p_raw': float(u_p),
-            'p_corrected': 0.0,   # filled after Holm
+            'U': _u_stat_val,
+            'z_stat': _z_stat_use,
+            'p_raw': _p_raw_use,
+            'p_corrected': _p_adj_use,
             'rank_biserial_r': r_rb,
             'hodges_lehmann': hl_est,
             'ci_95_lo': hl_ci_lo,
@@ -9714,26 +9805,11 @@ def compare_slopes_between_cohorts(slopes_df: pd.DataFrame) -> Dict:
             'mean_diff': float(b.mean() - a.mean()),
         })
 
-    # Apply Holm-Bonferroni
-    if pair_data:
-        _p_raw = [r['p_raw'] for r in pair_data]
-        _n = len(_p_raw)
-        _indexed = sorted(enumerate(_p_raw), key=lambda x: x[1])
-        _running_max = 0.0
-        _p_adj = [0.0] * _n
-        for _rank, (_orig, _p) in enumerate(_indexed):
-            _a_val = min(1.0, float(_p) * (_n - _rank))
-            _a_val = max(_a_val, _running_max)
-            _p_adj[_orig] = _a_val
-            _running_max = _a_val
-        for r, pa in zip(pair_data, _p_adj):
-            r['p_corrected'] = pa
-
     for r in pair_data:
         sig = '***' if r['p_corrected'] < 0.001 else ('**' if r['p_corrected'] < 0.01
               else ('*' if r['p_corrected'] < 0.05 else 'ns'))
         print(f"  {r['label_a']} vs {r['label_b']}: "
-              f"U={r['U']:.2f}, p_raw={r['p_raw']:.4f}, p_adj={r['p_corrected']:.4f} {sig}, "
+              f"z={r.get('z_stat', float('nan')):.4f}, p_raw={r['p_raw']:.4f}, p_adj={r['p_corrected']:.4f} {sig}, "
               f"r_rb={r['rank_biserial_r']:.3f}, d={r['cohens_d']:.3f} ({r['d_interpretation']})")
 
     results['pairwise'] = pair_data
@@ -9791,7 +9867,7 @@ def _format_mwu_slope_report(
     )
     lines = [
         "=" * 90,
-        "MANN-WHITNEY U TEST RESULTS  --  Slope Comparison Brackets",
+        "DUNN'S POST-HOC TEST RESULTS  --  Slope Comparison Brackets",
         "=" * 90,
         f"Generated  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"Measure    : {measure}",
@@ -9799,10 +9875,10 @@ def _format_mwu_slope_report(
         f"Correction : {corr_note}",
         "",
         "Field definitions:",
-        "  U        : Mann-Whitney U statistic",
-        "  p(raw)   : Two-sided p-value (uncorrected)",
+        "  z(Dunn)  : Dunn's test z-statistic (pooled ranks, consistent with KW omnibus)",
+        "  p(raw)   : Two-sided p-value from Dunn's z-statistic (uncorrected)",
         "  p(adj)   : Holm-Bonferroni step-down corrected p-value",
-        "  r_rb     : Rank-biserial correlation (effect size r = 1 - 2U/(nA*nB))",
+        "  r_rb     : z-based rank-biserial = z(Dunn) / \u221a(nA+nB); consistent with Dunn's test",
         "             |r| < 0.3 = small, 0.3-0.5 = medium, > 0.5 = large",
         "  HL_est   : Hodges-Lehmann location shift (median of all pairwise diffs A-B)",
         "  95% CI   : Bootstrap CI (n=2 000 resamples) on Hodges-Lehmann estimator",
@@ -9832,13 +9908,13 @@ def _format_mwu_slope_report(
             f"  eta2_H = {_eta2h:.4f}  ({_eta_lbl})",
             f"  Interpretation: eta2_H <0.01 negligible, 0.01-0.06 small, 0.06-0.14 moderate, >=0.14 large",
             "",
-            "Post-hoc     : Pairwise Mann-Whitney U (Holm-Bonferroni corrected)",
+            "Post-hoc     : Dunn's test (pooled ranks, Holm-Bonferroni corrected)",
             "",
         ]
 
     hdr = (
         f"{'Comparison':<38} {'nA':>4} {'nB':>4}  "
-        f"{'U':>9}  {'p(raw)':>9}  {'p(adj)':>9}  "
+        f"{'z(Dunn)':>9}  {'p(raw)':>9}  {'p(adj)':>9}  "
         f"{'r_rb':>7}  {'HL_est':>9}  {'95% CI'}"
     )
     lines.append(hdr)
@@ -9849,7 +9925,7 @@ def _format_mwu_slope_report(
         ci_s = f"[{r['ci_95_lo']:.4f}, {r['ci_95_hi']:.4f}]"
         lines.append(
             f"{comp:<38} {r['n_a']:>4} {r['n_b']:>4}  "
-            f"{r['U']:>9.2f}  {_fp(r['p_raw']):>9}  {_fp(r['p_corrected']):>9}  "
+            f"{r.get('z_stat', float('nan')):>9.4f}  {_fp(r['p_raw']):>9}  {_fp(r['p_corrected']):>9}  "
             f"{r['rank_biserial_r']:>7.4f}  {r['hodges_lehmann']:>9.4f}  {ci_s}"
         )
     lines += [
@@ -9928,7 +10004,7 @@ def plot_slopes_comparison(
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 
-    # Pairwise Mann-Whitney U tests with significance brackets
+    # Dunn's post-hoc test significance brackets (p-values from pooled ranks)
     from itertools import combinations
     pairs = list(combinations(range(len(ca_groups)), 2))
     n_pairs = len(pairs)
@@ -9937,14 +10013,18 @@ def plot_slopes_comparison(
     _data_max = max((float(np.max(d)) for d in box_data if len(d) > 0), default=0.0)
     y_top = min(_data_max + 0.3, 5.9 - step * n_pairs - tick_h)
 
+    # Compute Dunn's test p-values (pooled ranks, consistent with KW omnibus)
+    _dunn_bracket_map: dict = {}
+    if len(ca_groups) >= 3:
+        for _dr in _dunn_posthoc(box_data, ca_groups):
+            _dunn_bracket_map[(_dr['label_a'], _dr['label_b'])] = _dr
+
     _mwu_bracket_results = []
     for level, (i, j) in enumerate(pairs):
         a, b = box_data[i], box_data[j]
         if len(a) < 2 or len(b) < 2:
             continue
-        u_stat, p_raw = stats.mannwhitneyu(a, b, alternative='two-sided')
         n_a, n_b = len(a), len(b)
-        r_rb = 1.0 - 2.0 * float(u_stat) / (n_a * n_b)
         _diffs = (np.asarray(a)[:, None] - np.asarray(b)[None, :]).ravel()
         hl_est = float(np.median(_diffs))
         _rng_br = np.random.default_rng(level)
@@ -9955,33 +10035,34 @@ def plot_slopes_comparison(
             ))
             for _ in range(2000)
         ]
+        # p-values, z-stat, and r_rb: Dunn's test for 3+ groups; MWU for 2 groups
+        _key = (ca_groups[i], ca_groups[j])
+        if len(ca_groups) >= 3 and _key in _dunn_bracket_map:
+            _p_raw_br  = _dunn_bracket_map[_key]['p_raw']
+            _p_corr_br = _dunn_bracket_map[_key]['p_adj']
+            _z_stat_br = float(_dunn_bracket_map[_key]['z_stat'])
+            r_rb       = _z_stat_br / np.sqrt(n_a + n_b)   # z-based r_rb, consistent with Dunn's
+            _u_stat_br = float('nan')
+        else:
+            # 2-group fallback: use MWU directly (no KW/Dunn's)
+            _u_stat_br, _p_mwu_br = stats.mannwhitneyu(a, b, alternative='two-sided')
+            _p_raw_br  = float(_p_mwu_br)
+            _p_corr_br = float(_p_mwu_br)
+            _z_stat_br = float('nan')
+            r_rb       = 1.0 - 2.0 * float(_u_stat_br) / (n_a * n_b)
         _mwu_bracket_results.append({
             'idx_a': i, 'idx_b': j,
             'label_a': ca_groups[i], 'label_b': ca_groups[j],
             'n_a': n_a, 'n_b': n_b,
-            'U': float(u_stat),
-            'p_raw': float(p_raw),
-            'p_corrected': 0.0,    # filled in below after Holm
+            'U': _u_stat_br,
+            'z_stat': _z_stat_br,
+            'p_raw': _p_raw_br,
+            'p_corrected': _p_corr_br,
             'rank_biserial_r': r_rb,
             'hodges_lehmann': hl_est,
             'ci_95_lo': float(np.percentile(_boot_br, 2.5)),
             'ci_95_hi': float(np.percentile(_boot_br, 97.5)),
         })
-
-    # Apply Holm-Bonferroni step-down correction across all valid pairs
-    if _mwu_bracket_results:
-        _p_raw_all = [r['p_raw'] for r in _mwu_bracket_results]
-        _n = len(_p_raw_all)
-        _indexed = sorted(enumerate(_p_raw_all), key=lambda x: x[1])
-        _running_max = 0.0
-        _p_adj = [0.0] * _n
-        for _rank, (_orig, _p) in enumerate(_indexed):
-            _a = min(1.0, float(_p) * (_n - _rank))
-            _a = max(_a, _running_max)
-            _p_adj[_orig] = _a
-            _running_max = _a
-        for _r, _pa in zip(_mwu_bracket_results, _p_adj):
-            _r['p_corrected'] = _pa
 
     for level, (i, j) in enumerate(pairs):
         # Find matching result (skip pairs that were filtered out)
@@ -10185,14 +10266,14 @@ def generate_slope_analysis_report(
         pairwise = between_results.get('pairwise', [])
         if pairwise:
             lines.append("\n" + "-" * 80)
-            lines.append("Pairwise Comparisons (Holm-Bonferroni corrected MWU):")
+            lines.append("Pairwise Comparisons (Dunn's post-hoc, Holm-Bonferroni corrected):")
             lines.append("-" * 80)
 
             def _fp(p: float) -> str:
                 return f'{p:.2e}' if p < 0.001 else f"{p:.4f}"
 
             hdr = (f"  {'Comparison':<38} {'nA':>4} {'nB':>4}  "
-                   f"{'U':>9}  {'p(raw)':>9}  {'p(adj)':>9}  "
+                   f"{'z(Dunn)':>9}  {'p(raw)':>9}  {'p(adj)':>9}  "
                    f"{'r_rb':>7}  {'d':>7}  {'HL_est':>9}  {'95% CI'}")
             lines.append(hdr)
             lines.append("  " + "-" * 98)
@@ -10204,7 +10285,7 @@ def generate_slope_analysis_report(
                 ci_s = f"[{r['ci_95_lo']:.4f}, {r['ci_95_hi']:.4f}]"
                 lines.append(
                     f"  {comp:<38} {r['n_a']:>4} {r['n_b']:>4}  "
-                    f"{r['U']:>9.2f}  {_fp(r['p_raw']):>9}  {_fp(r['p_corrected']):>9}  "
+                    f"{r.get('z_stat', float('nan')):>9.4f}  {_fp(r['p_raw']):>9}  {_fp(r['p_corrected']):>9}  "
                     f"{r['rank_biserial_r']:>7.4f}  {r['cohens_d']:>7.4f}  "
                     f"{r['hodges_lehmann']:>9.4f}  {ci_s}  {sig}"
                 )
@@ -16306,84 +16387,48 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                         _n_kw = sum(len(v) for v in bar_vals.values() if len(v) > 0)
                         _k_kw = sum(1 for v in bar_vals.values() if len(v) > 0)
                         kw_eta2h = max(0.0, (kw_H - _k_kw + 1) / (_n_kw - _k_kw))
-                        _pw_out = _ro.r(
-                            'pairwise.wilcox.test(kw_y, kw_g, '
-                            'p.adjust.method="holm", exact=FALSE)'
-                        )
-                        _p_mat   = _np.array(_pw_out.rx2('p.value'))
-                        _row_nms = list(_pw_out.rx2('p.value').rownames)
-                        _col_nms = list(_pw_out.rx2('p.value').colnames)
-                        for _ri, _rn in enumerate(_row_nms):
-                            for _ci, _cn in enumerate(_col_nms):
-                                _pp = _p_mat[_ri, _ci]
-                                if not _np.isnan(_pp):
-                                    pw_table.append({
-                                        'a': _cn, 'b': _rn,
-                                        'na': len(bar_vals.get(_cn, _np.array([]))),
-                                        'nb': len(bar_vals.get(_rn, _np.array([]))),
-                                        'p_adj': float(_pp),
-                                    })
                         _used_r_kw = True
                         print(f"  [R] Kruskal-Wallis: H({kw_df}) = {kw_H:.4f}, "
                               f"p = {_fmt_p(kw_p)}  {_sig(kw_p)}  eta2_H = {kw_eta2h:.4f}")
                     except Exception as _rpy_err:
                         print(f"  [WARNING] R Kruskal-Wallis failed ({_rpy_err}); "
-                              f"falling back to Python MWU + Holm-Bonferroni")
+                              f"falling back to Python KW")
 
                 if not _used_r_kw:
-                    # Fallback: pairwise MWU + Holm-Bonferroni (Python)
-                    _pairs_fb = [
-                        (cohort_order[i], cohort_order[j])
-                        for i in range(len(cohort_order))
-                        for j in range(i + 1, len(cohort_order))
-                    ]
-                    _pair_raw = []
-                    for _a, _b in _pairs_fb:
-                        _va = bar_vals.get(_a, _np.array([]))
-                        _vb = bar_vals.get(_b, _np.array([]))
-                        _pr = {'a': _a, 'b': _b,
-                               'na': len(_va), 'nb': len(_vb),
-                               'p_raw': float('nan')}
-                        if len(_va) >= 2 and len(_vb) >= 2:
-                            _, _p = _stats.mannwhitneyu(
-                                _va, _vb, alternative='two-sided')
-                            _pr['p_raw'] = float(_p)
-                        _pair_raw.append(_pr)
-                    _valid_fb = [r for r in _pair_raw if not _np.isnan(r['p_raw'])]
-                    _valid_fb_s = sorted(_valid_fb, key=lambda x: x['p_raw'])
-                    _k_fb = len(_valid_fb_s)
-                    for _rank, _r in enumerate(_valid_fb_s):
-                        _r['p_adj'] = min(_r['p_raw'] * (_k_fb - _rank), 1.0)
-                    for _i in range(1, len(_valid_fb_s)):
-                        _valid_fb_s[_i]['p_adj'] = max(
-                            _valid_fb_s[_i]['p_adj'],
-                            _valid_fb_s[_i - 1]['p_adj'],
-                        )
-                    for _r in _pair_raw:
-                        if _np.isnan(_r['p_raw']):
-                            _r['p_adj'] = float('nan')
-                    pw_table = [
-                        {'a': _r['a'], 'b': _r['b'],
-                         'na': _r['na'], 'nb': _r['nb'],
-                         'p_adj': _r.get('p_adj', float('nan'))}
-                        for _r in _pair_raw
-                    ]
+                    # Python fallback for KW omnibus
+                    _grp_arrs = [bar_vals.get(lbl, _np.array([])) for lbl in cohort_order]
+                    _grp_arrs = [v for v in _grp_arrs if len(v) >= 2]
+                    if len(_grp_arrs) >= 2:
+                        kw_H, kw_p = _stats.kruskal(*_grp_arrs)
+                        _n_kw = sum(len(v) for v in _grp_arrs)
+                        _k_kw = len(_grp_arrs)
+                        kw_df    = _k_kw - 1
+                        kw_eta2h = max(0.0, (kw_H - _k_kw + 1) / (_n_kw - _k_kw))
+                        print(f"  [Python] Kruskal-Wallis: H({kw_df}) = {kw_H:.4f}, "
+                              f"p = {_fmt_p(kw_p)}  {_sig(kw_p)}  eta2_H = {kw_eta2h:.4f}")
+
+                # Post-hoc: always use Python Dunn's test (pooled ranks, consistent with KW)
+                _grp_data_d  = [bar_vals.get(lbl, _np.array([])) for lbl in cohort_order]
+                _dunn_pairs4 = _dunn_posthoc(_grp_data_d, cohort_order)
+                pw_table = [
+                    {
+                        'a': r['label_a'], 'b': r['label_b'],
+                        'na': r['na'], 'nb': r['nb'],
+                        'z_stat': r['z_stat'],
+                        'p_raw': r['p_raw'], 'p_adj': r['p_adj'],
+                    }
+                    for r in _dunn_pairs4
+                ]
 
                 # -------------------------------------------------------- #
-                # Augment pw_table: U, p_raw, HL estimate, bootstrap 95% CI#
-                # Always computed via scipy / numpy for consistency.        #
-                # p_adj stays as-is from R (Holm) or Python (Holm) above.  #
+                # Augment pw_table: U, HL estimate, bootstrap 95% CI, r_rb  #
+                # p_raw and p_adj stay from Dunn's test (computed above).   #
                 # -------------------------------------------------------- #
                 def _pair_detail(va, vb, n_boot=2000, seed=0):
-                    """Return (U, p_raw, hl_est, ci_lo, ci_hi, r_rb) for one pair."""
+                    """Return (hl_est, ci_lo, ci_hi) for one pair."""
                     if len(va) < 2 or len(vb) < 2:
                         _nan = float('nan')
-                        return _nan, _nan, _nan, _nan, _nan, _nan
-                    _U, _pr = _stats.mannwhitneyu(
-                        _np.asarray(va, dtype=float),
-                        _np.asarray(vb, dtype=float),
-                        alternative='two-sided',
-                    )
+                        return _nan, _nan, _nan
                     _diffs = _np.subtract.outer(
                         _np.asarray(va, dtype=float),
                         _np.asarray(vb, dtype=float),
@@ -16400,19 +16445,18 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                                 _np.asarray(_bb, dtype=float),
                             ).ravel()
                         )))
-                    _r_rb = 1.0 - 2.0 * float(_U) / (len(va) * len(vb))
-                    return (float(_U), float(_pr), _hl,
+                    return (_hl,
                             float(_np.percentile(_boots, 2.5)),
-                            float(_np.percentile(_boots, 97.5)),
-                            _r_rb)
+                            float(_np.percentile(_boots, 97.5)))
 
                 for _pw in pw_table:
                     _va2 = bar_vals.get(_pw['a'], _np.array([]))
                     _vb2 = bar_vals.get(_pw['b'], _np.array([]))
-                    (_pw['U'], _pw['p_raw'],
-                     _pw['hl_est'], _pw['ci_lo'], _pw['ci_hi'],
-                     _pw['r_rb']) = \
+                    (_pw['hl_est'], _pw['ci_lo'], _pw['ci_hi']) = \
                         _pair_detail(_va2, _vb2)
+                    # r_rb from Dunn's z-stat: z / sqrt(na + nb), consistent with test
+                    _pw['r_rb'] = (float(_pw['z_stat']) / _np.sqrt(_pw['na'] + _pw['nb'])
+                                   if not _np.isnan(_pw.get('z_stat', float('nan'))) else float('nan'))
 
                 # -------------------------------------------------------- #
                 # Bar chart: 4 bars, scatter points, significance brackets  #
@@ -16494,9 +16538,9 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 # -------------------------------------------------------- #
                 W = 135
                 _stat_hdr = (
-                    "Kruskal-Wallis (R) + Pairwise Wilcoxon (Holm)"
+                    "Kruskal-Wallis (R) + Dunn's post-hoc (Holm)"
                     if _used_r_kw else
-                    "Pairwise MWU + Holm-Bonferroni (Python fallback)"
+                    "Kruskal-Wallis (Python) + Dunn's post-hoc (Holm)"
                 )
                 print("\n" + "=" * W)
                 print("STATISTICAL TESTS \u2014 Day-1 / Transition-Day Daily Change")
@@ -16517,7 +16561,7 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     "",
                     f"Omnibus test      : {'Kruskal-Wallis H-test (base R)' if _used_r_kw else 'N/A (rpy2 unavailable)'}",
                     f"Omnibus ES        : eta2_H = (H - k + 1) / (n - k); <0.01 negligible, 0.01-0.06 small, 0.06-0.14 moderate, >=0.14 large",
-                    f"Post-hoc          : {'Pairwise Wilcoxon (R, Holm correction)' if _used_r_kw else 'Pairwise MWU + Holm-Bonferroni (Python)'}",
+                    f"Post-hoc          : Dunn's test (pooled ranks, Holm-Bonferroni corrected)",
                     f"Post-hoc ES       : r_rb = 1 - 2U/(nA*nB); |r| <0.1 negligible, 0.1-0.3 small, 0.3-0.5 medium, >=0.5 large",
                 ]
                 if _used_r_kw:
@@ -16556,7 +16600,7 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     print(f"  {lbl:<30}  n={n_v}  mean={m_v:.4f} \u00b1 {s_v:.4f} SEM  95% CI {ci_str_v}")
                 report_lines += [
                     "",
-                    f"{'Pair':<48}  {'n_A':>4}  {'n_B':>4}  {'U':>8}  {'p_raw':>9}  {'p_adj (Holm)':>13}  {'sig':<4}  {'HL_est':>8}  {'95% CI (HL)':>24}  {'r_rb':>6}",
+                    f"{'Pair':<48}  {'n_A':>4}  {'n_B':>4}  {'z(Dunn)':>8}  {'p_raw':>9}  {'p_adj (Holm)':>13}  {'sig':<4}  {'HL_est':>8}  {'95% CI (HL)':>24}  {'r_rb':>6}",
                     "-" * W,
                 ]
                 for _pw in pw_table:
@@ -16568,7 +16612,7 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     )
                     report_lines.append(
                         f"{_pair_label:<48}  {_pw['na']:>4}  {_pw['nb']:>4}  "
-                        f"{_pw.get('U', float('nan')):>8.1f}  "
+                        f"{_pw.get('z_stat', float('nan')):>8.4f}  "
                         f"{_fmt_p(_pw.get('p_raw', float('nan'))):>9}  "
                         f"{_fmt_p(_pw['p_adj']):>13}  {_sig(_pw['p_adj']):<4}  "
                         f"{_pw.get('hl_est', float('nan')):>8.4f}  {_ci_str:>24}  "
@@ -16576,7 +16620,7 @@ def _run_all4_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     )
                     print(
                         f"  {_pair_label}\n"
-                        f"    U={_pw.get('U', float('nan')):.1f}  "
+                        f"    z={_pw.get('z_stat', float('nan')):.4f}  "
                         f"p_raw={_fmt_p(_pw.get('p_raw', float('nan')))}  "
                         f"p_adj={_fmt_p(_pw['p_adj'])}  {_sig(_pw['p_adj'])}  "
                         f"HL={_pw.get('hl_est', float('nan')):.4f}  "

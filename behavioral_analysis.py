@@ -6367,12 +6367,12 @@ def run_friedman_milestone_days_r(
     """Run a Friedman test in R on Daily Weight Change at milestone days.
 
     Uses R's built-in ``friedman.test()`` for the omnibus test.  All
-    pairwise post-hoc comparisons are computed in Python via
-    ``scipy.stats.wilcoxon`` (exact for n ≤ 25, asymptotic otherwise),
-    with Holm-Bonferroni correction applied in Python.  This guarantees
-    correct subject-to-subject pairing (data sorted by ID within each day
-    before comparison) and adds W statistics, Hodges-Lehmann estimates,
-    and bootstrapped 95 % CIs to the report.
+    pairwise post-hoc comparisons are computed in Python via the
+    Conover-Iman test, which uses the same within-block Friedman rank
+    matrix as the omnibus (t-distribution, df = (N−1)(k−1)), with
+    Holm-Bonferroni correction.  Wilcoxon W is computed separately as
+    input for the rank-biserial effect size only and does not determine
+    p-values.
 
     Only mice with complete data at *all* specified days are included.
 
@@ -6395,7 +6395,6 @@ def run_friedman_milestone_days_r(
     import tempfile
     import re as _re
     from itertools import combinations
-    from scipy.stats import wilcoxon as _wilcoxon
 
     W_RPT = 135   # report line width (matches KW report)
 
@@ -6465,7 +6464,7 @@ def run_friedman_milestone_days_r(
     _id_w    = max(len(str(i)) for i in _pivot.index) + 2
     _hdr     = f"  {'Animal ID':<{_id_w}}" + "".join(f"  {'Day ' + str(d):>{_col_w}}" for d in _days)
     _sep     = "  " + "─" * (_id_w + (_col_w + 2) * len(_days))
-    print(f"\n  Input data fed to Friedman / pairwise Wilcoxon (DailyChange %/day):")
+    print(f"\n  Input data fed to Friedman / Conover-Iman post-hoc (DailyChange %/day):")
     print(_hdr)
     print(_sep)
     for _aid in _pivot.index:
@@ -6572,7 +6571,38 @@ def run_friedman_milestone_days_r(
             'ci_lo': float(_ci[0]), 'ci_hi': float(_ci[1]),
         }
 
-    # ── Python: pairwise Wilcoxon signed-rank + HL estimate + bootstrap CI ──
+    # ── Python: Conover-Iman post-hoc (Friedman ranks) + HL + bootstrap CI ──
+    # p-values come from the Conover-Iman t-test, which uses the same within-block
+    # rank matrix as the Friedman omnibus (consistent, analogous to Dunn's after KW).
+    # Wilcoxon W is computed separately as input for rank-biserial r_rb only.
+
+    def _conover_iman_posthoc_fn(data_mat):
+        """
+        Conover-Iman post-hoc for Friedman.
+        data_mat : N × k array (rows = subjects, cols = conditions, original values).
+        Returns   : list of dicts {j, l, t_stat, p_raw} for each pair.
+        t-distribution df = (N-1)*(k-1).
+        """
+        _dm    = np.asarray(data_mat, dtype=float)
+        _N, _k = _dm.shape
+        # Rank within each row (subject) — same ranks as Friedman omnibus
+        _ranks = np.apply_along_axis(stats.rankdata, 1, _dm)
+        _R_bar = _ranks.mean(axis=0)                          # k column means
+        # Residual SS = SS_total − SS_treatments (SS_blocks = 0 for Friedman ranks)
+        _SS_res = float(np.sum((_ranks - _R_bar[np.newaxis, :]) ** 2))
+        _df_res = (_N - 1) * (_k - 1)
+        _S2     = _SS_res / _df_res if _df_res > 0 else float('nan')
+        _out    = []
+        for _jj, _ll in combinations(range(_k), 2):
+            if _S2 > 0 and not np.isnan(_S2):
+                _t = (_R_bar[_jj] - _R_bar[_ll]) / np.sqrt(2.0 * _S2 / _N)
+            else:
+                _t = float('nan')
+            _p_ci = (float(2.0 * stats.t.sf(abs(_t), df=_df_res))
+                     if not np.isnan(_t) else float('nan'))
+            _out.append({'j': _jj, 'l': _ll, 't_stat': float(_t), 'p_raw': _p_ci})
+        return _out
+
     def _fmt_p(p) -> str:
         if p != p: return 'N/A'      # nan check
         if p < 0.001: return f'{p:.2e}'
@@ -6600,6 +6630,11 @@ def run_friedman_milestone_days_r(
             prev_adj    = adj_p
         return adj
 
+    # Build N×k data matrix (subjects × days) — _pivot already available above
+    _data_matrix_ci = _pivot.values    # rows = complete_ids (sorted), cols = _days
+    _ci_tests = _conover_iman_posthoc_fn(_data_matrix_ci)
+    _ci_map   = {(_days[r['j']], _days[r['l']]): r for r in _ci_tests}
+
     pair_results = []
     _raw_ps      = []
     _rng         = np.random.default_rng(0)
@@ -6611,14 +6646,10 @@ def run_friedman_milestone_days_r(
         diffs = x1 - x2
         n_pr  = len(diffs)
 
-        try:
-            _W, _p_raw = _wilcoxon(
-                x1, x2, alternative='two-sided',
-                method='exact' if n_pr <= 25 else 'approx',
-            )
-        except ValueError:
-            # wilcoxon raises if all differences are zero (no variability)
-            _W, _p_raw = float('nan'), float('nan')
+        # Conover-Iman t-stat and p-value (uses pooled Friedman ranks)
+        _ci_res = _ci_map.get((d1, d2), {})
+        _t_stat = _ci_res.get('t_stat', float('nan'))
+        _p_raw  = _ci_res.get('p_raw',  float('nan'))
 
         # Hodges-Lehmann estimator for paired data = median of within-subject diffs
         _hl = float(np.median(diffs))
@@ -6628,17 +6659,15 @@ def run_friedman_milestone_days_r(
                     for _ in range(N_BOOT)]
         _ci_lo, _ci_hi = float(np.percentile(_boot, 2.5)), float(np.percentile(_boot, 97.5))
 
-        # Rank-biserial correlation: r_rb = sign(HL) * (1 - 2W / T_max)
-        # where T_max = n_nz*(n_nz+1)/2, n_nz = number of non-zero differences
-        _n_nz  = int(np.sum(diffs != 0))
-        _T_max = _n_nz * (_n_nz + 1) / 2.0 if _n_nz > 0 else float('nan')
-        _sign  = float(np.sign(_hl)) if _hl != 0.0 else 1.0
-        _r_rb  = (_sign * (1.0 - 2.0 * float(_W) / _T_max)
-                  if (_T_max > 0 and _W == _W) else float('nan'))
+        # r_rb from Conover-Iman t-statistic: r = t / sqrt(t² + df)
+        # df = (N_subjects − 1) × (k_days − 1), consistent with Conover-Iman p-values
+        _ci_df_rb = (len(complete_ids) - 1) * (len(_days) - 1)
+        _r_rb     = (float(_t_stat / np.sqrt(_t_stat ** 2 + _ci_df_rb))
+                     if (not np.isnan(_t_stat) and _ci_df_rb > 0) else float('nan'))
 
         pair_results.append({
             'd1': d1, 'd2': d2, 'n': n_pr,
-            'W': _W, 'p_raw': _p_raw,
+            't_stat': _t_stat, 'p_raw': _p_raw,
             'hl_est': _hl, 'ci_lo': _ci_lo, 'ci_hi': _ci_hi,
             'r_rb': _r_rb,
         })
@@ -6686,12 +6715,12 @@ def run_friedman_milestone_days_r(
         'Test        : Friedman rank-sum test (non-parametric repeated measures)',
         'Factor      : Day (time, categorical within-subjects)',
         'Block       : Animal ID (repeated measures)',
-        'Post-hoc    : Pairwise Wilcoxon signed-rank (scipy; exact for n ≤ 25)',
+        'Post-hoc    : Conover-Iman test (Friedman rank matrix; t-distribution, df=(N-1)(k-1))',
         'Correction  : Holm-Bonferroni (Python)',
         'HL estimate : Hodges-Lehmann = median(x_day1 − x_day2) per subject pair',
         '95% CI      : Bootstrap (2 000 resamples, seed = 0) on HL estimate',
         'Effect size : Omnibus: Kendall\'s W = χ²/(N·(k−1)); range [0,1]; ≥0.10 small, ≥0.30 medium, ≥0.50 large',
-        '              Pairwise: rank-biserial r_rb = sign(HL)·(1−2W/T_max); range [−1, 1]',
+        '              Pairwise: r_rb = t(CI)/√(t(CI)²+df); consistent with Conover-Iman t-test',
         '',
         'Omnibus Friedman result:',
         f"  χ²({_df_str}) = {_chi_str},  p = {_fmt_omni_p(p_omni)}  {_sig_omni(p_omni)}",
@@ -6718,17 +6747,17 @@ def run_friedman_milestone_days_r(
 
     _lines += [
         '',
-        f"  {'Pair':<20}  {'n':>4}  {'W':>10}  {'p_raw':>10}  {'p_adj (Holm)':>13}  "
+        f"  {'Pair':<20}  {'n':>4}  {'t(CI)':>10}  {'p_raw':>10}  {'p_adj (Holm)':>13}  "
         f"{'sig':<4}  {'r_rb':>6}  {'HL_est':>8}  {'95% CI (HL)':>22}",
         '  ' + '─' * (W_RPT - 2),
     ]
     for pr in pair_results:
         _lbl     = f"Day {pr['d1']}  vs  Day {pr['d2']}"
         _ci_str  = f"[{pr['ci_lo']:>8.4f}, {pr['ci_hi']:>8.4f}]"
-        _W_str   = f"{pr['W']:.1f}" if pr['W'] == pr['W'] else 'N/A'
+        _t_str   = f"{pr['t_stat']:.3f}" if pr['t_stat'] == pr['t_stat'] else 'N/A'
         _rrb_str = f"{pr['r_rb']:>6.3f}" if pr['r_rb'] == pr['r_rb'] else '   N/A'
         _lines.append(
-            f"  {_lbl:<20}  {pr['n']:>4}  {_W_str:>10}  "
+            f"  {_lbl:<20}  {pr['n']:>4}  {_t_str:>10}  "
             f"{_fmt_p(pr['p_raw']):>10}  {_fmt_p(pr['p_adj']):>13}  "
             f"{_sig(pr['p_adj']):<4}  {_rrb_str}  {pr['hl_est']:>8.4f}  {_ci_str:>22}"
         )
@@ -6736,8 +6765,9 @@ def run_friedman_milestone_days_r(
     _lines += [
         '',
         '  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10  ns p≥.10',
-        '  Effect size : r_rb = rank-biserial correlation = sign(HL)·(1−2W/T_max);'
+        '  Effect size : r_rb = t(CI)/√(t(CI)²+df); consistent with Conover-Iman t-statistic;'
         ' range [−1, 1]; |r_rb|: ≥0.10 small, ≥0.30 medium, ≥0.50 large',
+        '  Post-hoc p  : Conover-Iman t-statistic (pooled Friedman ranks, df=(N−1)(k−1))',
         f"  Omnibus ES  : Kendall's W = {_kw_str}  (χ²/(N·(k−1)) = {_chi_str}/({_n_subs}·{_n_conds-1}))",
         '=' * W_RPT,
         'END OF REPORT',

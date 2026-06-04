@@ -122,7 +122,7 @@ except ImportError:
 #   'ramp'    → CA% increases each week; within-subjects factor = CA_Percent
 #   'nonramp' → CA% is constant across weeks; within-subjects factor = Week
 # ─────────────────────────────────────────────────────────────────────────────
-EXPERIMENT_MODE = 'nonramp'  # << CHANGE THIS: 'ramp' or 'nonramp'
+EXPERIMENT_MODE = 'ramp'  # << CHANGE THIS: 'ramp' or 'nonramp'
 # ─────────────────────────────────────────────────────────────────────────────
 
 _MODE_LABELS: dict = {
@@ -6801,7 +6801,7 @@ def _plot_rmcorr_licks_vs_weight_impl(
 
     # ── pre-compute annotation text and line data ─────────────────────────
     if _rmcorr_ok:
-        _p_str = f"p = {_p_rm:.4f}" if _p_rm >= 0.0001 else "p < 0.0001"
+        _p_str = f"p = {_p_rm:.4f}" if _p_rm >= 0.0001 else f"p = {_p_rm:.4e}"
         _ann = (f"$r_{{rm}}$ = {_r_rm:.3f}\n"
                 f"{_p_str}\n"
                 f"95% CI [{_ci_lo:.3f}, {_ci_hi:.3f}]\n"
@@ -6820,7 +6820,7 @@ def _plot_rmcorr_licks_vs_weight_impl(
             _sl, _ic, *_ = stats.linregress(_valid['weight_pct'], _valid['licks'])
             _line_xs = np.linspace(-50, 50, 500)
             _line_ys = _sl * _line_xs + _ic
-            _p_str = f"p = {_pv:.4f}" if _pv >= 0.0001 else "p < 0.0001"
+            _p_str = f"p = {_pv:.4f}" if _pv >= 0.0001 else f"p = {_pv:.4e}"
             _ann = (f"Spearman \u03c1 = {_rho:.3f}\n{_p_str}\nn = {n_animals} mice\n"
                     f"(rmcorr unavailable)")
         else:
@@ -6865,7 +6865,7 @@ def _plot_rmcorr_licks_vs_weight_impl(
 
         _rmc_txt = save_path.parent / (save_path.stem + '_rmcorr.txt')
         if _rmcorr_ok:
-            _p_str_txt = f"p = {_p_rm:.4f}" if _p_rm >= 0.0001 else "p < 0.0001"
+            _p_str_txt = f"p = {_p_rm:.4f}" if _p_rm >= 0.0001 else f"p = {_p_rm:.4e}"
             _rmc_txt.write_text("\n".join([
                 "=" * 70,
                 "REPEATED-MEASURES CORRELATION  (Bakdash & Marusich 2017)",

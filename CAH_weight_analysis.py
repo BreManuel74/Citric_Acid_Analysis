@@ -102,9 +102,9 @@ plt.rcParams.update({
     "ytick.labelsize": 8,
     "legend.fontsize": 7.5,
     "figure.titlesize": 10,
-    "lines.linewidth": 0.9,
+    "lines.linewidth": 0.5,
     "lines.markersize": 3,
-    "figure.figsize": (3, 2.5),
+    "figure.figsize": (4.5, 2.5),
 })
 # ==============================================================================
 # PLOTTING HELPER FUNCTIONS (adapted from ramp_analysis.py)
@@ -3102,6 +3102,7 @@ def plot_total_change_by_id(
 	"""
 	series_by_id = build_total_change_series_by_id(df, index="day")
 	ca_map = _get_id_ca_map(df)
+	sex_map = _get_id_sex_map(df)
 
 	# Filter to requested IDs if provided
 	if ids is not None:
@@ -3112,7 +3113,7 @@ def plot_total_change_by_id(
 
 	fig, ax = plt.subplots()
 
-	# Track which CA% groups have been plotted (for legend)
+	# Track which CA% groups have been plotted (for color legend)
 	ca_groups_plotted = {}
 
 	# Plot each ID as a separate line
@@ -3121,6 +3122,8 @@ def plot_total_change_by_id(
 			continue
 		ca_pct = ca_map.get(mid)
 		color, _ = _ca_to_style(ca_pct)
+		sex = sex_map.get(mid)
+		_, marker = _sex_to_style(sex)
 
 		# Only add label for first ID in each CA% group
 		if ca_pct not in ca_groups_plotted:
@@ -3133,9 +3136,8 @@ def plot_total_change_by_id(
 			s.index,
 			s.values,
 			label=label,
-			marker='o',
+			marker=marker,
 			markersize=3,
-			linewidth=1.5,
 			alpha=0.9,
 			color=color,
 		)
@@ -3163,8 +3165,18 @@ def plot_total_change_by_id(
 	ax.set_ylim(-25, 10)
 	ax.set_yticks(range(-25, 11, 5))
 
-	# Legend showing only CA% groups
-	ax.legend(title="CA%", loc="best")
+	# Legend: CA% color entries + sex marker entries
+	import matplotlib.lines as mlines
+	legend_handles = []
+	for ca_pct in sorted(ca_groups_plotted.keys(), key=lambda x: (x is None, x)):
+		color, _ = _ca_to_style(ca_pct)
+		legend_handles.append(mlines.Line2D([], [], color=color, linewidth=1.5,
+		                                     label=f"{ca_pct}% CA"))
+	legend_handles.append(mlines.Line2D([], [], color='gray', marker='s',
+	                                     linestyle='None', markersize=4, label='Male'))
+	legend_handles.append(mlines.Line2D([], [], color='gray', marker='o',
+	                                     linestyle='None', markersize=4, label='Female'))
+	ax.legend(handles=legend_handles, loc="best", fontsize=7)
 	fig.tight_layout()
 
 	if save_path is not None:
@@ -3252,7 +3264,6 @@ def plot_daily_change_by_id(
 			label=label,
 			marker=marker,
 			markersize=3,
-			linewidth=1.5,
 			alpha=0.9,
 			color=color,
 		)
@@ -5308,11 +5319,9 @@ def generate_descriptive_stats_report(
 		       f"{'SEM':>8}  {'SD':>8}  {'95% CI':>22}")
 		sep = f"{indent}  {'-'*72}"
 		lines += [hdr, sep]
-		all_vals = []
 		for wk in weeks:
 			wm = _animal_week_means(sub_df[sub_df["Week"] == wk], col)
 			vals = wm[col].dropna().values
-			all_vals.extend(vals)
 			lbl = _wk_label(wk)
 			n = len(vals)
 			if n == 0:
@@ -5328,7 +5337,15 @@ def generate_descriptive_stats_report(
 				f"{indent}  {lbl:>8}  {n:>4}  {mean:>8.3f}  {median:>8.3f}  "
 				f"{sem:>8.3f}  {sd:>8.3f}  {ci_str:>22}"
 			)
-		av = np.array(all_vals, dtype=float)
+		# One grand mean per animal across all weeks (no n inflation)
+		av = (
+			sub_df[sub_df["Week"].isin(weeks)]
+			.groupby("ID")[col]
+			.mean()
+			.dropna()
+			.values
+		)
+		av = np.array(av, dtype=float)
 		an = len(av)
 		if an > 0:
 			am = float(np.mean(av)); amed = float(np.median(av))
