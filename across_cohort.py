@@ -9521,22 +9521,37 @@ def compare_slopes_within_cohorts(slopes_df: pd.DataFrame) -> Dict:
         # One-sample t-test: is the mean slope different from zero?
         t_stat_zero, p_val_zero = stats.ttest_1samp(cohort_slopes, popmean=0)
         df_zero = len(cohort_slopes) - 1
-        
+        _sem = cohort_slopes.std(ddof=1) / np.sqrt(len(cohort_slopes))
+        _t_crit = stats.t.ppf(0.975, df_zero)
+        _ci_lo = float(cohort_slopes.mean() - _t_crit * _sem)
+        _ci_hi = float(cohort_slopes.mean() + _t_crit * _sem)
+        # Cohen's d for one-sample t-test: d = mean / SD (null = 0)
+        _sd = cohort_slopes.std(ddof=1)
+        _cohens_d = float(cohort_slopes.mean() / _sd) if _sd > 0 else float('nan')
+        _abs_d = abs(_cohens_d)
+        _d_interp = ('negligible' if _abs_d < 0.2 else
+                     'small'      if _abs_d < 0.5 else
+                     'medium'     if _abs_d < 0.8 else 'large')
+
         cohort_stat = {
             'Cohort': cohort_label,
             'N': len(cohort_slopes),
             'Mean': cohort_slopes.mean(),
             'Median': np.median(cohort_slopes),
-            'SD': cohort_slopes.std(ddof=1),
-            'SEM': cohort_slopes.std(ddof=1) / np.sqrt(len(cohort_slopes)),
+            'SD': _sd,
+            'SEM': _sem,
+            'CI_95_lo': _ci_lo,
+            'CI_95_hi': _ci_hi,
             'Min': cohort_slopes.min(),
             'Max': cohort_slopes.max(),
             'IQR': np.percentile(cohort_slopes, 75) - np.percentile(cohort_slopes, 25),
-            'CV': (cohort_slopes.std(ddof=1) / cohort_slopes.mean() * 100) if cohort_slopes.mean() != 0 else np.nan,
+            'CV': (_sd / cohort_slopes.mean() * 100) if cohort_slopes.mean() != 0 else np.nan,
             'ttest_vs_zero': {
                 'statistic': t_stat_zero,
                 'p_value': p_val_zero,
                 'df': df_zero,
+                'cohens_d': _cohens_d,
+                'd_interpretation': _d_interp,
             },
         }
         
@@ -9544,11 +9559,12 @@ def compare_slopes_within_cohorts(slopes_df: pd.DataFrame) -> Dict:
         
         print(f"\n{cohort_label} (n={cohort_stat['N']}):")
         print(f"  Mean +/- SEM:         {cohort_stat['Mean']:.4f} +/- {cohort_stat['SEM']:.4f}")
+        print(f"  95% CI for Mean Slope: [{_ci_lo:.4f}, {_ci_hi:.4f}]")
         print(f"  Median (IQR):       {cohort_stat['Median']:.4f} ({cohort_stat['IQR']:.4f})")
         print(f"  SD:                 {cohort_stat['SD']:.4f}")
         print(f"  Coefficient of Var: {cohort_stat['CV']:.2f}%")
         print(f"  Range:              [{cohort_stat['Min']:.4f}, {cohort_stat['Max']:.4f}]")
-        print(f"  One-sample t-test (slope vs 0): t({df_zero}) = {t_stat_zero:.4f}, p = {p_val_zero:.4f}")
+        print(f"  One-sample t-test (slope vs 0): t({df_zero}) = {t_stat_zero:.4f}, p = {p_val_zero:.4f}, d = {_cohens_d:.3f} ({_d_interp})")
         direction = 'gaining' if cohort_slopes.mean() > 0 else 'losing'
         if p_val_zero < 0.05:
             print(f"    -> Cohort is significantly {direction} weight over time (p < 0.05)")
@@ -9656,6 +9672,109 @@ def _dunn_posthoc(
     return results
 
 
+def _bca_hl_ci(
+    a: np.ndarray,
+    b: np.ndarray,
+    n_resamples: int = 2000,
+    confidence_level: float = 0.95,
+    rng: Optional[np.random.Generator] = None,
+) -> Tuple[float, float]:
+    """
+    Bias-corrected and accelerated (BCa) bootstrap confidence interval for the
+    Hodges-Lehmann location-shift estimator (median of all pairwise A_i - B_j
+    differences).
+
+    BCa corrects for two sources of error that cause simple percentile bootstrap
+    to undercover with small samples:
+      - Bias (z0): the bootstrap distribution median ≠ the observed estimate.
+      - Skewness / acceleration (a): the bootstrap SE varies with the parameter.
+
+    The acceleration is estimated via the jackknife influence function, leaving
+    one observation out at a time from either group.
+
+    Falls back to scipy.stats.bootstrap BCa when available (scipy >= 1.7),
+    otherwise uses a hand-rolled implementation.
+
+    Parameters
+    ----------
+    a, b            : 1-D arrays of per-animal slopes for the two groups
+    n_resamples     : number of bootstrap resamples (default 2000)
+    confidence_level: nominal coverage (default 0.95)
+    rng             : optional numpy Generator for reproducibility
+
+    Returns
+    -------
+    (ci_lo, ci_hi) : tuple of floats
+    """
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    n_a, n_b = len(a), len(b)
+
+    def _hl(x: np.ndarray, y: np.ndarray) -> float:
+        return float(np.median((x[:, None] - y[None, :]).ravel()))
+
+    hl_obs = _hl(a, b)
+    alpha = 1.0 - confidence_level
+
+    # Try scipy.stats.bootstrap BCa (scipy >= 1.7)
+    try:
+        from scipy.stats import bootstrap as _sp_bootstrap
+        def _stat(x: np.ndarray, y: np.ndarray) -> float:
+            return _hl(x, y)
+        _res = _sp_bootstrap(
+            (a, b),
+            statistic=_stat,
+            n_resamples=n_resamples,
+            confidence_level=confidence_level,
+            method='BCa',
+            random_state=rng if rng is not None else 0,
+        )
+        return float(_res.confidence_interval.low), float(_res.confidence_interval.high)
+    except Exception:
+        pass
+
+    # Hand-rolled BCa fallback
+    _rng = rng if rng is not None else np.random.default_rng(42)
+    boot_vals = np.array([
+        _hl(_rng.choice(a, n_a, replace=True), _rng.choice(b, n_b, replace=True))
+        for _ in range(n_resamples)
+    ])
+
+    # z0: bias correction — proportion of bootstrap estimates below observed
+    prop_below = float(np.mean(boot_vals < hl_obs))
+    prop_below = np.clip(prop_below, 1e-6, 1 - 1e-6)
+    z0 = float(stats.norm.ppf(prop_below))
+
+    # Acceleration (a) via jackknife on combined group
+    jack_vals = []
+    for i in range(n_a):
+        a_j = np.delete(a, i)
+        jack_vals.append(_hl(a_j, b))
+    for j in range(n_b):
+        b_j = np.delete(b, j)
+        jack_vals.append(_hl(a, b_j))
+    jack_vals = np.array(jack_vals)
+    jack_mean = jack_vals.mean()
+    num = np.sum((jack_mean - jack_vals) ** 3)
+    den = np.sum((jack_mean - jack_vals) ** 2)
+    acc = float(num / (6.0 * den ** 1.5)) if den > 0 else 0.0
+
+    z_lo = stats.norm.ppf(alpha / 2)
+    z_hi = stats.norm.ppf(1 - alpha / 2)
+
+    def _adj_pct(z_a: float) -> float:
+        num_i = z0 + z_a
+        pct = stats.norm.cdf(z0 + num_i / (1.0 - acc * num_i))
+        return float(np.clip(pct, 0.0, 1.0))
+
+    p_lo = _adj_pct(z_lo)
+    p_hi = _adj_pct(z_hi)
+
+    ci_lo = float(np.percentile(boot_vals, 100 * p_lo))
+    ci_hi = float(np.percentile(boot_vals, 100 * p_hi))
+    return ci_lo, ci_hi
+
+
 def compare_slopes_between_cohorts(slopes_df: pd.DataFrame) -> Dict:
     """
     Statistically compare average slopes between cohorts (2 or more cohorts).
@@ -9752,15 +9871,7 @@ def compare_slopes_between_cohorts(slopes_df: pd.DataFrame) -> Dict:
         _diffs = (np.asarray(a)[:, None] - np.asarray(b)[None, :]).ravel()
         hl_est = float(np.median(_diffs))
         _rng_pair = np.random.default_rng(seed_i)
-        _boot = [
-            float(np.median(
-                (_rng_pair.choice(a, n_a, replace=True)[:, None]
-                 - _rng_pair.choice(b, n_b, replace=True)[None, :]).ravel()
-            ))
-            for _ in range(2000)
-        ]
-        hl_ci_lo = float(np.percentile(_boot, 2.5))
-        hl_ci_hi = float(np.percentile(_boot, 97.5))
+        hl_ci_lo, hl_ci_hi = _bca_hl_ci(a, b, n_resamples=2000, rng=_rng_pair)
         # Cohen's d (pooled SD)
         pooled_sd = np.sqrt(((n_a - 1) * a.std(ddof=1)**2 + (n_b - 1) * b.std(ddof=1)**2)
                             / (n_a + n_b - 2)) if (n_a + n_b - 2) > 0 else np.nan
@@ -9881,7 +9992,8 @@ def _format_mwu_slope_report(
         "  r_rb     : z-based rank-biserial = z(Dunn) / \u221a(nA+nB); consistent with Dunn's test",
         "             |r| < 0.3 = small, 0.3-0.5 = medium, > 0.5 = large",
         "  HL_est   : Hodges-Lehmann location shift (median of all pairwise diffs A-B)",
-        "  95% CI   : Bootstrap CI (n=2 000 resamples) on Hodges-Lehmann estimator",
+        "  95% CI   : BCa bootstrap CI (n=2 000 resamples) on Hodges-Lehmann estimator",
+        "  eta2_H CI: BCa bootstrap CI (n=2 000 resamples) on Kruskal-Wallis eta2_H",
         "",
     ]
 
@@ -9902,10 +10014,20 @@ def _format_mwu_slope_report(
         _kw_sig = ("***" if _kw_p < 0.001 else
                    "**"  if _kw_p < 0.01  else
                    "*"   if _kw_p < 0.05  else "ns")
+        _eta2h_ci_lo = kw_result.get('eta2h_ci_lo', float('nan'))
+        _eta2h_ci_hi = kw_result.get('eta2h_ci_hi', float('nan'))
+        if not (np.isnan(_eta2h_ci_lo) or np.isnan(_eta2h_ci_hi)):
+            _ci_str = f"  95% CI (BCa bootstrap, n=2 000): [{_eta2h_ci_lo:.4f}, {_eta2h_ci_hi:.4f}]"
+        else:
+            _ci_str = ""
         lines += [
             "Omnibus test : Kruskal-Wallis H-test (scipy)",
             f"  H({_kw_df}) = {_kw_H:.4f},  p = {_fp(_kw_p)}  {_kw_sig}",
             f"  eta2_H = {_eta2h:.4f}  ({_eta_lbl})",
+        ]
+        if _ci_str:
+            lines.append(_ci_str)
+        lines += [
             f"  Interpretation: eta2_H <0.01 negligible, 0.01-0.06 small, 0.06-0.14 moderate, >=0.14 large",
             "",
             "Post-hoc     : Dunn's test (pooled ranks, Holm-Bonferroni corrected)",
@@ -10097,8 +10219,38 @@ def plot_slopes_comparison(
             _n_kw = sum(len(d) for d in box_data)
             _k_kw = len(box_data)
             _eta2h = max(0.0, (_kw_H - _k_kw + 1) / (_n_kw - _k_kw))
+            # BCa bootstrap CI for eta2_H
+            def _eta2h_stat(*groups):
+                _h, _ = stats.kruskal(*groups)
+                _n = sum(len(g) for g in groups)
+                _k = len(groups)
+                return max(0.0, (_h - _k + 1) / (_n - _k))
+            _eta2h_ci_lo, _eta2h_ci_hi = float('nan'), float('nan')
+            try:
+                from scipy.stats import bootstrap as _sp_boot
+                _bca = _sp_boot(
+                    tuple(np.asarray(d) for d in box_data),
+                    statistic=_eta2h_stat,
+                    n_resamples=2000,
+                    confidence_level=0.95,
+                    method='BCa',
+                    random_state=0,
+                )
+                _eta2h_ci_lo = float(np.clip(_bca.confidence_interval.low, 0.0, 1.0))
+                _eta2h_ci_hi = float(np.clip(_bca.confidence_interval.high, 0.0, 1.0))
+            except Exception:
+                # Percentile fallback
+                _rng_kw = np.random.default_rng(42)
+                _boot_eta = []
+                for _ in range(2000):
+                    _rs = [_rng_kw.choice(np.asarray(d), len(d), replace=True) for d in box_data]
+                    _h_b, _ = stats.kruskal(*_rs)
+                    _boot_eta.append(max(0.0, (_h_b - _k_kw + 1) / (_n_kw - _k_kw)))
+                _eta2h_ci_lo = float(np.percentile(_boot_eta, 2.5))
+                _eta2h_ci_hi = float(np.percentile(_boot_eta, 97.5))
             _kw_result = {'H': _kw_H, 'df': _k_kw - 1, 'p': _kw_p,
-                          'eta2h': _eta2h, 'n': _n_kw, 'k': _k_kw}
+                          'eta2h': _eta2h, 'eta2h_ci_lo': _eta2h_ci_lo,
+                          'eta2h_ci_hi': _eta2h_ci_hi, 'n': _n_kw, 'k': _k_kw}
         _mwu_lines = _format_mwu_slope_report(
             _mwu_bracket_results, measure, time_unit, kw_result=_kw_result
         )
@@ -10187,6 +10339,8 @@ def generate_slope_analysis_report(
         lines.append(f"  Sample Size:           n = {cohort_stat['N']}")
         lines.append(f"  Mean Slope:            {cohort_stat['Mean']:.4f} {measure} per {time_unit}")
         lines.append(f"  Standard Error (SEM):  {cohort_stat['SEM']:.4f}")
+        if 'CI_95_lo' in cohort_stat and 'CI_95_hi' in cohort_stat:
+            lines.append(f"  95% CI (mean slope):   [{cohort_stat['CI_95_lo']:.4f}, {cohort_stat['CI_95_hi']:.4f}]  (t-dist)")
         lines.append(f"  Standard Deviation:    {cohort_stat['SD']:.4f}")
         lines.append(f"  Median Slope:          {cohort_stat['Median']:.4f}")
         lines.append(f"  Interquartile Range:   {cohort_stat['IQR']:.4f}")
@@ -10196,6 +10350,8 @@ def generate_slope_analysis_report(
             t0 = cohort_stat['ttest_vs_zero']
             lines.append(f"  One-Sample t-test (slope vs 0):")
             lines.append(f"    t({t0['df']}) = {t0['statistic']:.4f}, p = {t0['p_value']:.4f}")
+            if 'cohens_d' in t0:
+                lines.append(f"    Cohen's d = {t0['cohens_d']:.3f} ({t0['d_interpretation']})  [one-sample: d = mean / SD]")
             direction = 'gaining' if cohort_stat['Mean'] > 0 else 'losing'
             if t0['p_value'] < 0.001:
                 lines.append(f"    Result: Cohort is significantly {direction} weight over time (p < 0.001)")
@@ -10293,7 +10449,7 @@ def generate_slope_analysis_report(
             lines.append("  Significance (after Holm-Bonferroni correction):")
             lines.append("  * p<0.05   ** p<0.01   *** p<0.001   ns = not significant")
             lines.append("  r_rb = rank-biserial r  |  d = Cohen's d  |  HL_est = Hodges-Lehmann shift (A-B)")
-            lines.append("  95% CI = bootstrap CI (n=2 000 resamples) on Hodges-Lehmann estimator")
+            lines.append("  95% CI = BCa bootstrap CI (n=2 000 resamples) on Hodges-Lehmann estimator")
 
         # Legacy 2-cohort CI block
         if 'confidence_interval' in between_results:
@@ -14138,6 +14294,7 @@ def run_nparld_cohort_week_r(
 
     r_script = (
         'options(warn=1, scipen=999)\n'
+        'set.seed(42)\n'
         'if (!require("nparLD", quietly=TRUE, warn.conflicts=FALSE)) {\n'
         '  install.packages("nparLD", repos="https://cran.r-project.org", quiet=TRUE)\n'
         '  library(nparLD)\n'
@@ -15221,18 +15378,28 @@ def run_nparld_behavior_r(
                 cdf[f'_bin_{col_key}'] = _to_bool_series(cdf[col])
 
         for (animal_id, week_num), grp in cdf.groupby(['ID', 'Week']):
+            n_days = len(grp)
             row: dict = {'ID': str(animal_id), 'Cohort': label, 'Week': int(week_num),
-                         '_n_days': len(grp)}
+                         '_n_days': n_days}
             for col, aberrant_val, _, col_key in BEHAVIORS:
                 bcol = f'_bin_{col_key}'
                 if bcol not in grp.columns:
                     row[col_key] = float('nan')
                     continue
                 valid = grp[bcol].dropna()
-                if len(valid) == 0:
+                n_nan = n_days - len(valid)
+                if n_nan > 0:
+                    print(f"  [WARN] {label} / {animal_id} Wk{week_num} {col_key}: "
+                          f"{n_nan} NaN behavioral value(s) out of {n_days} days")
+                if n_days != 7:
+                    print(f"  [WARN] {label} / {animal_id} Wk{week_num}: "
+                          f"{n_days} rows in week (expected 7) — denominator forced to 7")
+                if n_days == 0:
                     row[col_key] = float('nan')
                 else:
-                    row[col_key] = 100.0 * (valid == aberrant_val).sum() / len(valid)
+                    # Always use 7 as denominator to keep all values on the 100/7 grid.
+                    # Missing days are treated as non-aberrant (conservative).
+                    row[col_key] = 100.0 * (valid == aberrant_val).sum() / 7
             frames.append(row)
 
     if not frames:
@@ -15420,15 +15587,30 @@ def run_nparld_behavior_r(
         '  pidx    <- combn(length(cohs), 2)\n'
         '  p_raw_w <- numeric(ncol(pidx))\n'
         '  r_rb_wv <- numeric(ncol(pidx))\n'
+        '  u_w     <- numeric(ncol(pidx))\n'
+        '  hl_w    <- numeric(ncol(pidx))\n'
+        '  ci_lo_w <- numeric(ncol(pidx))\n'
+        '  ci_hi_w <- numeric(ncol(pidx))\n'
         '  for (k in seq_len(ncol(pidx))) {\n'
         '    x  <- sw$Value[sw$Cohort == cohs[pidx[1, k]]]\n'
         '    y  <- sw$Value[sw$Cohort == cohs[pidx[2, k]]]\n'
-        '    if (length(x) < 1 || length(y) < 1) { p_raw_w[k] <- NA_real_; r_rb_wv[k] <- NA_real_; next }\n'
+        '    if (length(x) < 1 || length(y) < 1) {\n'
+        '      p_raw_w[k] <- NA_real_; r_rb_wv[k] <- NA_real_; u_w[k] <- NA_real_\n'
+        '      hl_w[k] <- NA_real_; ci_lo_w[k] <- NA_real_; ci_hi_w[k] <- NA_real_; next\n'
+        '    }\n'
         '    wt <- tryCatch(wilcox.test(x, y, exact=FALSE), error=function(e) NULL)\n'
         '    if (!is.null(wt)) {\n'
         '      p_raw_w[k]  <- wt$p.value\n'
-        '      r_rb_wv[k]  <- 1 - 2 * as.numeric(wt$statistic) / (length(x) * length(y))\n'
-        '    } else { p_raw_w[k] <- NA_real_; r_rb_wv[k] <- NA_real_ }\n'
+        '      u_w[k]      <- as.numeric(wt$statistic)\n'
+        '      r_rb_wv[k]  <- 1 - 2 * u_w[k] / (length(x) * length(y))\n'
+        '      hl_w[k]     <- median(as.numeric(outer(x, y, "-")))\n'
+        '      bt_w <- replicate(2000, { xb <- sample(x, replace=TRUE); yb <- sample(y, replace=TRUE); median(as.numeric(outer(xb, yb, "-"))) })\n'
+        '      ci_lo_w[k]  <- unname(quantile(bt_w, 0.025))\n'
+        '      ci_hi_w[k]  <- unname(quantile(bt_w, 0.975))\n'
+        '    } else {\n'
+        '      p_raw_w[k] <- NA_real_; r_rb_wv[k] <- NA_real_; u_w[k] <- NA_real_\n'
+        '      hl_w[k] <- NA_real_; ci_lo_w[k] <- NA_real_; ci_hi_w[k] <- NA_real_\n'
+        '    }\n'
         '  }\n'
         '  p_holm_w <- p.adjust(p_raw_w, method="holm")\n'
         '  for (k in seq_len(ncol(pidx))) {\n'
@@ -15441,6 +15623,8 @@ def run_nparld_behavior_r(
         '      sig <- ifelse(p_holm_w[k]<0.001,"***",ifelse(p_holm_w[k]<0.01,"**",ifelse(p_holm_w[k]<0.05,"*","ns")))\n'
         '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : p_raw=%s  p_holm=%s  %s  r_rb=%+.3f\\n",\n'
         '                  ca, na_, cb, nb_, fmt_p(p_raw_w[k]), fmt_p(p_holm_w[k]), sig, r_rb_wv[k]))\n'
+        '      cat(sprintf("    U=%.0f  HL=%+.4f  95%%CI [%+.4f, %+.4f]\\n",\n'
+        '                  u_w[k], hl_w[k], ci_lo_w[k], ci_hi_w[k]))\n'
         '    }\n'
         '  }\n'
         '}\n'
@@ -15450,7 +15634,7 @@ def run_nparld_behavior_r(
         'cat("\\n--- POST-HOC (collapsed across weeks): Between-cohort omnibus follow-up ---\\n")\n'
         'cat("  Per-animal mean across all weeks; MWU pairwise, Holm corrected\\n")\n'
         'cat("  Effect size: r_rb = 1 - 2W/(nA*nB); |r|: <0.1 negligible, 0.1-0.3 small, 0.3-0.5 medium, >=0.5 large\\n")\n'
-        'cat("  HL = Hodges-Lehmann estimator of location shift (x - y); 95% CI via wilcox.test\\n")\n'
+        'cat("  HL = Hodges-Lehmann estimator of location shift (x - y); 95% CI via bootstrap percentile (2000 resamples)\\n")\n'
         'id_means   <- tapply(sub$Value, sub$ID, mean, na.rm=TRUE)\n'
         'id_cohorts <- sub$Cohort[match(names(id_means), as.character(sub$ID))]\n'
         'coll_df    <- data.frame(ID=names(id_means), mean_val=as.numeric(id_means),\n'
@@ -15467,14 +15651,15 @@ def run_nparld_behavior_r(
         '  for (k in seq_len(ncol(pidx_c))) {\n'
         '    x  <- coll_df$mean_val[coll_df$Cohort == cohs_c[pidx_c[1, k]]]\n'
         '    y  <- coll_df$mean_val[coll_df$Cohort == cohs_c[pidx_c[2, k]]]\n'
-        '    wt <- tryCatch(wilcox.test(x, y, exact=FALSE, conf.int=TRUE), error=function(e) NULL)\n'
+        '    wt <- tryCatch(wilcox.test(x, y, exact=FALSE), error=function(e) NULL)\n'
         '    if (!is.null(wt)) {\n'
         '      p_raw_c[k] <- wt$p.value\n'
         '      u_c[k]     <- as.numeric(wt$statistic)\n'
         '      r_rb_c[k]  <- 1 - 2 * u_c[k] / (length(x) * length(y))\n'
-        '      hl_c[k]    <- as.numeric(wt$estimate)\n'
-        '      ci_lo_c[k] <- wt$conf.int[1]\n'
-        '      ci_hi_c[k] <- wt$conf.int[2]\n'
+        '      hl_c[k]    <- median(as.numeric(outer(x, y, "-")))\n'
+        '      bt_c <- replicate(2000, { xb <- sample(x, replace=TRUE); yb <- sample(y, replace=TRUE); median(as.numeric(outer(xb, yb, "-"))) })\n'
+        '      ci_lo_c[k] <- unname(quantile(bt_c, 0.025))\n'
+        '      ci_hi_c[k] <- unname(quantile(bt_c, 0.975))\n'
         '    } else {\n'
         '      p_raw_c[k] <- NA_real_; r_rb_c[k] <- NA_real_; u_c[k] <- NA_real_\n'
         '      hl_c[k] <- NA_real_; ci_lo_c[k] <- NA_real_; ci_hi_c[k] <- NA_real_\n'
@@ -15696,7 +15881,7 @@ def run_nparld_behavior_r(
             "              WTS                  -- reference only",
             "              RTE                  -- relative treatment effects (serve as effect measures; 0.5 = no effect)",
             "              p-values in scientific notation when p < 0.001, decimal otherwise",
-            "Post-hoc    : Between-cohort at each week: pairwise Mann-Whitney U, Holm corrected",
+            "Post-hoc    : Between-cohort at each week: pairwise Mann-Whitney U, Holm corrected; U, HL, 95% bootstrap CI reported",
             "              Between-cohort collapsed across weeks: pairwise MWU (omnibus follow-up; subsumes KW post-hoc)",
             "              Effect size: r_rb = 1 - 2W/(nA*nB); range [-1,1]; |r|: <0.1 negligible, 0.1-0.3 small, 0.3-0.5 medium, >=0.5 large",
             "",
