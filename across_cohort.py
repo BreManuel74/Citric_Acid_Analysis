@@ -14507,7 +14507,7 @@ def run_nparld_cohort_week_r(
         except (TypeError, ValueError):
             return 'n/a'
         p = float(p)
-        if p < 0.0001:  return f'{p:.2e}'
+        if p < 0.001:  return f'{p:.2e}'
         return f'{p:.4f}'
 
     def _sig_nw(p: float) -> str:
@@ -14802,6 +14802,64 @@ def run_nparld_cohort_week_r(
                 else:
                     lines.append(f'      HL={_hl:+.4f}  95%CI [{_ci_lo:+.4f}, {_ci_hi:+.4f}]')
             lines.append('')
+
+    # Collapsed (across weeks) between-cohort MWU post-hoc
+    _coll_groups = sorted(weekly['Cohort'].unique())
+    if len(_coll_groups) >= 2:
+        # Per-animal mean across all weeks
+        _coll_means = (
+            weekly.groupby(['ID', 'Cohort'], as_index=False)['TotalChange'].mean()
+        )
+        _coll_pairs_raw = []
+        _coll_pairs_info = []
+        for _ci in range(len(_coll_groups)):
+            for _cj in range(_ci + 1, len(_coll_groups)):
+                _ga, _gb = _coll_groups[_ci], _coll_groups[_cj]
+                _va = _coll_means[_coll_means['Cohort'] == _ga]['TotalChange'].dropna().values
+                _vb = _coll_means[_coll_means['Cohort'] == _gb]['TotalChange'].dropna().values
+                if len(_va) > 0 and len(_vb) > 0:
+                    from scipy.stats import mannwhitneyu as _mwu
+                    _U_c, _p_c = _mwu(_va, _vb, alternative='two-sided')
+                    _U_c = float(_U_c)
+                    _rrb_c = 1.0 - 2.0 * _U_c / (len(_va) * len(_vb))
+                    _hl_c  = float(np.median(np.subtract.outer(_va, _vb).ravel()))
+                    # Bootstrap percentile 95% CI on HL
+                    _rng_c = np.random.default_rng(42)
+                    _bt_c  = np.array([
+                        np.median(np.subtract.outer(
+                            _rng_c.choice(_va, size=len(_va), replace=True),
+                            _rng_c.choice(_vb, size=len(_vb), replace=True)
+                        ).ravel())
+                        for _ in range(2000)
+                    ])
+                    _ci_lo_c = float(np.percentile(_bt_c, 2.5))
+                    _ci_hi_c = float(np.percentile(_bt_c, 97.5))
+                else:
+                    _U_c = float('nan'); _p_c = 1.0
+                    _rrb_c = float('nan'); _hl_c = float('nan')
+                    _ci_lo_c = float('nan'); _ci_hi_c = float('nan')
+                _coll_pairs_raw.append(_p_c)
+                _coll_pairs_info.append((_ga, len(_va), _gb, len(_vb), _U_c, _p_c, _rrb_c, _hl_c, _ci_lo_c, _ci_hi_c))
+        _coll_adj = _holm_nw(_coll_pairs_raw)
+        lines += [
+            '  Between-Cohort Comparisons Collapsed Across Weeks  (per-animal mean; MWU, Holm corrected)',
+            '  Effect size: r_rb = rank-biserial correlation = 1 \u2212 2U/(n\u2081\u00b7n\u2082); range [\u22121, 1], positive = group1 > group2',
+            '  HL = Hodges-Lehmann estimator of location shift (x \u2212 y); 95% CI via bootstrap percentile (2000 resamples)',
+            '  ' + '\u2500' * 88,
+        ]
+        for (_ga, _na, _gb, _nb, _U_c, _pr_c, _rrb_c, _hl_c, _ci_lo_c, _ci_hi_c), _pa_c in zip(_coll_pairs_info, _coll_adj):
+            _rrb_s = f'{_rrb_c:+.3f}' if not np.isnan(_rrb_c) else 'N/A'
+            _u_s   = f'{_U_c:.0f}'    if not np.isnan(_U_c)   else 'N/A'
+            _hl_s  = f'{_hl_c:+.4f}'  if not np.isnan(_hl_c)  else 'N/A'
+            _ci_s  = (f'[{_ci_lo_c:+.4f}, {_ci_hi_c:+.4f}]'
+                      if not (np.isnan(_ci_lo_c) or np.isnan(_ci_hi_c)) else '[N/A]')
+            lines.append(
+                f'    {_ga} (n={_na}) vs {_gb} (n={_nb}) :  '
+                f'U={_u_s}  p_raw={_fmt_p_nw(_pr_c)}  p_holm={_fmt_p_nw(_pa_c)}  '
+                f'r_rb={_rrb_s}  {_sig_nw(_pa_c)}'
+            )
+            lines.append(f'      HL={_hl_s}  95%CI {_ci_s}')
+        lines.append('')
 
     lines += [
         '  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10', '',

@@ -72,9 +72,9 @@ plt.rcParams.update({
     "ytick.labelsize": 8,
     "legend.fontsize": 7.5,
     "figure.titlesize": 10,
-    "lines.linewidth": 0.9,
+    "lines.linewidth": 0.5,
     "lines.markersize": 3,
-    "figure.figsize": (3, 2.5),
+    "figure.figsize": (4.5, 2.5),
 })
 
 # ==============================================================================
@@ -104,6 +104,35 @@ def _get_id_ca_map(df: pd.DataFrame) -> dict:
 
 	ca_map = cdf.groupby("ID")["CA (%)"].apply(_norm_ca).to_dict()
 	return {str(k): v for k, v in ca_map.items()}
+
+
+def _get_id_sex_map(df: pd.DataFrame) -> dict:
+	"""Build a mapping from ID -> Sex ('M' or 'F') using the first non-null value per ID."""
+	cdf = clean_rv_dataframe(df)
+	if "ID" not in cdf.columns or "Sex" not in cdf.columns:
+		return {}
+
+	def _norm_sex(x: pd.Series) -> Optional[str]:
+		valid = x.dropna().unique()
+		if len(valid) > 0:
+			v = str(valid[0]).strip().upper()
+			if v in ("M", "MALE"):
+				return "M"
+			if v in ("F", "FEMALE"):
+				return "F"
+		return None
+
+	sex_map = cdf.groupby("ID")["Sex"].apply(_norm_sex).to_dict()
+	return {str(k): v for k, v in sex_map.items()}
+
+
+def _sex_to_marker(sex: Optional[str]) -> str:
+	"""Return marker based on sex: M=square, F=circle, unknown=triangle."""
+	if sex == "M":
+		return "s"
+	if sex == "F":
+		return "o"
+	return "^"
 
 
 def apply_common_plot_style(
@@ -425,6 +454,7 @@ def plot_total_change_by_id(
 	"""
 	series_by_id = build_total_change_series_by_id(df)
 	ca_map = _get_id_ca_map(df)
+	sex_map = _get_id_sex_map(df)
 
 	if ids is not None:
 		series_by_id = {k: v for k, v in series_by_id.items() if k in set(ids)}
@@ -440,7 +470,8 @@ def plot_total_change_by_id(
 		if s.empty:
 			continue
 		ca_pct = ca_map.get(mid)
-		color, marker = _ca_to_style(ca_pct)
+		color, _ = _ca_to_style(ca_pct)
+		marker = _sex_to_marker(sex_map.get(mid))
 
 		if ca_pct not in ca_groups_plotted:
 			label = f"{ca_pct}% CA"
@@ -454,7 +485,6 @@ def plot_total_change_by_id(
 			label=label,
 			marker=marker,
 			markersize=3,
-			linewidth=1.5,
 			alpha=0.9,
 			color=color,
 		)
@@ -462,7 +492,6 @@ def plot_total_change_by_id(
 	ax.set_xlabel("Day")
 	ax.set_ylabel("Total Change (%)")
 	ax.grid(False)
-	ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 
 	if title is None:
 		title = "Total Weight Change by Day per Animal"
@@ -477,7 +506,24 @@ def plot_total_change_by_id(
 		ticks_in=True,
 	)
 
-	ax.legend(title="CA%", loc="best")
+	# Manual axis limits and ticks
+	ax.set_xlim(0, 28)
+	ax.set_xticks(range(0, 29, 4))
+	ax.set_ylim(-25, 15)
+	ax.set_yticks(range(-25, 16, 5))
+
+	# Legend: CA% color entries + sex marker entries
+	import matplotlib.lines as mlines
+	legend_handles = []
+	for ca_pct in sorted(ca_groups_plotted.keys(), key=lambda x: (x is None, x)):
+		color, _ = _ca_to_style(ca_pct)
+		legend_handles.append(mlines.Line2D([], [], color=color, linewidth=1.5,
+		                                     label=f"{ca_pct}% CA"))
+	legend_handles.append(mlines.Line2D([], [], color='gray', marker='s',
+	                                     linestyle='None', markersize=4, label='Male'))
+	legend_handles.append(mlines.Line2D([], [], color='gray', marker='o',
+	                                     linestyle='None', markersize=4, label='Female'))
+	ax.legend(handles=legend_handles, loc="best", fontsize=7)
 	fig.tight_layout()
 
 	if save_path is not None:
@@ -518,6 +564,7 @@ def plot_daily_change_by_id(
 	"""
 	series_by_id = build_daily_change_series_by_id(df)
 	ca_map = _get_id_ca_map(df)
+	sex_map = _get_id_sex_map(df)
 
 	if ids is not None:
 		series_by_id = {k: v for k, v in series_by_id.items() if k in set(ids)}
@@ -533,7 +580,8 @@ def plot_daily_change_by_id(
 		if s.empty:
 			continue
 		ca_pct = ca_map.get(mid)
-		color, marker = _ca_to_style(ca_pct)
+		color, _ = _ca_to_style(ca_pct)
+		marker = _sex_to_marker(sex_map.get(mid))
 
 		if ca_pct not in ca_groups_plotted:
 			label = f"{ca_pct}% CA"
@@ -547,7 +595,6 @@ def plot_daily_change_by_id(
 			label=label,
 			marker=marker,
 			markersize=3,
-			linewidth=1.5,
 			alpha=0.9,
 			color=color,
 		)
@@ -570,7 +617,18 @@ def plot_daily_change_by_id(
 		ticks_in=True,
 	)
 
-	ax.legend(title="CA%", loc="best")
+	# Legend: CA% color entries + sex marker entries
+	import matplotlib.lines as mlines
+	legend_handles = []
+	for ca_pct in sorted(ca_groups_plotted.keys(), key=lambda x: (x is None, x)):
+		color, _ = _ca_to_style(ca_pct)
+		legend_handles.append(mlines.Line2D([], [], color=color, linewidth=1.5,
+		                                     label=f"{ca_pct}% CA"))
+	legend_handles.append(mlines.Line2D([], [], color='gray', marker='s',
+	                                     linestyle='None', markersize=4, label='Male'))
+	legend_handles.append(mlines.Line2D([], [], color='gray', marker='o',
+	                                     linestyle='None', markersize=4, label='Female'))
+	ax.legend(handles=legend_handles, loc="best", fontsize=7)
 	fig.tight_layout()
 
 	if save_path is not None:
@@ -810,6 +868,10 @@ def calculate_animal_slopes_rv(
 
 	if time_unit == "Week":
 		analysis_df = analysis_df[analysis_df[time_unit] > 0].copy()
+		# Average within each week per animal so each animal contributes
+		# one data point per week (4 points for a 27-day study, not 27).
+		group_cols = [c for c in ['ID', 'Sex', 'CA (%)'] if c in analysis_df.columns] + [time_unit]
+		analysis_df = analysis_df.groupby(group_cols, dropna=False)[measure].mean().reset_index()
 
 	print(f"  Animals: {analysis_df['ID'].nunique()}")
 	print(f"  CA% groups: {sorted(analysis_df['CA (%)'].unique())}")
@@ -877,18 +939,25 @@ def compare_slopes_within_ca_groups(slopes_df: pd.DataFrame) -> Dict:
 
 	for ca_val in sorted(slopes_df['CA (%)'].unique()):
 		group_slopes = slopes_df[slopes_df['CA (%)'] == ca_val]['Slope'].values
+		_n = len(group_slopes)
+		_sem = group_slopes.std(ddof=1) / np.sqrt(_n)
+		_t_crit = stats.t.ppf(0.975, _n - 1)
+		_ci_lo = float(group_slopes.mean() - _t_crit * _sem)
+		_ci_hi = float(group_slopes.mean() + _t_crit * _sem)
 
 		group_stat = {
 			'CA (%)': ca_val,
-			'N': len(group_slopes),
+			'N': _n,
 			'Mean': group_slopes.mean(),
 			'Median': np.median(group_slopes),
-			'SD': group_slopes.std(),
-			'SEM': group_slopes.std() / np.sqrt(len(group_slopes)),
+			'SD': group_slopes.std(ddof=1),
+			'SEM': _sem,
+			'CI_95_lo': _ci_lo,
+			'CI_95_hi': _ci_hi,
 			'Min': group_slopes.min(),
 			'Max': group_slopes.max(),
 			'IQR': np.percentile(group_slopes, 75) - np.percentile(group_slopes, 25),
-			'CV': (group_slopes.std() / group_slopes.mean() * 100) if group_slopes.mean() != 0 else np.nan,
+			'CV': (group_slopes.std(ddof=1) / group_slopes.mean() * 100) if group_slopes.mean() != 0 else np.nan,
 		}
 
 		results['group_stats'].append(group_stat)
@@ -931,8 +1000,8 @@ def compare_slopes_between_ca_groups(slopes_df: pd.DataFrame) -> Dict:
 	slopes_1 = slopes_df[slopes_df['CA (%)'] == ca_1]['Slope'].values
 
 	print(f"\nComparing: {ca_0}% CA (n={len(slopes_0)}) vs {ca_1}% CA (n={len(slopes_1)})")
-	print(f"  {ca_0}% CA: Mean = {slopes_0.mean():.4f}, SD = {slopes_0.std():.4f}")
-	print(f"  {ca_1}% CA: Mean = {slopes_1.mean():.4f}, SD = {slopes_1.std():.4f}")
+	print(f"  {ca_0}% CA: Mean = {slopes_0.mean():.4f}, SD = {slopes_0.std(ddof=1):.4f}")
+	print(f"  {ca_1}% CA: Mean = {slopes_1.mean():.4f}, SD = {slopes_1.std(ddof=1):.4f}")
 	print(f"  Difference in means: {slopes_1.mean() - slopes_0.mean():.4f}")
 
 	results = {
@@ -941,8 +1010,8 @@ def compare_slopes_between_ca_groups(slopes_df: pd.DataFrame) -> Dict:
 		'n_1': len(slopes_1),
 		'mean_0': slopes_0.mean(),
 		'mean_1': slopes_1.mean(),
-		'sd_0': slopes_0.std(),
-		'sd_1': slopes_1.std(),
+		'sd_0': slopes_0.std(ddof=1),
+		'sd_1': slopes_1.std(ddof=1),
 		'mean_diff': slopes_1.mean() - slopes_0.mean(),
 	}
 
@@ -967,14 +1036,32 @@ def compare_slopes_between_ca_groups(slopes_df: pd.DataFrame) -> Dict:
 
 	# Mann-Whitney U test
 	u_stat, u_p = stats.mannwhitneyu(slopes_0, slopes_1, alternative='two-sided')
+
+	# Hodges-Lehmann estimator and bootstrap 95% CI
+	_hl_est = float(np.median(np.subtract.outer(slopes_0, slopes_1).ravel()))
+	_rng_hl = np.random.default_rng(42)
+	_hl_boot = np.array([
+		np.median(np.subtract.outer(
+			_rng_hl.choice(slopes_0, size=n1, replace=True),
+			_rng_hl.choice(slopes_1, size=n2, replace=True)
+		).ravel())
+		for _ in range(2000)
+	])
+	_hl_ci_lo = float(np.quantile(_hl_boot, 0.025))
+	_hl_ci_hi = float(np.quantile(_hl_boot, 0.975))
+
 	print(f"\nMann-Whitney U Test (non-parametric):")
 	print(f"  U = {u_stat:.4f}, p = {u_p:.4f}")
 	print(f"  Result: {'Significant' if u_p < 0.05 else 'Not significant'} (alpha = 0.05)")
+	print(f"  Hodges-Lehmann shift: {_hl_est:.4f}  95% CI (bootstrap): [{_hl_ci_lo:.4f}, {_hl_ci_hi:.4f}]")
 
 	results['mann_whitney'] = {
 		'statistic': u_stat,
 		'p_value': u_p,
 		'significant': u_p < 0.05,
+		'hodges_lehmann': _hl_est,
+		'ci_95_lo': _hl_ci_lo,
+		'ci_95_hi': _hl_ci_hi,
 	}
 
 	# Cohen's d
@@ -1129,18 +1216,53 @@ def plot_slopes_comparison_rv(
 	else:
 		plt.close(fig1)
 
-	# -- Figure 2: Bar chart with SEM error bars --
+	# -- Figure 2: Bar chart with individual scatter points --
 	fig2, ax2 = plt.subplots()
 
-	means = [slopes_df[slopes_df['CA (%)'] == ca]['Slope'].mean() for ca in ca_groups]
-	sems = [slopes_df[slopes_df['CA (%)'] == ca]['Slope'].sem() for ca in ca_groups]
+	bar_data = [slopes_df[slopes_df['CA (%)'] == ca]['Slope'].values for ca in ca_groups]
+	means = [np.mean(d) if len(d) > 0 else 0.0 for d in bar_data]
+	sems = [stats.sem(d) if len(d) > 1 else 0.0 for d in bar_data]
 
-	ax2.bar(range(len(ca_groups)), means, yerr=sems, capsize=4,
-			color=colors, alpha=0.6, edgecolor='black',
-			linewidth=plt.rcParams.get('lines.linewidth', 0.9))
+	ax2.bar(range(len(ca_groups)), means, width=0.65, color=colors, alpha=0.7,
+			yerr=sems, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'),
+			zorder=2)
+
+	# Overlay individual scatter points
+	rng2 = np.random.default_rng(43)
+	for i, ca in enumerate(ca_groups):
+		slopes = slopes_df[slopes_df['CA (%)'] == ca]['Slope'].values
+		x_jitter = rng2.normal(i, 0.04, size=len(slopes))
+		ax2.scatter(x_jitter, slopes, alpha=0.6, s=10,
+					color=colors[i], edgecolors='black', linewidths=0.5, zorder=3)
+
+	ax2.axhline(0, color='black', linewidth=0.5, linestyle='--')
+
+	# MWU significance bracket
+	if len(ca_groups) == 2:
+		_s0b = bar_data[0]
+		_s1b = bar_data[1]
+		_u2, _p2 = stats.mannwhitneyu(_s0b, _s1b, alternative='two-sided')
+		if _p2 < 0.001:
+			_lbl2 = '***'
+		elif _p2 < 0.01:
+			_lbl2 = '**'
+		elif _p2 < 0.05:
+			_lbl2 = '*'
+		else:
+			_lbl2 = 'ns'
+		_all2 = np.concatenate([_s0b, _s1b])
+		_rng2 = np.max(_all2) - np.min(_all2) if np.max(_all2) != np.min(_all2) else 1.0
+		_brk2 = np.max(_all2) + _rng2 * 0.12
+		_tkh2 = _rng2 * 0.04
+		ax2.plot([0, 0, 1, 1], [_brk2 - _tkh2, _brk2, _brk2, _brk2 - _tkh2],
+				 lw=plt.rcParams.get('lines.linewidth', 0.9), color='black', clip_on=False)
+		ax2.text(0.5, _brk2 + _tkh2 * 0.5, _lbl2,
+				 ha='center', va='bottom', fontsize=plt.rcParams.get('font.size', 8))
 
 	ax2.set_xticks(range(len(ca_groups)))
 	ax2.set_xticklabels([f'{ca}% CA' for ca in ca_groups])
+	ax2.set_xlim(-0.7, len(ca_groups) - 1 + 0.7)
+	ax2.set_ylim(-2, 4)
 	ax2.set_ylabel(f'Mean Slope \u00b1 SEM ({measure} per {time_unit})')
 	ax2.grid(False)
 	plot_title = 'Mean Slopes with Error Bars'
@@ -1266,6 +1388,8 @@ def generate_slope_analysis_report_rv(
 		lines.append(f"  Median:             {group_stat['Median']:.4f}")
 		lines.append(f"  Standard Deviation: {group_stat['SD']:.4f}")
 		lines.append(f"  SEM:                {group_stat['SEM']:.4f}")
+		if 'CI_95_lo' in group_stat and 'CI_95_hi' in group_stat:
+			lines.append(f"  95% CI (mean slope): [{group_stat['CI_95_lo']:.4f}, {group_stat['CI_95_hi']:.4f}]  (t-dist)")
 		lines.append(f"  Min:                {group_stat['Min']:.4f}")
 		lines.append(f"  Max:                {group_stat['Max']:.4f}")
 		lines.append(f"  IQR:                {group_stat['IQR']:.4f}")
@@ -1308,6 +1432,9 @@ def generate_slope_analysis_report_rv(
 		lines.append("-" * 80)
 		lines.append(f"  U = {mw['statistic']:.4f},  p = {mw['p_value']:.4f}")
 		lines.append(f"  Result: {'Significant' if mw['significant'] else 'Not significant'} (alpha = 0.05)")
+		if 'hodges_lehmann' in mw:
+			lines.append(f"  Hodges-Lehmann shift: {mw['hodges_lehmann']:.4f}")
+			lines.append(f"  95% CI (bootstrap, n=2000): [{mw['ci_95_lo']:.4f}, {mw['ci_95_hi']:.4f}]")
 
 		# Effect size
 		es = between_results['effect_size']
@@ -1503,6 +1630,283 @@ def perform_complete_slope_analysis_rv(
 
 
 # ==============================================================================
+# DESCRIPTIVE STATISTICS REPORT
+# ==============================================================================
+
+def generate_descriptive_stats_report(
+	df: pd.DataFrame,
+	output_dir: Optional[Path] = None,
+	cohort_label: str = "RV",
+) -> dict:
+	"""
+	Generate per-week descriptive statistics for Total Change and Daily Change,
+	stratified all-animals, by CA% condition, and by Sex.  Also reports
+	starting weights by Sex.
+
+	Study structure: 27 post-baseline days (Days 1–27).
+	  Week 1 = Days 1–7   (7 days)
+	  Week 2 = Days 8–14  (7 days)
+	  Week 3 = Days 15–21 (7 days)
+	  Week 4 = Days 22–27 (6 days — study ended before day 28)
+
+	Per-week values are computed as the within-animal mean over that week's
+	days, then descriptive stats are computed across animals.
+
+	Returns a dict with keys 'report_text' and 'report_path'.
+	"""
+	from scipy.stats import t as _t_dist
+
+	df = df.copy()
+	if "Day" not in df.columns:
+		df = add_day_number_column(df)
+	if "Week" not in df.columns:
+		df = add_week_column(df)
+
+	# Post-baseline rows only
+	cdf = df[df["Day"] > 0].copy()
+
+	# Ensure CA (%) column exists
+	if "CA (%)" not in cdf.columns and "Condition" in cdf.columns:
+		def _parse_ca(val):
+			if pd.isna(val):
+				return None
+			try:
+				return int(float(str(val).strip().replace('%', '')))
+			except (ValueError, TypeError):
+				return None
+		cdf["CA (%)"] = cdf["Condition"].apply(_parse_ca)
+
+	weeks = sorted(w for w in cdf["Week"].dropna().unique())
+
+	# Build week→day-range map (to note the 6-day last week)
+	week_day_map = {}
+	for w in weeks:
+		wd = cdf.loc[cdf["Week"] == w, "Day"]
+		week_day_map[int(w)] = (int(wd.min()), int(wd.max()), int(wd.nunique()))
+
+	has_sex = "Sex" in cdf.columns and cdf["Sex"].notna().any()
+	has_ca  = "CA (%)" in cdf.columns and cdf["CA (%)"].notna().any()
+	conditions = sorted(cdf["CA (%)"].dropna().unique()) if has_ca else []
+	sexes      = sorted(cdf["Sex"].dropna().unique())    if has_sex else []
+
+	# ── Helpers ──────────────────────────────────────────────────────────────
+	def _ci95(arr):
+		n = len(arr)
+		if n < 2:
+			return float('nan'), float('nan')
+		se = float(np.std(arr, ddof=1)) / np.sqrt(n)
+		margin = float(_t_dist.ppf(0.975, df=n - 1)) * se
+		mean = float(np.mean(arr))
+		return mean - margin, mean + margin
+
+	def _wk_label(w):
+		wk = int(w)
+		d_lo, d_hi, nd = week_day_map.get(wk, (0, 0, 0))
+		if nd < 7:
+			return f"Week {wk}*"   # asterisk flags the short week
+		return f"Week {wk} "
+
+	def _animal_week_means(sub_df, col):
+		"""Return per-animal mean for *col* per week, indexed by animal."""
+		return (
+			sub_df.groupby(["ID", "Week"])[col]
+			.mean()
+			.reset_index()
+		)
+
+	def _cont_stats_block(sub_df, col, weeks, lines, indent=""):
+		"""Append formatted rows to *lines* for continuous variable *col*."""
+		hdr = (f"{indent}  {'Level':>8}  {'n':>4}  {'Mean':>8}  {'Median':>8}  "
+		       f"{'SEM':>8}  {'SD':>8}  {'95% CI':>22}")
+		sep = f"{indent}  {'-'*72}"
+		lines += [hdr, sep]
+		for wk in weeks:
+			wm = _animal_week_means(sub_df[sub_df["Week"] == wk], col)
+			vals = wm[col].dropna().values
+			lbl = _wk_label(wk)
+			n = len(vals)
+			if n == 0:
+				lines.append(f"{indent}  {lbl:>8}  {n:>4}  {'—':>8}  {'—':>8}  {'—':>8}  {'—':>8}  {'—':>22}")
+				continue
+			mean   = float(np.mean(vals))
+			median = float(np.median(vals))
+			sd     = float(np.std(vals, ddof=1))  if n >= 2 else float('nan')
+			sem    = sd / np.sqrt(n)               if n >= 2 else float('nan')
+			ci_lo, ci_hi = _ci95(vals)
+			ci_str = f"[{ci_lo:.3f}, {ci_hi:.3f}]" if not np.isnan(ci_lo) else "N/A"
+			lines.append(
+				f"{indent}  {lbl:>8}  {n:>4}  {mean:>8.3f}  {median:>8.3f}  "
+				f"{sem:>8.3f}  {sd:>8.3f}  {ci_str:>22}"
+			)
+		# One grand mean per animal across all weeks (no n inflation)
+		av = (
+			sub_df[sub_df["Week"].isin(weeks)]
+			.groupby("ID")[col]
+			.mean()
+			.dropna()
+			.values
+		)
+		av = np.array(av, dtype=float)
+		an = len(av)
+		if an > 0:
+			am = float(np.mean(av)); amed = float(np.median(av))
+			asd = float(np.std(av, ddof=1)) if an >= 2 else float('nan')
+			asem = asd / np.sqrt(an)        if an >= 2 else float('nan')
+			aci_lo, aci_hi = _ci95(av)
+			aci_str = f"[{aci_lo:.3f}, {aci_hi:.3f}]" if not np.isnan(aci_lo) else "N/A"
+			lines += [sep, f"{indent}  {'All':>8}  {an:>4}  {am:>8.3f}  {amed:>8.3f}  "
+			               f"{asem:>8.3f}  {asd:>8.3f}  {aci_str:>22}"]
+
+	# ── Build report lines ──────────────────────────────────────────────────
+	ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+	lines: list[str] = [
+		"=" * 80,
+		f"DESCRIPTIVE STATISTICS REPORT — {cohort_label} COHORT",
+		"=" * 80,
+		f"Generated: {ts}",
+		f"Post-baseline days: 27  |  Weeks: 4",
+		"Week structure:",
+	]
+	for wk in weeks:
+		d_lo, d_hi, nd = week_day_map[int(wk)]
+		note = "  ← 6-day week (study ended before day 28)" if nd < 7 else ""
+		lines.append(f"  Week {int(wk)}: Days {d_lo}–{d_hi}  ({nd} days){note}")
+	lines += [
+		"* Week labels marked with * contain fewer than 7 days.",
+		"  Per-week values = within-animal mean over that week's days.",
+		"  n = number of animals contributing to each level.",
+		"=" * 80,
+	]
+
+	cont_cols = [c for c in ["Total Change", "Daily Change"] if c in cdf.columns]
+
+	# ── Section 1: All animals ───────────────────────────────────────────────
+	lines += ["", "─" * 80, "  ALL ANIMALS (collapsed across Sex and CA%)", "─" * 80]
+	for col in cont_cols:
+		lines += ["", f"  {col.upper()}", "  " + "─" * 60]
+		_cont_stats_block(cdf, col, weeks, lines)
+
+	# ── Section 2: Stratified by CA% condition ───────────────────────────────
+	if has_ca and conditions:
+		lines += ["", "─" * 80, "  BY CA% CONDITION", "─" * 80]
+		for ca in conditions:
+			sub = cdf[cdf["CA (%)"] == ca]
+			n_animals = sub["ID"].nunique()
+			lines += ["", f"  CA = {int(ca)}%  (n = {n_animals} animals)", "  " + "─" * 60]
+			for col in cont_cols:
+				lines += [f"  {col.upper()}"]
+				_cont_stats_block(sub, col, weeks, lines, indent="  ")
+				lines.append("")
+
+	# ── Section 3: Stratified by Sex ─────────────────────────────────────────
+	if has_sex and sexes:
+		lines += ["─" * 80, "  BY SEX", "─" * 80]
+		for sex in sexes:
+			sub = cdf[cdf["Sex"] == sex]
+			n_animals = sub["ID"].nunique()
+			lines += ["", f"  Sex = {sex}  (n = {n_animals} animals)", "  " + "─" * 60]
+			for col in cont_cols:
+				lines += [f"  {col.upper()}"]
+				_cont_stats_block(sub, col, weeks, lines, indent="  ")
+				lines.append("")
+
+	# ── Section 4: Starting Weight by Sex (and CA%) ──────────────────────────
+	if "Weight" in df.columns and "ID" in df.columns:
+		sw_rows = []
+		for iid, grp in df.sort_values(["ID", "Date"]).groupby("ID"):
+			valid = grp.dropna(subset=["Weight"])
+			if valid.empty:
+				continue
+			first = valid.iloc[0]
+			sw_sex = str(first.get("Sex", "U")).strip().upper()
+			sw_sex = sw_sex[0] if sw_sex else "U"
+			sw_ca  = first.get("CA (%)", None)
+			sw_ca  = int(sw_ca) if pd.notna(sw_ca) else None
+			sw_rows.append({"ID": str(iid), "Sex": sw_sex, "CA (%)": sw_ca, "Weight": float(first["Weight"])})
+		sw_df = pd.DataFrame(sw_rows) if sw_rows else pd.DataFrame(columns=["ID","Sex","CA (%)","Weight"])
+
+		lines += [
+			"", "=" * 80, "STARTING WEIGHT BY SEX",
+			"=" * 80,
+			"Note: starting weight = first recorded weight per animal (Day 0 or earliest date)",
+			"",
+			"Individual starting weights:",
+			"-" * 52,
+			f"  {'ID':<10}  {'Sex':>4}  {'CA (%)':>7}  {'Starting Weight (g)':>20}",
+			"-" * 52,
+		]
+		for _, row in sw_df.sort_values(["Sex", "CA (%)", "ID"]).iterrows():
+			ca_lbl = f"{int(row['CA (%)'])}%" if pd.notna(row["CA (%)"]) else "?"
+			lines.append(f"  {row['ID']:<10}  {row['Sex']:>4}  {ca_lbl:>7}  {row['Weight']:>20.2f}")
+
+		lines += [
+			"", "Summary statistics by Sex:",
+			"-" * 56,
+			f"  {'Sex':>4}  {'n':>4}  {'Mean (g)':>10}  {'SEM':>8}  {'SD':>8}  {'95% CI':>22}",
+			"-" * 56,
+		]
+		for sex in sorted(sw_df["Sex"].unique()):
+			arr = sw_df.loc[sw_df["Sex"] == sex, "Weight"].values.astype(float)
+			n   = len(arr)
+			mean = float(np.mean(arr))
+			sd   = float(np.std(arr, ddof=1)) if n >= 2 else float('nan')
+			sem  = sd / np.sqrt(n)            if n >= 2 else float('nan')
+			ci_lo, ci_hi = _ci95(arr)
+			ci_str = f"[{ci_lo:.2f}, {ci_hi:.2f}]" if not np.isnan(ci_lo) else "N/A"
+			lines.append(f"  {sex:>4}  {n:>4}  {mean:>10.2f}  {sem:>8.3f}  {sd:>8.3f}  {ci_str:>22}")
+		# All collapsed
+		arr_all = sw_df["Weight"].values.astype(float)
+		an = len(arr_all)
+		if an > 0:
+			am   = float(np.mean(arr_all))
+			asd  = float(np.std(arr_all, ddof=1)) if an >= 2 else float('nan')
+			asem = asd / np.sqrt(an)               if an >= 2 else float('nan')
+			aci_lo, aci_hi = _ci95(arr_all)
+			aci_str = f"[{aci_lo:.2f}, {aci_hi:.2f}]" if not np.isnan(aci_lo) else "N/A"
+			lines += ["-" * 56,
+			          f"  {'All':>4}  {an:>4}  {am:>10.2f}  {asem:>8.3f}  {asd:>8.3f}  {aci_str:>22}"]
+
+		# By CA% condition
+		if has_ca and not sw_df["CA (%)"].isna().all():
+			lines += [
+				"", "Summary statistics by Sex × CA%:",
+				"-" * 70,
+				f"  {'Sex':>4}  {'CA%':>5}  {'n':>4}  {'Mean (g)':>10}  {'SEM':>8}  {'SD':>8}  {'95% CI':>22}",
+				"-" * 70,
+			]
+			for sex in sorted(sw_df["Sex"].unique()):
+				for ca in sorted(sw_df["CA (%)"].dropna().unique()):
+					arr = sw_df.loc[(sw_df["Sex"] == sex) & (sw_df["CA (%)"] == ca), "Weight"].values.astype(float)
+					n   = len(arr)
+					if n == 0:
+						continue
+					mean = float(np.mean(arr))
+					sd   = float(np.std(arr, ddof=1)) if n >= 2 else float('nan')
+					sem  = sd / np.sqrt(n)            if n >= 2 else float('nan')
+					ci_lo, ci_hi = _ci95(arr)
+					ci_str = f"[{ci_lo:.2f}, {ci_hi:.2f}]" if not np.isnan(ci_lo) else "N/A"
+					ca_lbl = f"{int(ca)}%"
+					lines.append(f"  {sex:>4}  {ca_lbl:>5}  {n:>4}  {mean:>10.2f}  {sem:>8.3f}  {sd:>8.3f}  {ci_str:>22}")
+
+	lines += ["", "=" * 80, "END OF REPORT", "=" * 80, ""]
+	report_text = "\n".join(lines)
+	print(report_text)
+
+	# Save
+	rpt_path = None
+	_out = output_dir or Path(__file__).parent
+	_ts2 = datetime.now().strftime("%Y%m%d_%H%M%S")
+	rpt_path = _out / f"{cohort_label}_descriptive_stats_report_{_ts2}.txt"
+	try:
+		rpt_path.write_text(report_text, encoding='utf-8')
+		print(f"\nReport saved: {rpt_path}")
+	except Exception as _e:
+		print(f"\n[WARNING] Could not save report: {_e}")
+
+	return {"report_text": report_text, "report_path": rpt_path}
+
+
+# ==============================================================================
 # MAIN
 # ==============================================================================
 
@@ -1557,6 +1961,7 @@ def main():
   [P]  All plots (1-4)
   [5]  Slope analysis: Total Change ~ {time} between CA% groups
   [6]  Slope analysis: Daily Change ~ {time} between CA% groups
+  [D]  Descriptive statistics report (per week, by CA%, by Sex; starting weights)
   [A]  All analyses (plots + both slope analyses)
   [Q]  Quit
 ================================================================================"""
@@ -1647,8 +2052,14 @@ def main():
 			print(f"All outputs saved to: {out_dir.resolve()}")
 			print("=" * 80)
 
-		if choice not in ('1', '2', '3', '4', '5', '6', 'P', 'A', 'Q'):
-			print(f"  [!] Unknown option '{choice}'. Enter a number 1-6, P, A, or Q.")
+		if choice == 'D':
+			df_desc = df.copy()
+			if "Week" not in df_desc.columns:
+				df_desc = add_week_column(df_desc)
+			generate_descriptive_stats_report(df_desc, output_dir=out_dir, cohort_label="RV")
+
+		if choice not in ('1', '2', '3', '4', '5', '6', 'D', 'P', 'A', 'Q'):
+			print(f"  [!] Unknown option '{choice}'. Enter a number 1-6, D, P, A, or Q.")
 
 	return df
 

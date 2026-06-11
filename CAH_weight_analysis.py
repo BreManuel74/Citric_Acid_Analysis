@@ -3882,14 +3882,21 @@ def compare_slopes_within_ca_groups(slopes_df: pd.DataFrame) -> Dict:
 	# Descriptive statistics by CA% group
 	for ca_val in sorted(slopes_df['CA (%)'].unique()):
 		group_slopes = slopes_df[slopes_df['CA (%)'] == ca_val]['Slope'].values
-		
+		_n = len(group_slopes)
+		_sem = group_slopes.std(ddof=1) / np.sqrt(_n)
+		_t_crit = stats.t.ppf(0.975, _n - 1)
+		_ci_lo = float(group_slopes.mean() - _t_crit * _sem)
+		_ci_hi = float(group_slopes.mean() + _t_crit * _sem)
+
 		group_stat = {
 			'CA (%)': ca_val,
-			'N': len(group_slopes),
+			'N': _n,
 			'Mean': group_slopes.mean(),
 			'Median': np.median(group_slopes),
 			'SD': group_slopes.std(),
-			'SEM': group_slopes.std() / np.sqrt(len(group_slopes)),
+			'SEM': group_slopes.std() / np.sqrt(_n),
+			'CI_95_lo': _ci_lo,
+			'CI_95_hi': _ci_hi,
 			'Min': group_slopes.min(),
 			'Max': group_slopes.max(),
 			'IQR': np.percentile(group_slopes, 75) - np.percentile(group_slopes, 25),
@@ -3990,15 +3997,32 @@ def compare_slopes_between_ca_groups(slopes_df: pd.DataFrame) -> Dict:
 	
 	# 2. Mann-Whitney U test (non-parametric)
 	u_stat, u_p = stats.mannwhitneyu(slopes_0, slopes_1, alternative='two-sided')
-	
+
+	# Hodges-Lehmann estimator and bootstrap 95% CI
+	_hl_est = float(np.median(np.subtract.outer(slopes_0, slopes_1).ravel()))
+	_rng_hl = np.random.default_rng(42)
+	_hl_boot = np.array([
+		np.median(np.subtract.outer(
+			_rng_hl.choice(slopes_0, size=n1, replace=True),
+			_rng_hl.choice(slopes_1, size=n2, replace=True)
+		).ravel())
+		for _ in range(2000)
+	])
+	_hl_ci_lo = float(np.quantile(_hl_boot, 0.025))
+	_hl_ci_hi = float(np.quantile(_hl_boot, 0.975))
+
 	print(f"\nMann-Whitney U Test (non-parametric):")
 	print(f"  U = {u_stat:.4f}, p = {u_p:.4f}")
 	print(f"  Result: {'Significant' if u_p < 0.05 else 'Not significant'} (a = 0.05)")
-	
+	print(f"  Hodges-Lehmann shift: {_hl_est:.4f}  95% CI (bootstrap): [{_hl_ci_lo:.4f}, {_hl_ci_hi:.4f}]")
+
 	results['mann_whitney'] = {
 		'statistic': u_stat,
 		'p_value': u_p,
-		'significant': u_p < 0.05
+		'significant': u_p < 0.05,
+		'hodges_lehmann': _hl_est,
+		'ci_95_lo': _hl_ci_lo,
+		'ci_95_hi': _hl_ci_hi,
 	}
 	
 	# 3. Effect size (Cohen's d)
@@ -4341,6 +4365,8 @@ def generate_slope_analysis_report_cah(
 		lines.append(f"  Median:             {group_stat['Median']:.4f}")
 		lines.append(f"  Standard Deviation: {group_stat['SD']:.4f}")
 		lines.append(f"  SEM:                {group_stat['SEM']:.4f}")
+		if 'CI_95_lo' in group_stat and 'CI_95_hi' in group_stat:
+			lines.append(f"  95% CI (mean slope): [{group_stat['CI_95_lo']:.4f}, {group_stat['CI_95_hi']:.4f}]  (t-dist)")
 		lines.append(f"  Min:                {group_stat['Min']:.4f}")
 		lines.append(f"  Max:                {group_stat['Max']:.4f}")
 		lines.append(f"  IQR:                {group_stat['IQR']:.4f}")
@@ -4388,6 +4414,9 @@ def generate_slope_analysis_report_cah(
 		mw = between_results['mann_whitney']
 		lines.append(f"  U-statistic: U = {mw['statistic']:.4f}")
 		lines.append(f"  P-value:     p = {mw['p_value']:.4f}")
+		if 'hodges_lehmann' in mw:
+			lines.append(f"  Hodges-Lehmann shift: {mw['hodges_lehmann']:.4f}")
+			lines.append(f"  95% CI (bootstrap, n=2000): [{mw['ci_95_lo']:.4f}, {mw['ci_95_hi']:.4f}]")
 		
 		if mw['p_value'] < 0.05:
 			lines.append(f"  Result: Significant difference (p < 0.05)")
