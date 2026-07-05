@@ -77,7 +77,7 @@ each cohort's lick master CSV.
 """
 
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple
+from typing import Any, Optional, Dict, List, Tuple
 import numpy as np
 import pandas as pd
 from datetime import datetime
@@ -710,7 +710,29 @@ def process_cohort_capacitive_files(
                 continue
             
             print(f"    Found {len(date_metadata)} animals for this date")
-            
+
+            # ── duplicate-sensor guard ────────────────────────────────────
+            # Each sensor number must map to exactly one animal on a given date.
+            # A repeated sensor number means two animals would silently receive
+            # the same lick count, corrupting the data.
+            _sensor_counts = date_metadata['selected_sensors'].value_counts()
+            _duplicates = _sensor_counts[_sensor_counts > 1]
+            if not _duplicates.empty:
+                _dup_details = []
+                for _s_num, _s_count in _duplicates.items():
+                    _animals = date_metadata.loc[
+                        date_metadata['selected_sensors'] == _s_num, 'animal_id'
+                    ].tolist()
+                    _dup_details.append(f"Sensor_{_s_num} → {_animals}")
+                raise ValueError(
+                    f"Duplicate sensor assignment(s) detected in master CSV "
+                    f"for date {date_str}:\n"
+                    + "\n".join(f"      {d}" for d in _dup_details)
+                    + "\n  Each sensor number must appear at most once per date. "
+                    "Check the lick master CSV for data-entry errors."
+                )
+            # ─────────────────────────────────────────────────────────────
+
             # For each animal, extract their assigned sensor's data
             for _, animal_row in date_metadata.iterrows():
                 animal_id = str(animal_row['animal_id']).strip()
@@ -6667,6 +6689,684 @@ def test_negbinom_lick_analysis(
 
 
 # =============================================================================
+# R-BASED REPEATED-MEASURES CORRELATION (rmcorr)
+# =============================================================================
+
+def test_rmcorr_lick_analysis(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    lick_measures: Optional[List[str]] = None,
+    weight_var: str = "Bottle_Weight_Change",
+    time_points: Optional[List[int]] = None,
+    save_path: Optional[Path] = None,
+) -> Dict:
+    """Repeated-measures correlation (rmcorr) between a weight variable and lick measures.
+
+    Uses the R ``rmcorr`` package (Bakdash & Marusich 2017), which fits an ANCOVA
+    with participant as a factor to yield a single within-subject slope and
+    per-subject parallel regression lines.  The result (r_rm) is the within-individual
+    Pearson correlation after removing between-subject variance.
+
+    Analyses are run:
+      - Per cohort (using only animals from that cohort)
+      - Pooled across all cohorts (animals from all cohorts combined)
+
+    Requires: rpy2  +  R with  install.packages('rmcorr')
+
+    Parameters
+    ----------
+    cohort_dfs   : dict from load_lick_cohorts()
+    lick_measures: lick DVs to correlate against weight_var.
+                   Default: ['Total_Licks', 'Total_Bouts']
+    weight_var   : column to use as the weight/consumption variable.
+                   Default: 'Bottle_Weight_Change'
+                   Alternative: 'Total_Weight_Change'
+    time_points  : restrict to these 0-based Week indices (None = all weeks)
+    save_path    : if provided, write the plain-text report to this path
+
+    Returns
+    -------
+    dict with keys:
+        'report'   : full formatted report string
+        'measures' : dict keyed by measure name, each with sub-keys
+                     'overall' and per-cohort label, each containing
+                     r_rm, p, ci_lo, ci_hi, df_rm, n_animals, n_obs
+        'error'    : present only on fatal error
+    """
+    W = 80
+
+    print("\n" + "=" * W)
+    print("R-BASED REPEATED-MEASURES CORRELATION  (rmcorr, Bakdash & Marusich 2017)")
+    print("=" * W)
+
+    if not HAS_RPY2:
+        print(
+            "[ERROR] rpy2 is not installed — cannot run R-based analysis.\n"
+            "  pip install rpy2\n"
+            "  Also requires R with:  install.packages('rmcorr')"
+        )
+        return {'error': 'rpy2 not installed'}
+
+    _ensure_r_path()
+
+    import rpy2.robjects as ro
+    from rpy2.robjects import pandas2ri
+    from rpy2.robjects.packages import importr
+    import tempfile, os
+
+    # ── check rmcorr package available ───────────────────────────────────
+    try:
+        importr('rmcorr')
+    except Exception as _e:
+        msg = (
+            f"[ERROR] R package 'rmcorr' not found: {_e}\n"
+            "  Install with:  install.packages('rmcorr')"
+        )
+        print(msg)
+        return {'error': str(_e)}
+
+    # ── rpy2 converter ───────────────────────────────────────────────────
+    try:
+        from rpy2.robjects.conversion import localconverter
+        def _to_r(df):
+            with localconverter(ro.default_converter + pandas2ri.converter):
+                return ro.conversion.py2rpy(df)
+    except Exception:
+        pandas2ri.activate()
+        def _to_r(df):
+            return pandas2ri.py2rpy(df)
+
+    # ── defaults ─────────────────────────────────────────────────────────
+    _DEFAULT_MEASURES = ["Total_Licks", "Total_Bouts"]
+    combined_tmp = combine_lick_cohorts(cohort_dfs)
+    if lick_measures is None:
+        lick_measures = [m for m in _DEFAULT_MEASURES if m in combined_tmp.columns]
+        if not lick_measures:
+            lick_measures = ["Total_Licks"]
+
+    # Validate weight_var
+    if weight_var not in combined_tmp.columns:
+        alt = "Total_Weight_Change" if weight_var == "Bottle_Weight_Change" else "Bottle_Weight_Change"
+        if alt in combined_tmp.columns:
+            print(f"  [WARNING] '{weight_var}' not found, falling back to '{alt}'")
+            weight_var = alt
+        else:
+            return {'error': f"Weight variable '{weight_var}' not found in data"}
+
+    # ── prepare combined dataset ─────────────────────────────────────────
+    print(f"\nStep 1: Preparing combined dataset...")
+    combined_df = combine_lick_cohorts(cohort_dfs)
+
+    if 'Week' not in combined_df.columns:
+        combined_df = add_week_column(combined_df)
+
+    if time_points is not None:
+        combined_df = combined_df[combined_df['Week'].isin(time_points)].copy()
+
+    # Use Cohort label for grouping (stable even when CA% varies per week for ramp)
+    if 'Cohort' in combined_df.columns:
+        combined_df['CA_group'] = combined_df['Cohort']
+    elif 'CA%' in combined_df.columns:
+        combined_df['CA_group'] = combined_df['CA%'].apply(
+            lambda x: f"{x:.0f}% CA" if pd.notna(x) else 'Unknown'
+        )
+    else:
+        combined_df['CA_group'] = 'Unknown'
+
+    cohort_labels = sorted(combined_df['CA_group'].dropna().unique())
+    print(f"  Cohorts   : {cohort_labels}")
+    print(f"  Weight var: {weight_var}")
+    print(f"  Measures  : {lick_measures}")
+    print(f"  Weeks     : {sorted(combined_df['Week'].dropna().unique())}")
+
+    # ── helper: run rmcorr on a single sub-DataFrame ─────────────────────
+    def _run_one_rmcorr(sub_df: pd.DataFrame, measure: str, label: str) -> dict:
+        """Run rmcorr(participant=ID, measure1=weight_var, measure2=measure) and
+        return a dict with r_rm, p, ci_lo, ci_hi, df_rm, n_animals, n_obs,
+        slope, per_subject_intercepts."""
+        sub = sub_df[['ID', weight_var, measure]].dropna()
+        n_animals = sub['ID'].nunique()
+        n_obs     = len(sub)
+
+        if n_obs < 5 or n_animals < 3:
+            print(f"    [SKIP] {label} / {measure}: insufficient data "
+                  f"(n_obs={n_obs}, n_animals={n_animals}; need ≥5 obs, ≥3 animals)")
+            return {'error': 'insufficient data', 'n_animals': n_animals, 'n_obs': n_obs}
+
+        # Print input pairs for validation
+        _sorted = sub.sort_values(['ID', weight_var]).copy()
+        _sorted['_week_rank'] = _sorted.groupby('ID').cumcount() + 1
+        print(f"\n    --- rmcorr input: {label} / {measure} ---")
+        print(f"    {'Animal':<12}  {'Week#':>5}  {weight_var:>22}  {measure:>14}")
+        print(f"    {'-'*60}")
+        for _, _r in _sorted.iterrows():
+            print(f"    {str(_r['ID']):<12}  {int(_r['_week_rank']):>5}  "
+                  f"{_r[weight_var]:>22.4f}  {_r[measure]:>14.1f}")
+        print(f"    Total rows: {n_obs}  |  Animals: {n_animals}")
+
+        # Write temp CSV, call R
+        uid  = str(abs(hash(label + measure)))[-8:]
+        tdir = tempfile.gettempdir().replace('\\', '/')
+        csv_in  = f"{tdir}/rmcorr_in_{uid}.csv"
+        csv_out = f"{tdir}/rmcorr_out_{uid}.csv"
+        sub.rename(columns={weight_var: 'x_var', measure: 'y_var'}).to_csv(csv_in, index=False)
+
+        try:
+            ro.globalenv['rmc_in']  = csv_in
+            ro.globalenv['rmc_out'] = csv_out
+            ro.r("""
+                suppressPackageStartupMessages(library(rmcorr))
+                .d <- read.csv(rmc_in)
+                .d$ID <- factor(.d$ID)
+                .rmc <- rmcorr(participant = ID,
+                               measure1    = x_var,
+                               measure2    = y_var,
+                               dataset     = .d)
+                .all_coefs <- stats::coef(.rmc$model)
+                .slope <- as.numeric(.all_coefs["x_var"])
+                .lvls  <- levels(.d$ID)
+                .intercepts <- sapply(.lvls, function(.lv) {
+                    sx <- .d$x_var[.d$ID == .lv]
+                    sy <- .d$y_var[.d$ID == .lv]
+                    if (length(sx) == 0 || is.na(.slope)) return(NA_real_)
+                    mean(sy) - .slope * mean(sx)
+                })
+                .out <- data.frame(
+                    participant = .lvls,
+                    intercept   = as.numeric(.intercepts),
+                    slope       = .slope,
+                    r_rm        = .rmc$r,
+                    p_val       = .rmc$p,
+                    ci_lo       = .rmc$CI[1],
+                    ci_hi       = .rmc$CI[2],
+                    df_rm       = .rmc$df
+                )
+                write.csv(.out, rmc_out, row.names = FALSE)
+            """)
+
+            res_df = pd.read_csv(csv_out)
+            for fp in [csv_in, csv_out]:
+                try: os.unlink(fp)
+                except Exception: pass
+
+            r_rm  = float(res_df['r_rm'].iloc[0])
+            p_val = float(res_df['p_val'].iloc[0])
+            ci_lo = float(res_df['ci_lo'].iloc[0])
+            ci_hi = float(res_df['ci_hi'].iloc[0])
+            df_rm = float(res_df['df_rm'].iloc[0])
+            slope = float(res_df['slope'].iloc[0])
+            intercepts = dict(
+                zip(res_df['participant'].astype(str), res_df['intercept'].astype(float))
+            )
+            print(f"    r_rm={r_rm:.4f}, p={p_val:.4f}, "
+                  f"95% CI [{ci_lo:.4f}, {ci_hi:.4f}], df={df_rm:.0f}")
+            return {
+                'r_rm': r_rm, 'p': p_val,
+                'ci_lo': ci_lo, 'ci_hi': ci_hi,
+                'df_rm': df_rm, 'slope': slope,
+                'n_animals': n_animals, 'n_obs': n_obs,
+                'per_subject_intercepts': intercepts,
+                'data': sub,
+            }
+
+        except Exception as _e:
+            for fp in [csv_in, csv_out]:
+                try: os.unlink(fp)
+                except Exception: pass
+            print(f"    [ERROR] rmcorr failed for {label}/{measure}: {_e}")
+            return {'error': str(_e), 'n_animals': n_animals, 'n_obs': n_obs}
+
+    # ── run analyses ─────────────────────────────────────────────────────
+    results: Dict = {'measures': {}}
+
+    for measure in lick_measures:
+        print(f"\n{'─' * W}")
+        print(f"  Measure: {measure}")
+        print(f"{'─' * W}")
+        results['measures'][measure] = {}
+
+        # Per-cohort
+        for cohort_lbl in cohort_labels:
+            sub = combined_df[combined_df['CA_group'] == cohort_lbl].copy()
+            print(f"\n  Cohort: {cohort_lbl}  (n_rows={len(sub)})")
+            res = _run_one_rmcorr(sub, measure, label=cohort_lbl)
+            results['measures'][measure][cohort_lbl] = res
+
+        # Pooled across all cohorts
+        print(f"\n  Pooled (all cohorts combined)  (n_rows={len(combined_df)})")
+        res_all = _run_one_rmcorr(combined_df, measure, label='Pooled')
+        results['measures'][measure]['Pooled'] = res_all
+
+    # ── build report ─────────────────────────────────────────────────────
+    from datetime import datetime as _dt
+    lines = [
+        "=" * W,
+        "REPEATED-MEASURES CORRELATION  (Bakdash & Marusich 2017)",
+        f"  rmcorr(participant=ID, measure1={weight_var}, measure2=<lick measure>)",
+        "  Package: R::rmcorr",
+        "=" * W,
+        f"Generated : {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        "  r_rm   = within-individual Pearson correlation (ANCOVA with participant",
+        "           as factor; parallel regression lines share one common slope).",
+        "  95% CI = confidence interval via Fisher's z-transformation.",
+        "",
+    ]
+
+    for measure in lick_measures:
+        lines += [
+            "─" * W,
+            f"  Measure: {measure}  ~  {weight_var}",
+            "─" * W,
+            f"  {'Context':<28}  {'r_rm':>7}  {'p':>8}  {'95% CI':>20}  "
+            f"{'df':>5}  {'n_ani':>6}  {'n_obs':>6}",
+            f"  {'-'*28}  {'-'*7}  {'-'*8}  {'-'*20}  {'-'*5}  {'-'*6}  {'-'*6}",
+        ]
+        for ctx in list(cohort_labels) + ['Pooled']:
+            r = results['measures'][measure].get(ctx, {})
+            if 'error' in r:
+                lines.append(f"  {ctx:<28}  {'N/A':>7}  {'N/A':>8}  "
+                              f"{'[N/A, N/A]':>20}  {'N/A':>5}  "
+                              f"{r.get('n_animals', '?'):>6}  {r.get('n_obs', '?'):>6}"
+                              f"  [{r['error']}]")
+            else:
+                _p_str = f"{r['p']:.4f}" if r['p'] >= 0.0001 else f"{r['p']:.2e}"
+                _ci    = f"[{r['ci_lo']:.4f}, {r['ci_hi']:.4f}]"
+                lines.append(
+                    f"  {ctx:<28}  {r['r_rm']:>7.4f}  {_p_str:>8}  "
+                    f"{_ci:>20}  {r['df_rm']:>5.0f}  "
+                    f"{r['n_animals']:>6}  {r['n_obs']:>6}"
+                )
+        lines.append("")
+
+    lines += [
+        "=" * W,
+        "END OF RMCORR REPORT",
+        "=" * W,
+    ]
+
+    report = "\n".join(lines)
+    print("\n" + report)
+    results['report'] = report
+
+    if save_path is not None:
+        save_path.write_text(report, encoding='utf-8')
+        print(f"\n[OK] Report saved -> {save_path}")
+
+    # ── pooled scatter plots (one per measure, points coloured by cohort) ─
+    if HAS_MATPLOTLIB:
+        _ms = plt.rcParams.get('lines.markersize', 4)
+
+        for measure in lick_measures:
+            pooled_res = results['measures'][measure].get('Pooled', {})
+            if 'error' in pooled_res or 'data' not in pooled_res:
+                print(f"  [SKIP plot] No pooled data for {measure}")
+                continue
+
+            # Build plot data: combined_df subset filtered to rows used in Pooled run
+            _plot_df = combined_df[['ID', 'CA_group', weight_var, measure]].dropna().copy()
+
+            # ── grand-mean regression line from pooled result ──────────────
+            _slope     = pooled_res.get('slope', np.nan)
+            _r_rm      = pooled_res['r_rm']
+            _p_val     = pooled_res['p']
+            _ci_lo     = pooled_res['ci_lo']
+            _ci_hi     = pooled_res['ci_hi']
+            _n_ani     = pooled_res['n_animals']
+            _n_obs     = pooled_res['n_obs']
+
+            if not np.isnan(_slope):
+                _grand_int = (
+                    _plot_df[measure].mean()
+                    - _slope * _plot_df[weight_var].mean()
+                )
+                _x_min = _plot_df[weight_var].min()
+                _x_max = _plot_df[weight_var].max()
+                _pad   = (_x_max - _x_min) * 0.05 if _x_max > _x_min else 1.0
+                _line_xs = np.linspace(_x_min - _pad, _x_max + _pad, 400)
+                _line_ys = _grand_int + _slope * _line_xs
+            else:
+                _line_xs = _line_ys = None
+
+            # ── annotation text ────────────────────────────────────────────
+            _p_str = f"p = {_p_val:.4f}" if _p_val >= 0.0001 else f"p = {_p_val:.4e}"
+            _ann = (
+                f"$r_{{rm}}$ = {_r_rm:.3f}\n"
+                f"{_p_str}\n"
+                f"95% CI [{_ci_lo:.3f}, {_ci_hi:.3f}]\n"
+                f"n = {_n_ani} animals  ({_n_obs} obs)"
+            )
+
+            # ── figure ─────────────────────────────────────────────────────
+            fig, ax = plt.subplots()
+
+            # Scatter: one group at a time so we get a legend
+            for cohort_lbl in cohort_labels:
+                _grp = _plot_df[_plot_df['CA_group'] == cohort_lbl]
+                if _grp.empty:
+                    continue
+                _color = _cohort_label_to_color(cohort_lbl)
+                ax.scatter(
+                    _grp[weight_var], _grp[measure],
+                    color=_color, marker='o',
+                    s=_ms ** 2, edgecolors='black', linewidths=0.4,
+                    alpha=0.85, zorder=4,
+                    label=cohort_lbl,
+                )
+
+            # Grand-mean line
+            if _line_xs is not None:
+                ax.plot(_line_xs, _line_ys,
+                        color='black', linewidth=1.2, zorder=5,
+                        label='rmcorr slope (pooled)')
+
+            # Annotation box
+            ax.text(
+                0.03, 0.97, _ann,
+                transform=ax.transAxes, va='top', ha='left', fontsize=7.5,
+                bbox=dict(boxstyle='round', facecolor='white',
+                          alpha=0.75, edgecolor='gray'),
+            )
+
+            _wvar_label = (
+                'Bottle Weight Change (g)' if weight_var == 'Bottle_Weight_Change'
+                else 'Total Weight Change (%)'
+            )
+            _measure_label = _OMNIBUS_MEASURE_LABELS.get(measure, measure)
+            ax.set_xlabel(_wvar_label)
+            ax.set_ylabel(_measure_label)
+            ax.set_title(
+                f'rmcorr: {_measure_label} ~ {_wvar_label}\n'
+                f'(pooled across cohorts, points coloured by cohort)'
+            )
+            ax.legend(loc='upper right', frameon=False, fontsize=7)
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.tick_params(direction='in', which='both', length=5)
+
+            # Fixed axis limits for Bottle_Weight_Change; auto for others
+            if weight_var == 'Bottle_Weight_Change':
+                ax.set_xlim(0, 3.5)
+                ax.set_ylim(0, 5000)
+
+            fig.tight_layout()
+
+            # Save
+            if save_path is not None:
+                _svg_path = (
+                    save_path.parent
+                    / f"{save_path.stem}_{measure.lower()}_pooled_scatter.svg"
+                )
+                fig.savefig(_svg_path, format='svg', dpi=200, bbox_inches='tight')
+                print(f"  [OK] Pooled scatter saved -> {_svg_path}")
+            else:
+                plt.show()
+
+            results.setdefault('figures', {})[measure] = fig
+            plt.close(fig)
+
+    return results
+
+
+# =============================================================================
+# SPEARMAN RANK CORRELATION
+# =============================================================================
+
+def test_spearman_lick_analysis(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    lick_measures: Optional[List[str]] = None,
+    weight_var: str = "Bottle_Weight_Change",
+    time_points: Optional[List[int]] = None,
+    save_path: Optional[Path] = None,
+) -> Dict:
+    """Spearman rank-order correlation: weight_var ~ lick measure.
+
+    Runs scipy.stats.spearmanr per cohort and pooled across all cohorts.
+    The visual regression line uses OLS (Spearman gives rho, not a slope).
+
+    NOTE: Unlike rmcorr, this treats all observations as independent —
+          it ignores the repeated-measures structure.  For a RM-aware
+          analysis use test_rmcorr_lick_analysis instead.
+
+    Parameters
+    ----------
+    cohort_dfs    : dict from load_lick_cohorts()
+    lick_measures : list of column names; defaults to Total_Licks, Total_Bouts
+    weight_var    : 'Bottle_Weight_Change' or 'Total_Weight_Change'
+    time_points   : optional list of Week numbers to restrict analysis
+    save_path     : if given, write text report here; SVG plots saved alongside
+
+    Returns
+    -------
+    dict with keys 'measures', 'report', optionally 'figures'
+    """
+    if lick_measures is None:
+        lick_measures = ["Total_Licks", "Total_Bouts"]
+
+    W = 80
+    print("\n" + "=" * W)
+    print("SPEARMAN RANK CORRELATION")
+    print(f"  spearmanr(x={weight_var}, y=<lick measure>)")
+    print("  Note: all observations treated as independent (no repeated-measures correction)")
+    print("        Use the rmcorr option for a within-subject RM-aware correlation.")
+    print("=" * W)
+
+    # ── combined dataframe ───────────────────────────────────────────────
+    combined_df = combine_lick_cohorts(cohort_dfs)
+
+    if 'CA_group' not in combined_df.columns:
+        if 'Cohort' in combined_df.columns:
+            combined_df = combined_df.rename(columns={'Cohort': 'CA_group'})
+        else:
+            combined_df['CA_group'] = 'Unknown'
+
+    cohort_labels = list(cohort_dfs.keys())
+
+    if time_points is not None and 'Week' in combined_df.columns:
+        combined_df = combined_df[combined_df['Week'].isin(time_points)].copy()
+        print(f"  Filtered to weeks: {sorted(time_points)}")
+
+    if weight_var not in combined_df.columns:
+        msg = f"Column '{weight_var}' not found. Available: {list(combined_df.columns)}"
+        print(f"[WARNING] {msg}")
+        return {'error': msg}
+
+    results: Dict[str, Any] = {'measures': {}}
+
+    def _run_one_spearman(sub: pd.DataFrame, measure: str) -> Dict:
+        sub_clean = sub[[weight_var, measure]].dropna()
+        n_obs = len(sub_clean)
+        n_ani = (
+            sub[[weight_var, measure, 'ID']].dropna(subset=[weight_var, measure])['ID'].nunique()
+            if 'ID' in sub.columns else n_obs
+        )
+        if n_obs < 3:
+            return {'error': f'Too few observations (n={n_obs})',
+                    'n_obs': n_obs, 'n_animals': n_ani}
+        x = sub_clean[weight_var].values
+        y = sub_clean[measure].values
+        try:
+            rho, p_val = stats.spearmanr(x, y)
+            slope, intercept, _, _, _ = stats.linregress(x, y)
+            return {
+                'rho':       float(rho),
+                'p':         float(p_val),
+                'slope':     float(slope),
+                'intercept': float(intercept),
+                'n_animals': int(n_ani),
+                'n_obs':     int(n_obs),
+                'data':      sub_clean.copy(),
+            }
+        except Exception as exc:
+            return {'error': str(exc), 'n_obs': n_obs, 'n_animals': n_ani}
+
+    for measure in lick_measures:
+        if measure not in combined_df.columns:
+            print(f"  [SKIP] '{measure}' not found in combined data")
+            continue
+
+        results['measures'][measure] = {}
+        print(f"\n  Measure: {measure}")
+
+        for cohort_lbl in cohort_labels:
+            sub = combined_df[combined_df['CA_group'] == cohort_lbl].copy()
+            print(f"\n    Cohort: {cohort_lbl}  (n_rows={len(sub)})")
+            results['measures'][measure][cohort_lbl] = _run_one_spearman(sub, measure)
+
+        print(f"\n    Pooled (all cohorts)  (n_rows={len(combined_df)})")
+        results['measures'][measure]['Pooled'] = _run_one_spearman(combined_df, measure)
+
+    # ── text report ──────────────────────────────────────────────────────
+    from datetime import datetime as _dt
+    lines = [
+        "=" * W,
+        "SPEARMAN RANK CORRELATION",
+        f"  spearmanr(x={weight_var}, y=<lick measure>)",
+        "  Method  : scipy.stats.spearmanr",
+        "  Line    : OLS regression (visual guide only; Spearman does not provide a slope)",
+        "  WARNING : All observations treated as independent.",
+        "            Does not account for repeated measures within animals.",
+        "            Use rmcorr option for a within-subject RM-aware analysis.",
+        "=" * W,
+        f"Generated : {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+    ]
+
+    for measure in lick_measures:
+        if measure not in results['measures']:
+            continue
+        lines += [
+            "\u2500" * W,
+            f"  Measure: {measure}  ~  {weight_var}",
+            "\u2500" * W,
+            f"  {'Context':<28}  {'rho':>7}  {'p':>10}  {'n_ani':>6}  {'n_obs':>6}",
+            f"  {'-'*28}  {'-'*7}  {'-'*10}  {'-'*6}  {'-'*6}",
+        ]
+        for ctx in list(cohort_labels) + ['Pooled']:
+            r = results['measures'][measure].get(ctx, {})
+            if 'error' in r:
+                lines.append(
+                    f"  {ctx:<28}  {'N/A':>7}  {'N/A':>10}  "
+                    f"{r.get('n_animals', '?'):>6}  {r.get('n_obs', '?'):>6}"
+                    f"  [{r['error']}]"
+                )
+            else:
+                _p_str = f"{r['p']:.4f}" if r['p'] >= 0.0001 else f"{r['p']:.2e}"
+                lines.append(
+                    f"  {ctx:<28}  {r['rho']:>7.4f}  {_p_str:>10}  "
+                    f"{r['n_animals']:>6}  {r['n_obs']:>6}"
+                )
+        lines.append("")
+
+    lines += ["=" * W, "END OF SPEARMAN REPORT", "=" * W]
+    report = "\n".join(lines)
+    print("\n" + report)
+    results['report'] = report
+
+    if save_path is not None:
+        save_path.write_text(report, encoding='utf-8')
+        print(f"\n[OK] Report saved -> {save_path}")
+
+    # ── pooled scatter plots ─────────────────────────────────────────────
+    if HAS_MATPLOTLIB:
+        _ms = plt.rcParams.get('lines.markersize', 4)
+
+        for measure in lick_measures:
+            pooled_res = results['measures'].get(measure, {}).get('Pooled', {})
+            if 'error' in pooled_res or 'data' not in pooled_res:
+                print(f"  [SKIP plot] No pooled data for {measure}")
+                continue
+
+            _plot_df = combined_df[
+                ['CA_group', weight_var, measure]
+                + (['ID'] if 'ID' in combined_df.columns else [])
+            ].dropna(subset=[weight_var, measure]).copy()
+
+            _rho       = pooled_res['rho']
+            _p_val     = pooled_res['p']
+            _slope     = pooled_res['slope']
+            _intercept = pooled_res['intercept']
+            _n_ani     = pooled_res['n_animals']
+            _n_obs     = pooled_res['n_obs']
+
+            _x_min = _plot_df[weight_var].min()
+            _x_max = _plot_df[weight_var].max()
+            _pad   = (_x_max - _x_min) * 0.05 if _x_max > _x_min else 1.0
+            _line_xs = np.linspace(_x_min - _pad, _x_max + _pad, 400)
+            _line_ys = _intercept + _slope * _line_xs
+
+            _p_str = f"p = {_p_val:.4f}" if _p_val >= 0.0001 else f"p = {_p_val:.4e}"
+            _ann = (
+                f"\u03c1 = {_rho:.3f}\n"
+                f"{_p_str}\n"
+                f"n = {_n_ani} animals  ({_n_obs} obs)\n"
+                f"[Spearman \u03c1; OLS line shown]"
+            )
+
+            fig, ax = plt.subplots()
+
+            for cohort_lbl in cohort_labels:
+                _grp = _plot_df[_plot_df['CA_group'] == cohort_lbl]
+                if _grp.empty:
+                    continue
+                _color = _cohort_label_to_color(cohort_lbl)
+                ax.scatter(
+                    _grp[weight_var], _grp[measure],
+                    color=_color, marker='o',
+                    s=_ms ** 2, edgecolors='black', linewidths=0.4,
+                    alpha=0.85, zorder=4,
+                    label=cohort_lbl,
+                )
+
+            ax.plot(_line_xs, _line_ys,
+                    color='black', linewidth=1.2, linestyle='--', zorder=5,
+                    label='OLS slope (pooled)')
+
+            ax.text(
+                0.03, 0.97, _ann,
+                transform=ax.transAxes, va='top', ha='left', fontsize=7.5,
+                bbox=dict(boxstyle='round', facecolor='white',
+                          alpha=0.75, edgecolor='gray'),
+            )
+
+            _wvar_label = (
+                'Bottle Weight Change (g)' if weight_var == 'Bottle_Weight_Change'
+                else 'Total Weight Change (%)'
+            )
+            _measure_label = _OMNIBUS_MEASURE_LABELS.get(measure, measure)
+            ax.set_xlabel(_wvar_label)
+            ax.set_ylabel(_measure_label)
+            ax.set_title(
+                f'Spearman \u03c1: {_measure_label} ~ {_wvar_label}\n'
+                f'(pooled across cohorts, points coloured by cohort)'
+            )
+            ax.legend(loc='upper right', frameon=False, fontsize=7)
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.tick_params(direction='in', which='both', length=5)
+
+            if weight_var == 'Bottle_Weight_Change':
+                ax.set_xlim(0, 3.5)
+                ax.set_ylim(0, 5000)
+
+            fig.tight_layout()
+
+            if save_path is not None:
+                _svg_path = (
+                    save_path.parent
+                    / f"{save_path.stem}_{measure.lower()}_pooled_scatter.svg"
+                )
+                fig.savefig(_svg_path, format='svg', dpi=200, bbox_inches='tight')
+                print(f"  [OK] Pooled scatter saved -> {_svg_path}")
+            else:
+                plt.show()
+
+            results.setdefault('figures', {})[measure] = fig
+            plt.close(fig)
+
+    return results
+
+
+# =============================================================================
 # DISTRIBUTION DIAGNOSTICS
 # =============================================================================
 
@@ -7464,9 +8164,14 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("                            (requires rpy2 + R with:  install.packages(c('glmmTMB','emmeans','car')))")
     print(" 18. Distribution check   -- Confirm DV distributions (Var/Mean, Poisson vs NB AIC, Shapiro-Wilk)")
     print("                            (requires rpy2 + R with:  MASS [standard] + optional fitdistrplus)")
+    print(" 19. rmcorr               -- Repeated-measures correlation: Bottle_Weight_Change ~ lick measure")
+    print("                            across weeks per cohort & pooled (Bakdash & Marusich 2017)")
+    print("                            (requires rpy2 + R with:  install.packages('rmcorr'))")
+    print(" 20. Spearman correlation  -- Spearman rho: Bottle_Weight_Change ~ lick measure (pooled)")
+    print("                            (treats all obs as independent; OLS line shown)")
     print()
 
-    user_input = input("Select option (1-18) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-20) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -8121,6 +8826,87 @@ def _run_lick_0v2_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 print(f"  [WARNING] Distribution diagnostics failed: {e}")
                 import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 19: rmcorr — repeated-measures correlation
+    # ------------------------------------------------------------------ #
+    if user_input == '19':
+        print("\n" + "=" * 80)
+        print("RUNNING: Repeated-measures correlation (rmcorr) \u2014 Bottle_Weight_Change ~ lick measures")
+        print("=" * 80)
+        if not HAS_RPY2:
+            print("[WARNING] rpy2 is not installed \u2014 cannot run R-based analysis.")
+            print("  pip install rpy2")
+            print("  Also requires R with:  install.packages('rmcorr')")
+        else:
+            combined_chk = combine_lick_cohorts(cohorts)
+            has_bottle = 'Bottle_Weight_Change' in combined_chk.columns
+            has_total  = 'Total_Weight_Change'  in combined_chk.columns
+            if has_bottle and has_total:
+                print("\nAvailable weight variables:")
+                print("  1. Bottle_Weight_Change  (volume consumed per session)")
+                print("  2. Total_Weight_Change   (body weight change %)")
+                _wvar_choice = input("Select weight variable (1 or 2, default=1): ").strip()
+                weight_var = 'Total_Weight_Change' if _wvar_choice == '2' else 'Bottle_Weight_Change'
+            elif has_bottle:
+                weight_var = 'Bottle_Weight_Change'
+            elif has_total:
+                weight_var = 'Total_Weight_Change'
+            else:
+                print("[WARNING] Neither Bottle_Weight_Change nor Total_Weight_Change found in data.")
+                weight_var = 'Bottle_Weight_Change'
+            print(f"  Using weight variable: {weight_var}")
+
+            try:
+                rmc_rpt_path = Path(f"0v2_rmcorr_{weight_var.lower()}_{timestamp}.txt")
+                rmc_results = test_rmcorr_lick_analysis(
+                    cohorts,
+                    weight_var=weight_var,
+                    save_path=rmc_rpt_path,
+                )
+                if 'error' not in rmc_results:
+                    print(f"\n[OK] Report saved -> {rmc_rpt_path}")
+            except Exception as e:
+                print(f"  [WARNING] rmcorr analysis failed: {e}")
+                import traceback; traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 20: Spearman rank correlation
+    # ------------------------------------------------------------------ #
+    if user_input == '20':
+        print("\n" + "=" * 80)
+        print("RUNNING: Spearman rank correlation \u2014 Bottle_Weight_Change ~ lick measures")
+        print("=" * 80)
+        combined_chk = combine_lick_cohorts(cohorts)
+        has_bottle = 'Bottle_Weight_Change' in combined_chk.columns
+        has_total  = 'Total_Weight_Change'  in combined_chk.columns
+        if has_bottle and has_total:
+            print("\nAvailable weight variables:")
+            print("  1. Bottle_Weight_Change  (volume consumed per session)")
+            print("  2. Total_Weight_Change   (body weight change %)")
+            _wvar_choice = input("Select weight variable (1 or 2, default=1): ").strip()
+            weight_var = 'Total_Weight_Change' if _wvar_choice == '2' else 'Bottle_Weight_Change'
+        elif has_bottle:
+            weight_var = 'Bottle_Weight_Change'
+        elif has_total:
+            weight_var = 'Total_Weight_Change'
+        else:
+            print("[WARNING] Neither Bottle_Weight_Change nor Total_Weight_Change found in data.")
+            weight_var = 'Bottle_Weight_Change'
+        print(f"  Using weight variable: {weight_var}")
+
+        try:
+            spr_rpt_path = Path(f"0v2_spearman_{weight_var.lower()}_{timestamp}.txt")
+            spr_results = test_spearman_lick_analysis(
+                cohorts,
+                weight_var=weight_var,
+                save_path=spr_rpt_path,
+            )
+            if 'error' not in spr_results:
+                print(f"\n[OK] Report saved -> {spr_rpt_path}")
+        except Exception as e:
+            print(f"  [WARNING] Spearman analysis failed: {e}")
+            import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("0% vs 2% lick analysis complete.")
     print("=" * 80)
@@ -8160,9 +8946,14 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("                            (requires rpy2 + R with:  install.packages(c('glmmTMB','emmeans','car')))")
     print("  9. Distribution check   -- Confirm DV distributions (Var/Mean, Poisson vs NB AIC, Shapiro-Wilk)")
     print("                            (requires rpy2 + R with:  MASS [standard] + optional fitdistrplus)")
+    print(" 10. rmcorr               -- Repeated-measures correlation: Bottle_Weight_Change ~ lick measure")
+    print("                            across weeks per cohort & pooled (Bakdash & Marusich 2017)")
+    print("                            (requires rpy2 + R with:  install.packages('rmcorr'))")
+    print(" 11. Spearman correlation  -- Spearman rho: Bottle_Weight_Change ~ lick measure (pooled)")
+    print("                            (treats all obs as independent; OLS line shown)")
     print()
 
-    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-11) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -8576,6 +9367,87 @@ def _run_lick_0vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 print(f"  [WARNING] Distribution diagnostics failed: {e}")
                 import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 10: rmcorr — repeated-measures correlation
+    # ------------------------------------------------------------------ #
+    if user_input == '10':
+        print("\n" + "=" * 80)
+        print("RUNNING: Repeated-measures correlation (rmcorr) \u2014 Bottle_Weight_Change ~ lick measures")
+        print("=" * 80)
+        if not HAS_RPY2:
+            print("[WARNING] rpy2 is not installed \u2014 cannot run R-based analysis.")
+            print("  pip install rpy2")
+            print("  Also requires R with:  install.packages('rmcorr')")
+        else:
+            combined_chk = combine_lick_cohorts(cohorts)
+            has_bottle = 'Bottle_Weight_Change' in combined_chk.columns
+            has_total  = 'Total_Weight_Change'  in combined_chk.columns
+            if has_bottle and has_total:
+                print("\nAvailable weight variables:")
+                print("  1. Bottle_Weight_Change  (volume consumed per session)")
+                print("  2. Total_Weight_Change   (body weight change %)")
+                _wvar_choice = input("Select weight variable (1 or 2, default=1): ").strip()
+                weight_var = 'Total_Weight_Change' if _wvar_choice == '2' else 'Bottle_Weight_Change'
+            elif has_bottle:
+                weight_var = 'Bottle_Weight_Change'
+            elif has_total:
+                weight_var = 'Total_Weight_Change'
+            else:
+                print("[WARNING] Neither Bottle_Weight_Change nor Total_Weight_Change found in data.")
+                weight_var = 'Bottle_Weight_Change'
+            print(f"  Using weight variable: {weight_var}")
+
+            try:
+                rmc_rpt_path = Path(f"0vramp_rmcorr_{weight_var.lower()}_{timestamp}.txt")
+                rmc_results = test_rmcorr_lick_analysis(
+                    cohorts,
+                    weight_var=weight_var,
+                    save_path=rmc_rpt_path,
+                )
+                if 'error' not in rmc_results:
+                    print(f"\n[OK] Report saved -> {rmc_rpt_path}")
+            except Exception as e:
+                print(f"  [WARNING] rmcorr analysis failed: {e}")
+                import traceback; traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 11: Spearman rank correlation
+    # ------------------------------------------------------------------ #
+    if user_input == '11':
+        print("\n" + "=" * 80)
+        print("RUNNING: Spearman rank correlation \u2014 Bottle_Weight_Change ~ lick measures")
+        print("=" * 80)
+        combined_chk = combine_lick_cohorts(cohorts)
+        has_bottle = 'Bottle_Weight_Change' in combined_chk.columns
+        has_total  = 'Total_Weight_Change'  in combined_chk.columns
+        if has_bottle and has_total:
+            print("\nAvailable weight variables:")
+            print("  1. Bottle_Weight_Change  (volume consumed per session)")
+            print("  2. Total_Weight_Change   (body weight change %)")
+            _wvar_choice = input("Select weight variable (1 or 2, default=1): ").strip()
+            weight_var = 'Total_Weight_Change' if _wvar_choice == '2' else 'Bottle_Weight_Change'
+        elif has_bottle:
+            weight_var = 'Bottle_Weight_Change'
+        elif has_total:
+            weight_var = 'Total_Weight_Change'
+        else:
+            print("[WARNING] Neither Bottle_Weight_Change nor Total_Weight_Change found in data.")
+            weight_var = 'Bottle_Weight_Change'
+        print(f"  Using weight variable: {weight_var}")
+
+        try:
+            spr_rpt_path = Path(f"0vramp_spearman_{weight_var.lower()}_{timestamp}.txt")
+            spr_results = test_spearman_lick_analysis(
+                cohorts,
+                weight_var=weight_var,
+                save_path=spr_rpt_path,
+            )
+            if 'error' not in spr_results:
+                print(f"\n[OK] Report saved -> {spr_rpt_path}")
+        except Exception as e:
+            print(f"  [WARNING] Spearman analysis failed: {e}")
+            import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("0% nonramp vs Ramp lick plots complete.")
     print("=" * 80)
@@ -8617,9 +9489,14 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("                            (requires rpy2 + R with:  install.packages(c('glmmTMB','emmeans','car')))")
     print(" 11. Distribution check   -- Confirm DV distributions (Var/Mean, Poisson vs NB AIC, Shapiro-Wilk)")
     print("                            (requires rpy2 + R with:  MASS [standard] + optional fitdistrplus)")
+    print(" 12. rmcorr               -- Repeated-measures correlation: Bottle_Weight_Change ~ lick measure")
+    print("                            across weeks per cohort & pooled (Bakdash & Marusich 2017)")
+    print("                            (requires rpy2 + R with:  install.packages('rmcorr'))")
+    print(" 13. Spearman correlation  -- Spearman rho: Bottle_Weight_Change ~ lick measure (pooled)")
+    print("                            (treats all obs as independent; OLS line shown)")
     print()
 
-    user_input = input("Select option (1-11) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-13) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -9267,6 +10144,87 @@ def _run_lick_2vramp_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                 print(f"  [WARNING] Distribution diagnostics failed: {e}")
                 import traceback; traceback.print_exc()
 
+    # ------------------------------------------------------------------ #
+    # Option 12: rmcorr — repeated-measures correlation
+    # ------------------------------------------------------------------ #
+    if user_input == '12':
+        print("\n" + "=" * 80)
+        print("RUNNING: Repeated-measures correlation (rmcorr) \u2014 Bottle_Weight_Change ~ lick measures")
+        print("=" * 80)
+        if not HAS_RPY2:
+            print("[WARNING] rpy2 is not installed \u2014 cannot run R-based analysis.")
+            print("  pip install rpy2")
+            print("  Also requires R with:  install.packages('rmcorr')")
+        else:
+            combined_chk = combine_lick_cohorts(cohorts)
+            has_bottle = 'Bottle_Weight_Change' in combined_chk.columns
+            has_total  = 'Total_Weight_Change'  in combined_chk.columns
+            if has_bottle and has_total:
+                print("\nAvailable weight variables:")
+                print("  1. Bottle_Weight_Change  (volume consumed per session)")
+                print("  2. Total_Weight_Change   (body weight change %)")
+                _wvar_choice = input("Select weight variable (1 or 2, default=1): ").strip()
+                weight_var = 'Total_Weight_Change' if _wvar_choice == '2' else 'Bottle_Weight_Change'
+            elif has_bottle:
+                weight_var = 'Bottle_Weight_Change'
+            elif has_total:
+                weight_var = 'Total_Weight_Change'
+            else:
+                print("[WARNING] Neither Bottle_Weight_Change nor Total_Weight_Change found in data.")
+                weight_var = 'Bottle_Weight_Change'
+            print(f"  Using weight variable: {weight_var}")
+
+            try:
+                rmc_rpt_path = Path(f"2vramp_rmcorr_{weight_var.lower()}_{timestamp}.txt")
+                rmc_results = test_rmcorr_lick_analysis(
+                    cohorts,
+                    weight_var=weight_var,
+                    save_path=rmc_rpt_path,
+                )
+                if 'error' not in rmc_results:
+                    print(f"\n[OK] Report saved -> {rmc_rpt_path}")
+            except Exception as e:
+                print(f"  [WARNING] rmcorr analysis failed: {e}")
+                import traceback; traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 13: Spearman rank correlation
+    # ------------------------------------------------------------------ #
+    if user_input == '13':
+        print("\n" + "=" * 80)
+        print("RUNNING: Spearman rank correlation \u2014 Bottle_Weight_Change ~ lick measures")
+        print("=" * 80)
+        combined_chk = combine_lick_cohorts(cohorts)
+        has_bottle = 'Bottle_Weight_Change' in combined_chk.columns
+        has_total  = 'Total_Weight_Change'  in combined_chk.columns
+        if has_bottle and has_total:
+            print("\nAvailable weight variables:")
+            print("  1. Bottle_Weight_Change  (volume consumed per session)")
+            print("  2. Total_Weight_Change   (body weight change %)")
+            _wvar_choice = input("Select weight variable (1 or 2, default=1): ").strip()
+            weight_var = 'Total_Weight_Change' if _wvar_choice == '2' else 'Bottle_Weight_Change'
+        elif has_bottle:
+            weight_var = 'Bottle_Weight_Change'
+        elif has_total:
+            weight_var = 'Total_Weight_Change'
+        else:
+            print("[WARNING] Neither Bottle_Weight_Change nor Total_Weight_Change found in data.")
+            weight_var = 'Bottle_Weight_Change'
+        print(f"  Using weight variable: {weight_var}")
+
+        try:
+            spr_rpt_path = Path(f"2vramp_spearman_{weight_var.lower()}_{timestamp}.txt")
+            spr_results = test_spearman_lick_analysis(
+                cohorts,
+                weight_var=weight_var,
+                save_path=spr_rpt_path,
+            )
+            if 'error' not in spr_results:
+                print(f"\n[OK] Report saved -> {spr_rpt_path}")
+        except Exception as e:
+            print(f"  [WARNING] Spearman analysis failed: {e}")
+            import traceback; traceback.print_exc()
+
     print("\n" + "=" * 80)
     print("2% nonramp vs Ramp lick plots complete.")
     print("=" * 80)
@@ -9306,9 +10264,12 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
     print("                            (requires rpy2 + R with:  install.packages(c('glmmTMB','emmeans','car')))")
     print("  9. Distribution check   -- Confirm DV distributions (Var/Mean, Poisson vs NB AIC, Shapiro-Wilk)")
     print("                            (requires rpy2 + R with:  MASS [standard] + optional fitdistrplus)")
+    print(" 10. rmcorr               -- Repeated-measures correlation: Bottle_Weight_Change ~ lick measure")
+    print("                            across weeks per cohort & pooled (Bakdash & Marusich 2017)")
+    print("                            (requires rpy2 + R with:  install.packages('rmcorr'))")
     print()
 
-    user_input = input("Select option (1-9) or 'n' to skip: ").strip()
+    user_input = input("Select option (1-10) or 'n' to skip: ").strip()
     if user_input.lower() == 'n':
         return
 
@@ -9726,6 +10687,50 @@ def _run_lick_all3_menu(cohorts: Dict[str, pd.DataFrame]) -> None:
                     print(f"\n[OK] Report saved -> {diag_rpt_path}")
             except Exception as e:
                 print(f"  [WARNING] Distribution diagnostics failed: {e}")
+                import traceback; traceback.print_exc()
+
+    # ------------------------------------------------------------------ #
+    # Option 10: rmcorr — repeated-measures correlation
+    # ------------------------------------------------------------------ #
+    if user_input == '10':
+        print("\n" + "=" * 80)
+        print("RUNNING: Repeated-measures correlation (rmcorr) — Bottle_Weight_Change ~ lick measures")
+        print("=" * 80)
+        if not HAS_RPY2:
+            print("[WARNING] rpy2 is not installed \u2014 cannot run R-based analysis.")
+            print("  pip install rpy2")
+            print("  Also requires R with:  install.packages('rmcorr')")
+        else:
+            # Ask which weight variable to use
+            combined_chk = combine_lick_cohorts(cohorts)
+            has_bottle = 'Bottle_Weight_Change' in combined_chk.columns
+            has_total  = 'Total_Weight_Change'  in combined_chk.columns
+            if has_bottle and has_total:
+                print("\nAvailable weight variables:")
+                print("  1. Bottle_Weight_Change  (volume consumed per session)")
+                print("  2. Total_Weight_Change   (body weight change %)")
+                _wvar_choice = input("Select weight variable (1 or 2, default=1): ").strip()
+                weight_var = 'Total_Weight_Change' if _wvar_choice == '2' else 'Bottle_Weight_Change'
+            elif has_bottle:
+                weight_var = 'Bottle_Weight_Change'
+            elif has_total:
+                weight_var = 'Total_Weight_Change'
+            else:
+                print("[WARNING] Neither Bottle_Weight_Change nor Total_Weight_Change found in data.")
+                weight_var = 'Bottle_Weight_Change'
+            print(f"  Using weight variable: {weight_var}")
+
+            try:
+                rmc_rpt_path = Path(f"all3_rmcorr_{weight_var.lower()}_{timestamp}.txt")
+                rmc_results = test_rmcorr_lick_analysis(
+                    cohorts,
+                    weight_var=weight_var,
+                    save_path=rmc_rpt_path,
+                )
+                if 'error' not in rmc_results:
+                    print(f"\n[OK] Report saved -> {rmc_rpt_path}")
+            except Exception as e:
+                print(f"  [WARNING] rmcorr analysis failed: {e}")
                 import traceback; traceback.print_exc()
 
     print("\n" + "=" * 80)
