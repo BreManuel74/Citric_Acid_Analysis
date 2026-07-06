@@ -117,16 +117,16 @@ PILOT_CSV_1       = DIR_PILOT / "pilot_cohort_1.csv"
 
 # ── Output directories (one per paper figure / extended-data panel) ───────────
 OUT_FIG2          = _ROOT / "Figure_2"
-OUT_FIG3          = _ROOT / "Figure_3_stats_reports"
-OUT_FIG4          = _ROOT / "Figure_4_stats_reports"
-OUT_FIG5          = _ROOT / "Figure_5_stats_reports"
-OUT_FIG6          = _ROOT / "Figure_6_stats_reports"
-OUT_FIG7          = _ROOT / "Figure_7_stats_reports"
-OUT_FIG8          = _ROOT / "Figure_8_stats_reports"
-OUT_FIG9          = _ROOT / "Figure_9_stats_reports"
-OUT_EXT1          = _ROOT / "Ex_data_1_stats_reports"
-OUT_EXT2_3        = _ROOT / "Ext_data_2-3_Stats_reports"
-OUT_EXT4_5        = _ROOT / "Ext_data_4-5_stats_reports"
+OUT_FIG3          = _ROOT / "Figure_3"
+OUT_FIG4          = _ROOT / "Figure_4"
+OUT_FIG5          = _ROOT / "Figure_5"
+OUT_FIG6          = _ROOT / "Figure_6"
+OUT_FIG7          = _ROOT / "Figure_7"
+OUT_FIG8          = _ROOT / "Figure_8"
+OUT_FIG9          = _ROOT / "Figure_9"
+OUT_EXT1          = _ROOT / "Ex_data_1"
+OUT_EXT2_3        = _ROOT / "Ext_data_2-3"
+OUT_EXT4_5        = _ROOT / "Ext_data_4-5"
 
 # ── Convenience: create all output directories if they don't exist ────────────
 for _out in [OUT_FIG2, OUT_FIG3, OUT_FIG4, OUT_FIG5,
@@ -1147,17 +1147,462 @@ def _fig2_generate_descriptive_stats(
     return report
 
 
+# =============================================================================
+# FIGURE 2f HELPERS — Slope Analysis
+# Ported from across_cohort.py: calculate_animal_slopes, compare_slopes_*,
+# plot_slopes_comparison, generate_slope_analysis_report.
+# =============================================================================
+
+def _fig2_prepare_combined_for_slopes(
+    cohort_specs: List[Tuple[str, pd.DataFrame, str]],
+) -> pd.DataFrame:
+    """Combine cohorts into one DataFrame ready for per-animal slope fitting.
+
+    Parameters
+    ----------
+    cohort_specs : list of (label, df, mode)
+        label : cohort name stored in the 'Cohort' column
+        df    : master CSV DataFrame from _load_master_csv()
+        mode  : 'ramp' or 'nonramp'  (controls Day numbering)
+    """
+    frames = []
+    for label, df, mode in cohort_specs:
+        cdf = _add_day_col(df.copy(), mode)
+        cdf["Cohort"] = label
+        cdf["_mode"]  = mode   # temporary; used below to drop ramp Day 1
+        frames.append(cdf)
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined[combined["Day"] >= 1].copy()   # exclude nonramp baseline (Day 0)
+    # Drop ramp Day 1 (Total Change = 0 by construction — a measurement artifact,
+    # consistent with across_cohort.py add_day_column_across_cohorts drop_ramp_baseline=True)
+    ramp_day1 = (combined["_mode"] == "ramp") & (combined["Day"] == 1)
+    combined  = combined[~ramp_day1].copy()
+    combined  = combined.drop(columns=["_mode"])
+    combined["Week"] = ((combined["Day"] - 1) // 7) + 1
+    return combined
+
+
+def _fig2_calculate_slopes(
+    combined_df: pd.DataFrame,
+    measure: str = "Total Change",
+    time_unit: str = "Week",
+) -> pd.DataFrame:
+    """Per-animal linear regression slope of *measure* vs *time_unit*.
+
+    When time_unit='Week', daily values are averaged within each animal-week
+    so every animal contributes exactly one data point per week to the fit.
+    Returns DataFrame with columns: ID, Sex, Cohort, Slope, Intercept, R2, N_points.
+    """
+    req = ["ID", "Cohort", time_unit, measure]
+    missing = [c for c in req if c not in combined_df.columns]
+    if missing:
+        raise ValueError(f"Missing columns for slope calculation: {missing}")
+
+    if time_unit == "Week":
+        grp_cols = [c for c in ("ID", "Week", "Sex", "Cohort") if c in combined_df.columns]
+        adf = combined_df.groupby(grp_cols, as_index=False)[measure].mean()
+    else:
+        adf = combined_df.copy()
+
+    rows = []
+    for aid, g in adf.groupby("ID", dropna=True):
+        x = g[time_unit].values.astype(float)
+        y = g[measure].values.astype(float)
+        mask = ~(np.isnan(x) | np.isnan(y))
+        x, y = x[mask], y[mask]
+        if len(x) < 2:
+            continue
+        slope, intercept, r_val, _, _ = stats.linregress(x, y)
+        rows.append({
+            "ID":        aid,
+            "Sex":       g["Sex"].iloc[0] if "Sex" in g.columns else "Unknown",
+            "Cohort":    g["Cohort"].iloc[0],
+            "Slope":     float(slope),
+            "Intercept": float(intercept),
+            "R2":        float(r_val ** 2),
+            "N_points":  int(len(x)),
+        })
+    return pd.DataFrame(rows)
+
+
+def _fig2_dunn_posthoc_internal(
+    group_data:   List[np.ndarray],
+    group_labels: List[str],
+) -> List[dict]:
+    """Dunn's post-hoc test using pooled KW ranks, Holm-Bonferroni corrected.
+
+    Consistent with the Kruskal-Wallis omnibus: uses the same pooled rank matrix.
+    Returns a list of dicts with keys: label_a, label_b, na, nb, z_stat,
+    p_raw, p_adj, r_rb.
+    """
+    from itertools import combinations as _comb
+
+    sizes    = [len(g) for g in group_data]
+    all_data = np.concatenate([np.asarray(g, dtype=float) for g in group_data])
+    N        = len(all_data)
+    all_rnks = stats.rankdata(all_data)
+
+    grp_rnks, idx = [], 0
+    for n_g in sizes:
+        grp_rnks.append(all_rnks[idx:idx + n_g])
+        idx += n_g
+
+    _, tc       = np.unique(all_rnks, return_counts=True)
+    tie_corr    = float(np.sum(tc ** 3 - tc))
+
+    results = []
+    for i, j in _comb(range(len(group_data)), 2):
+        ni, nj = sizes[i], sizes[j]
+        Ri, Rj = float(np.mean(grp_rnks[i])), float(np.mean(grp_rnks[j]))
+        se     = np.sqrt(((N * (N + 1)) / 12 - tie_corr / (12 * (N - 1))) * (1/ni + 1/nj))
+        z      = (Ri - Rj) / se if se > 0 else 0.0
+        p_raw  = 2.0 * float(stats.norm.sf(abs(z)))
+        results.append({
+            "label_a": group_labels[i], "label_b": group_labels[j],
+            "na": ni, "nb": nj, "z_stat": z, "p_raw": p_raw, "p_adj": float("nan"),
+            "r_rb": z / np.sqrt(ni + nj),
+        })
+
+    # Holm-Bonferroni step-down
+    valid = sorted([(k, r) for k, r in enumerate(results) if not np.isnan(r["p_raw"])],
+                   key=lambda x: x[1]["p_raw"])
+    running_max = 0.0
+    for rank, (orig_idx, r) in enumerate(valid):
+        adj         = min(r["p_raw"] * (len(valid) - rank), 1.0)
+        running_max = max(running_max, adj)
+        results[orig_idx]["p_adj"] = running_max
+    return results
+
+
+def _fig2_hl_bca_ci_internal(
+    a: np.ndarray,
+    b: np.ndarray,
+    n_boot: int = 2000,
+    seed:   int = 0,
+) -> Tuple[float, float, float]:
+    """Hodges-Lehmann shift (A−B) + 95% BCa bootstrap CI.
+
+    Returns (hl_estimate, ci_lo, ci_hi).
+    """
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+
+    def _hl(x: np.ndarray, y: np.ndarray) -> float:
+        return float(np.median(np.subtract.outer(x, y).ravel()))
+
+    hl_obs = _hl(a, b)
+    rng    = np.random.default_rng(seed)
+    boots  = np.array([
+        _hl(rng.choice(a, len(a), replace=True), rng.choice(b, len(b), replace=True))
+        for _ in range(n_boot)
+    ])
+
+    # BCa: bias correction
+    prop = np.clip(float(np.mean(boots < hl_obs)), 1e-6, 1 - 1e-6)
+    z0   = float(stats.norm.ppf(prop))
+
+    # BCa: acceleration via jackknife
+    jack = ([_hl(np.delete(a, i), b) for i in range(len(a))] +
+            [_hl(a, np.delete(b, j)) for j in range(len(b))])
+    jack = np.array(jack)
+    jm   = jack.mean()
+    num  = np.sum((jm - jack) ** 3)
+    den  = np.sum((jm - jack) ** 2)
+    acc  = float(num / (6.0 * den ** 1.5)) if den > 0 else 0.0
+
+    def _adj_pct(z_a: float) -> float:
+        denom = max(1 - acc * (z0 + z_a), 1e-9)
+        return float(stats.norm.cdf(z0 + (z0 + z_a) / denom))
+
+    alpha = 0.025
+    lo = float(np.percentile(boots, 100 * _adj_pct(stats.norm.ppf(alpha))))
+    hi = float(np.percentile(boots, 100 * _adj_pct(stats.norm.ppf(1 - alpha))))
+    return hl_obs, lo, hi
+
+
+def _fig2_compare_slopes_between(slopes_df: pd.DataFrame) -> dict:
+    """Kruskal-Wallis omnibus + Dunn’s post-hoc + Cohen’s d + HL shift.
+
+    Returns dict with keys: groups, group_data, kruskal_wallis, pairwise.
+    Each pairwise entry adds: cohens_d, hl_est, ci_lo, ci_hi.
+    """
+    groups     = sorted(slopes_df["Cohort"].unique())
+    group_data = [slopes_df[slopes_df["Cohort"] == g]["Slope"].values for g in groups]
+
+    kw_stat, kw_p = stats.kruskal(*group_data)
+    dunn          = _fig2_dunn_posthoc_internal(group_data, groups)
+
+    for r in dunn:
+        a  = slopes_df[slopes_df["Cohort"] == r["label_a"]]["Slope"].values
+        b  = slopes_df[slopes_df["Cohort"] == r["label_b"]]["Slope"].values
+        na, nb = len(a), len(b)
+        denom  = na + nb - 2
+        pool_sd = (np.sqrt(((na - 1) * np.var(a, ddof=1) + (nb - 1) * np.var(b, ddof=1)) / denom)
+                   if denom > 0 else float("nan"))
+        r["cohens_d"] = (float((np.mean(a) - np.mean(b)) / pool_sd)
+                         if not np.isnan(pool_sd) and pool_sd > 0 else float("nan"))
+        hl, lo, hi    = _fig2_hl_bca_ci_internal(a, b)
+        r["hl_est"], r["ci_lo"], r["ci_hi"] = hl, lo, hi
+
+    return {
+        "groups":         groups,
+        "group_data":     group_data,
+        "kruskal_wallis": {"statistic": float(kw_stat), "p_value": float(kw_p)},
+        "pairwise":       dunn,
+    }
+
+
+def _fig2_compare_slopes_within(slopes_df: pd.DataFrame) -> dict:
+    """One-sample t-test (slope ≠ 0) + descriptive stats per cohort."""
+    rows = []
+    for cohort in sorted(slopes_df["Cohort"].unique()):
+        s   = slopes_df[slopes_df["Cohort"] == cohort]["Slope"].values
+        n   = len(s)
+        mu  = float(np.mean(s))
+        sd  = float(np.std(s, ddof=1)) if n > 1 else float("nan")
+        t_s, t_p = (stats.ttest_1samp(s, 0.0) if n >= 2
+                    else (float("nan"), float("nan")))
+        rows.append({"Cohort": cohort, "n": n, "mean_slope": mu, "sd_slope": sd,
+                     "t_stat": float(t_s), "p_vs_zero": float(t_p)})
+    return {"cohort_stats": rows}
+
+
+def _fig2_plot_slopes(
+    slopes_df:      pd.DataFrame,
+    between_results: dict,
+    measure:   str = "Total Change",
+    time_unit: str = "Week",
+    save_path: Optional[Path] = None,
+) -> plt.Figure:
+    """
+    Bar chart (mean ± SEM) of per-animal slopes, one bar per cohort, with
+    overlaid individual data points and Dunn’s post-hoc significance brackets.
+
+    Colours are the canonical cohort palette from the module-level constants.
+    """
+    import re as _re
+    from itertools import combinations as _comb
+
+    groups    = between_results["groups"]
+    colors    = [cohort_color(g) for g in groups]
+    positions = list(range(len(groups)))
+    box_data  = [slopes_df[slopes_df["Cohort"] == g]["Slope"].values for g in groups]
+    tick_lbl  = [_re.sub(r"\s*\(.*?\)", "", g).strip() for g in groups]
+
+    fig, ax = plt.subplots()
+
+    bar_means = [float(np.mean(d)) if len(d) > 0 else 0.0 for d in box_data]
+    bar_sems  = [float(stats.sem(d))  if len(d) > 1 else 0.0 for d in box_data]
+    ax.bar(positions, bar_means, width=0.65, color=colors, alpha=0.7,
+           yerr=bar_sems,
+           error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor="black"),
+           zorder=2)
+
+    rng = np.random.default_rng(42)
+    for i, d in enumerate(box_data):
+        jitter = rng.uniform(-0.15, 0.15, size=len(d))
+        ax.scatter(np.full(len(d), i) + jitter, d,
+                   color=colors[i], alpha=0.85, s=12, zorder=3, edgecolors="none")
+
+    ax.axhline(0, color="black", linewidth=0.5, linestyle="--", alpha=0.6)
+    ax.set_xticks(positions)
+    ax.set_xticklabels(tick_lbl)
+    ax.set_xlim(-0.7, len(groups) - 1 + 0.7)
+    ax.set_xlabel("Cohort")
+    ax.set_ylabel(f"Slope  ({measure} per {time_unit})")
+    ax.grid(False)
+    apply_common_plot_style(ax, ticks_in=True, remove_top_right=True,
+                            remove_x_margins=False, remove_y_margins=False,
+                            draw_zero_dotted_line=False)
+
+    # Significance brackets from Dunn’s post-hoc
+    pairwise = between_results.get("pairwise", [])
+    dunn_map = {(r["label_a"], r["label_b"]): r["p_adj"] for r in pairwise}
+    dunn_map.update({(r["label_b"], r["label_a"]): r["p_adj"] for r in pairwise})
+    pairs    = list(_comb(range(len(groups)), 2))
+    n_pairs  = len(pairs)
+
+    all_slopes = slopes_df["Slope"].values
+    y_max_d  = float(np.nanmax(all_slopes)) if len(all_slopes) > 0 else 2.0
+    y_min_d  = float(np.nanmin(all_slopes)) if len(all_slopes) > 0 else -2.0
+    y_span   = max(y_max_d - y_min_d, 0.1)
+    step     = y_span * 0.14
+    tick_h   = step  * 0.15
+    y_top    = y_max_d + y_span * 0.1
+
+    for level, (i, j) in enumerate(pairs):
+        p_adj = dunn_map.get((groups[i], groups[j]), float("nan"))
+        if np.isnan(p_adj):
+            continue
+        sig = "***" if p_adj < 0.001 else "**" if p_adj < 0.01 else "*" if p_adj < 0.05 else "ns"
+        y_br = y_top + level * step
+        ax.plot([i, i, j, j], [y_br - tick_h, y_br, y_br, y_br - tick_h],
+                color="black", linewidth=0.8, zorder=4)
+        ax.text((i + j) / 2, y_br + tick_h * 0.3, sig,
+                ha="center", va="bottom", fontsize=7, zorder=5)
+
+    ax.set_ylim(y_min_d - y_span * 0.12,
+                y_top + n_pairs * step + y_span * 0.15)
+
+    fig.tight_layout()
+
+    if save_path is not None:
+        save_fig(fig, save_path)
+    elif SHOW_PLOTS:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig
+
+
+def _fig2_slope_analysis_report(
+    slopes_df:       pd.DataFrame,
+    within_results:  dict,
+    between_results: dict,
+    measure:   str = "Total Change",
+    time_unit: str = "Week",
+    save_path: Optional[Path] = None,
+) -> str:
+    """Comprehensive text report for the Figure 2f slope analysis.
+
+    Includes individual slopes, within-cohort t-tests, Kruskal-Wallis omnibus,
+    and Dunn’s post-hoc with effect sizes and BCa-bootstrap Hodges-Lehmann CIs.
+    """
+    from datetime import datetime as _dt
+
+    W    = 80
+    kw   = between_results.get("kruskal_wallis", {})
+    pair = between_results.get("pairwise", [])
+
+    def _fp(p: float) -> str:
+        if np.isnan(p): return "N/A"
+        return f"{p:.2e}" if p < 0.001 else f"{p:.4f}"
+
+    def _sig(p: float) -> str:
+        if np.isnan(p): return "  "
+        return "***" if p < 0.001 else " **" if p < 0.01 else "  *" if p < 0.05 else " ns"
+
+    lines = [
+        "=" * W,
+        "SLOPE ANALYSIS REPORT: RATE OF WEIGHT CHANGE ACROSS COHORTS",
+        "=" * W,
+        f"Generated  : {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Measure    : {measure}",
+        f"Time unit  : {time_unit}",
+        f"Cohorts    : {', '.join(between_results.get('groups', []))}",
+        f"Animals    : {len(slopes_df)}",
+        "",
+        "METHOD",
+        "-" * W,
+        f"  Linear regression fitted per animal:  {measure} ~ {time_unit}.",
+        f"  When time_unit='Week', measurements within each week are averaged",
+        f"  first (one data point per animal per week).",
+        "  Omnibus : Kruskal-Wallis H (non-parametric, 3 cohorts).",
+        "  Post-hoc: Dunn's test (pooled KW ranks), Holm-Bonferroni corrected.",
+        "  Effect size: rank-biserial r = z/√(nA+nB); Hodges-Lehmann shift (A−B);",
+        "              95% BCa bootstrap CI on HL estimate (n=2 000 resamples).",
+        "",
+    ]
+
+    # Individual slopes
+    lines += [
+        "=" * W, "INDIVIDUAL ANIMAL SLOPES", "=" * W,
+        f"  {'ID':<18}  {'Sex':>4}  {'Cohort':<32}  {'Slope':>10}  {'R²':>8}  {'N':>4}",
+        "  " + "-" * 80,
+    ]
+    for _, row in slopes_df.sort_values(["Cohort", "ID"]).iterrows():
+        lines.append(
+            f"  {str(row['ID']):<18}  {str(row.get('Sex','?')):>4}  "
+            f"{str(row['Cohort']):<32}  {row['Slope']:>10.4f}  "
+            f"{row['R2']:>8.3f}  {int(row['N_points']):>4}"
+        )
+    lines.append("")
+
+    # Within-cohort t-tests
+    lines += [
+        "=" * W, "WITHIN-COHORT STATISTICS  (one-sample t-test: slope ≠ 0)", "=" * W,
+        f"  {'Cohort':<32}  {'n':>4}  {'Mean Slope':>12}  {'SD':>8}  {'t':>8}  {'p vs 0':>10}",
+        "  " + "-" * 82,
+    ]
+    for r in within_results.get("cohort_stats", []):
+        lines.append(
+            f"  {r['Cohort']:<32}  {r['n']:>4}  {r['mean_slope']:>12.4f}  "
+            f"{r['sd_slope']:>8.4f}  {r['t_stat']:>8.3f}  "
+            f"{_fp(r['p_vs_zero']):>10}  {_sig(r['p_vs_zero'])}"
+        )
+    lines.append("")
+
+    # KW omnibus
+    lines += [
+        "=" * W, "BETWEEN-COHORT OMNIBUS  (Kruskal-Wallis)", "=" * W,
+        f"  H = {kw.get('statistic', float('nan')):.4f},  "
+        f"p = {_fp(kw.get('p_value', float('nan')))}  "
+        f"{_sig(kw.get('p_value', float('nan')))}",
+        "",
+    ]
+
+    # Dunn’s post-hoc
+    lines += [
+        "=" * W,
+        "POST-HOC: DUNN'S TEST  (Holm-Bonferroni corrected, pooled KW ranks)",
+        "=" * W,
+        f"  {'Comparison':<42}  {'nA':>4}  {'nB':>4}  {'z':>8}  "
+        f"{'p(raw)':>10}  {'p(adj)':>10}  {'r_rb':>7}  {'HL':>9}  {'95% CI'}",
+        "  " + "-" * 106,
+    ]
+    for r in pair:
+        p_adj  = r["p_adj"]
+        hl_str = (f"{r.get('hl_est', float('nan')):.4f}"
+                  if not np.isnan(r.get("hl_est", float("nan"))) else "N/A")
+        ci_str = (f"[{r['ci_lo']:.4f}, {r['ci_hi']:.4f}]"
+                  if not np.isnan(r.get("ci_lo", float("nan"))) else "N/A")
+        cmp    = f"{r['label_a']} vs {r['label_b']}"
+        lines.append(
+            f"  {cmp:<42}  {r['na']:>4}  {r['nb']:>4}  {r['z_stat']:>8.3f}  "
+            f"{_fp(r['p_raw']):>10}  {_fp(p_adj):>10}  {_sig(p_adj):3}  "
+            f"{r['r_rb']:>7.3f}  {hl_str:>9}  {ci_str}"
+        )
+    lines += [
+        "",
+        "  r_rb  : z/√(nA+nB); |r| ≥ 0.1 small, ≥ 0.3 medium, ≥ 0.5 large",
+        "  HL    : Hodges-Lehmann location shift (A − B)",
+        "  95% CI: BCa bootstrap on HL estimate (n=2 000 resamples, seed=0)",
+        "  *p<0.05  **p<0.01  ***p<0.001  ns=not significant",
+        "",
+        "=" * W, "END OF REPORT", "=" * W, "",
+    ]
+
+    report = "\n".join(lines)
+
+    if save_path is not None:
+        sp = Path(save_path).with_suffix(".txt")
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(report, encoding="utf-8")
+        print(f"  Saved \u2192 {sp.relative_to(_ROOT)}")
+
+    return report
+
+
 def figure_2() -> None:
-    """Total Weight Change over Days — five separate cohort panels.
+    """Total Weight Change over Days — six panels for Figure 2.
 
-    Each panel saved as SVG in OUT_FIG2:
-      fig2a_total_change_0pct       — 0 % CA non-ramp         (nonramp)
-      fig2b_total_change_2pct_full  — 2 % CA, 12 animals      (nonramp)
-      fig2c_total_change_slow_ramp  — 5-wk slow CA ramp        (ramp)
-      fig2d_total_change_fast_ramp  — 2-wk fast CA ramp        (ramp)
-      fig2e_total_change_4pct_pilot — 4 % CA pilot, Days 1–3  (special)
+    SVG files saved in OUT_FIG2:
+      fig2a_total_change_0pct          — 0 % CA non-ramp         (nonramp)
+      fig2b_total_change_2pct_full     — 2 % CA, 12 animals      (nonramp)
+      fig2c_total_change_slow_ramp     — 5-wk slow CA ramp        (ramp)
+      fig2d_total_change_fast_ramp     — 2-wk fast CA ramp        (ramp)
+      fig2e_total_change_4pct_pilot    — 4 % CA pilot, Days 1–3  (special)
+      fig2f_slope_comparison           — per-animal slope bar chart
 
-    No subplot structure — each cohort is its own plot.
+    Text reports in OUT_FIG2:
+      descriptive_stats_0pct.txt       — 0 % CA behavioral/weight descriptives
+      descriptive_stats_2pct_6animals.txt  — 2 % CA (6-animal cohort)
+      descriptive_stats_slow_ramp.txt  — 5-wk slow ramp
+      descriptive_stats_fast_ramp.txt  — 2-wk fast ramp
+      fig2f_slope_analysis_report.txt  — slope statistics (KW + Dunn’s)
+
+    No subplot structure — each panel is its own figure.
     """
     print("\n" + "=" * 60)
     print("FIGURE 2 — Total Weight Change Per Cohort")
@@ -1265,6 +1710,34 @@ def figure_2() -> None:
             csv_path=MASTER_2WK,
             save_path=OUT_FIG2 / "descriptive_stats_fast_ramp",
         )
+
+    # ── 2f: Slope comparison — 0%, 2% (6 animals), 5-wk slow ramp ────────────
+    _slope_specs: List[Tuple[str, pd.DataFrame, str]] = []
+    if MASTER_0PCT.exists():
+        _slope_specs.append(("0% CA",            _load_master_csv(MASTER_0PCT),  "nonramp"))
+    if MASTER_2PCT.exists():
+        _slope_specs.append(("2% CA (6 animals)", _load_master_csv(MASTER_2PCT),  "nonramp"))
+    if MASTER_RAMP.exists():
+        _slope_specs.append(("5-Week Ramp",       _load_master_csv(MASTER_RAMP),  "ramp"))
+
+    if len(_slope_specs) >= 2:
+        print(f"\n[2f] Slope comparison ({len(_slope_specs)} cohorts) ...")
+        _combined_s  = _fig2_prepare_combined_for_slopes(_slope_specs)
+        _slopes_df   = _fig2_calculate_slopes(_combined_s, measure="Total Change", time_unit="Week")
+        _within_s    = _fig2_compare_slopes_within(_slopes_df)
+        _between_s   = _fig2_compare_slopes_between(_slopes_df)
+        _fig2_plot_slopes(
+            _slopes_df, _between_s,
+            measure="Total Change", time_unit="Week",
+            save_path=OUT_FIG2 / "fig2f_slope_comparison",
+        )
+        _fig2_slope_analysis_report(
+            _slopes_df, _within_s, _between_s,
+            measure="Total Change", time_unit="Week",
+            save_path=OUT_FIG2 / "fig2f_slope_analysis_report",
+        )
+    else:
+        print("[2f] SKIPPED — fewer than 2 slope cohorts available")
 
     print("\n[OK] Figure 2 complete.")
 
