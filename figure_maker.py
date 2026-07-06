@@ -10,11 +10,15 @@ used for each figure are copied directly into the relevant figure section below.
 Readers can view the exact code that produced each figure without consulting
 any other file.
 
+NOTE: There will be minor formatting differences between the figures produced by this script and the final published figures.  
+The final figures were polished in Adobe Illustrator for font consistency, line thickness, 
+evenly spaced x and y axis limits, panel alignment, etc.
+
 Usage
 -----
   python figure_maker.py
 
-  Figures are saved as SVG (and optionally PNG) to the OUTPUT directories
+  Figures are saved as SVG to the OUTPUT directories
   configured below.  Set SHOW_PLOTS = True to also display them interactively.
 
 Author: Brenna Manuel
@@ -546,7 +550,6 @@ def _draw_block_labels(
             fontsize=fontsize, color=color, zorder=5,
         )
 
-
 # =============================================================================
 # FIGURE 2 — Total Weight Change Over Time, Per Cohort
 #
@@ -584,7 +587,7 @@ def _fig2_plot_cohort(
     mode         : 'ramp' or 'nonramp'  (controls Day numbering and block type)
     cohort_color : hex colour for all animal lines; sex encoded by marker only
     title        : figure title string
-    save_path    : stem path (no extension); SVG + PNG saved via save_fig()
+    save_path    : stem path (no extension); SVG saved via save_fig()
 
     Animal lines
     ------------
@@ -815,6 +818,335 @@ def _fig2_plot_pilot_4pct(
     return fig
 
 
+def _fig2_generate_descriptive_stats(
+    df: pd.DataFrame,
+    mode: str,
+    csv_path: Optional[Path] = None,
+    save_path: Optional[Path] = None,
+) -> str:
+    """Per-Week (nonramp) or per-CA% (ramp) descriptive statistics report.
+
+    Mirrors the format produced by
+    behavioral_analysis.generate_descriptive_stats_report().
+
+    Parameters
+    ----------
+    df       : master_data_*.csv loaded via _load_master_csv()
+    mode     : 'ramp' or 'nonramp'
+    csv_path : original CSV path (used to detect 2-wk ramp; may be None)
+    save_path: if provided, written as a .txt file at this stem path
+    """
+    from datetime import datetime as _dt
+    from scipy.stats import t as _td
+
+    # ── Configuration ──────────────────────────────────────────────────────────
+    if mode == "ramp":
+        wc, fl, mode_label = "CA (%)", "CA%", "RAMP"
+        def _grp_lbl(v: float) -> str: return f"{int(v)}%"
+    else:
+        wc, fl, mode_label = "Week", "Week", "NONRAMP"
+        def _grp_lbl(v: float) -> str: return f"Week {int(v)}"
+
+    # ── Data preparation ────────────────────────────────────────────────────────
+    cdf = df.copy()
+    cdf = _add_day_col(cdf, mode)
+
+    if mode == "nonramp":
+        cdf = _add_week_col(cdf)
+        cdf = cdf[cdf["Day"] >= 1].copy()   # exclude baseline Day 0
+    else:
+        # Exclude Day 1 baseline (TC = 0) for standard ramp; keep for 2-wk ramp
+        _is_2wk = csv_path is not None and any(
+            kw in str(csv_path).lower() for kw in ("2wk", "2_wk", "2_week", "2week")
+        )
+        if not _is_2wk and "Day" in cdf.columns:
+            cdf = cdf[cdf["Day"] > 1].copy()
+
+    if wc not in cdf.columns:
+        return f"ERROR: Column '{wc}' not found.  Cannot generate descriptive stats.\n"
+
+    levels = sorted(
+        float(w) for w in cdf[wc].dropna().unique()
+        if not (mode == "nonramp" and float(w) <= 0)
+    )
+    if not levels:
+        return "ERROR: No within-factor levels found after filtering.\n"
+
+    # ── Statistical helpers ─────────────────────────────────────────────────────
+    def _ci95(arr: np.ndarray):
+        n = len(arr)
+        if n < 2: return float("nan"), float("nan")
+        se  = float(np.std(arr, ddof=1)) / np.sqrt(n)
+        t_c = float(_td.ppf(0.975, df=n - 1))
+        mu  = float(np.mean(arr))
+        return mu - t_c * se, mu + t_c * se
+
+    def _bootstrap_ci95(arr: np.ndarray, n_boot: int = 5000, seed: int = 42):
+        n = len(arr)
+        if n < 2: return float("nan"), float("nan")
+        rng   = np.random.default_rng(seed)
+        boots = np.array([np.mean(rng.choice(arr, size=n, replace=True)) for _ in range(n_boot)])
+        return max(0.0, float(np.percentile(boots, 2.5))), min(100.0, float(np.percentile(boots, 97.5)))
+
+    def _wilson_ci(k: int, n: int, z: float = 1.96):
+        if n == 0: return float("nan"), float("nan")
+        p = k / n;  d = 1 + z**2 / n
+        c = (p + z**2 / (2*n)) / d
+        h = (z * np.sqrt(p*(1-p)/n + z**2/(4*n**2))) / d
+        return max(0.0, c - h), min(1.0, c + h)
+
+    # ── Build report ────────────────────────────────────────────────────────────
+    W   = 80
+    SEP = "\u2500" * 60    # ─ repeated 60
+    level_labels = [_grp_lbl(w) for w in levels]
+
+    lines: List[str] = [
+        "=" * W,
+        f"DESCRIPTIVE STATISTICS REPORT \u2014 {mode_label} MODE",
+        "=" * W,
+        f"Generated: {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Within-subjects factor: {fl}  |  Levels: {level_labels}",
+        "=" * W,
+        "",
+        "CONFIDENCE INTERVAL METHODS",
+        "-" * 60,
+        "  Continuous DVs (Total Change, Daily Change):",
+        "    95% CI = t-distribution  (x\u0305 \u00b1 t\u2080.\u2097\u2085 * SD/\u221an)",
+        "    Assumes approximate normality of animal-level means.",
+        "",
+        "  Behavioral mean% per animal (Nest Made?, Lethargy?, etc.):",
+        "    95% CI = bootstrap percentile  (n_boot=5000, seed=42)",
+        "    Non-parametric; no normality assumption; clamped to [0%, 100%].",
+        "    Used because t-CI produces invalid bounds near 0% or 100%.",
+        "    NOTE: SD and Var are reported on the proportion scale (0\u20131), not the",
+        "    percentage scale (0\u2013100).  This matches the output of behavioral_analysis.py.",
+        "    To convert: SD_pct = SD_prop \u00d7 100;  Var_pct = Var_prop \u00d7 10 000.",
+        "",
+        "  Behavioral prevalence (proportion of animals showing \u22651 event):",
+        "    95% CI = Wilson score  (binomial proportion CI)",
+        "    Appropriate for k/n counts; valid at extreme proportions.",
+        "",
+        "  Starting weight by sex:",
+        "    95% CI = t-distribution  (x\u0305 \u00b1 t\u2080.\u2097\u2085 * SD/\u221an)",
+        "-" * 60,
+        "",
+    ]
+
+    # ── Continuous DVs ──────────────────────────────────────────────────────────
+    cont_cols = [c for c in ("Total Change", "Daily Change") if c in cdf.columns]
+
+    for col in cont_cols:
+        lines += [
+            SEP,
+            f"  {col.upper()}",
+            SEP,
+            "  Note: 95% CI = t-distribution (x\u0305 \u00b1 t\u2080.\u2097\u2085 * SD/\u221an)",
+            f"  {'Level':>8}  {'n':>4}  {'Mean':>8}  {'Median':>8}  "
+            f"{'SD':>8}  {'Var':>10}  {'95% CI (t)':>22}",
+            "  " + "-" * 76,
+        ]
+        for wk in levels:
+            sub = cdf[cdf[wc] == wk]
+            am  = sub.groupby("ID")[col].mean().dropna().values \
+                  if "ID" in sub.columns else sub[col].dropna().values
+            n = len(am)
+            if n == 0: continue
+            mu, med = float(np.mean(am)), float(np.median(am))
+            sd  = float(np.std(am, ddof=1)) if n > 1 else float("nan")
+            var = sd**2 if not np.isnan(sd) else float("nan")
+            lo, hi = _ci95(am)
+            ci = f"[{lo:.3f}, {hi:.3f}]" if not np.isnan(lo) else "N/A"
+            lines.append(
+                f"  {_grp_lbl(wk):>8}  {n:>4}  {mu:>8.3f}  {med:>8.3f}  "
+                f"{sd:>8.3f}  {var:>10.3f}  {ci:>22}"
+            )
+        lines.append("  " + "-" * 76)
+        am_a = cdf.groupby("ID")[col].mean().dropna().values \
+               if "ID" in cdf.columns else cdf[col].dropna().values
+        n_a = len(am_a)
+        if n_a > 0:
+            mu_a, med_a = float(np.mean(am_a)), float(np.median(am_a))
+            sd_a  = float(np.std(am_a, ddof=1)) if n_a > 1 else float("nan")
+            var_a = sd_a**2 if not np.isnan(sd_a) else float("nan")
+            lo_a, hi_a = _ci95(am_a)
+            ci_a = f"[{lo_a:.3f}, {hi_a:.3f}]" if not np.isnan(lo_a) else "N/A"
+            lines.append(
+                f"  {'All':>8}  {n_a:>4}  {mu_a:>8.3f}  {med_a:>8.3f}  "
+                f"{sd_a:>8.3f}  {var_a:>10.3f}  {ci_a:>22}"
+            )
+        lines.append("")
+
+    # ── Behavioral DVs ──────────────────────────────────────────────────────────
+    beh_cands = ("Nest Made?", "Lethargy?", "Anxious Behaviors?", "CA Spot Digging?")
+    beh_cols  = [c for c in beh_cands if c in cdf.columns]
+
+    for col in beh_cols:
+        lines += [
+            SEP,
+            f"  {col.upper()}",
+            SEP,
+            "  Note: 95% CI = bootstrap percentile (n_boot=5000, seed=42), clamped to [0%, 100%]",
+            "  Note: SD and Var are on the proportion scale (0\u20131). Mean% and Median% are displayed",
+            "        as percentages (\u00d7100) for readability; SD and Var are NOT scaled.",
+            f"  {'Level':>8}  {'n':>4}  {'n\u22651':>7}  {'Mean%':>7}  "
+            f"{'95% CI (boot)':>22}  {'Median%':>8}  {'SD':>8}  {'Var':>10}",
+            "  " + "-" * 85,
+        ]
+        for wk in levels:
+            sub = cdf[cdf[wc] == wk]
+            if "ID" not in sub.columns: continue
+            pcts: List[float] = []; n_once = 0
+            for _, adf in sub.groupby("ID"):
+                v = adf[col].dropna()
+                if len(v) == 0: continue
+                b = v.astype(bool)
+                pcts.append(float(b.mean()))   # proportion scale (0–1); SD/Var match original
+                if b.any(): n_once += 1
+            n = len(pcts)
+            if n == 0: continue
+            arr = np.array(pcts)
+            mu, med = float(np.mean(arr)), float(np.median(arr))
+            sd  = float(np.std(arr, ddof=1)) if n > 1 else float("nan")
+            var = sd**2 if not np.isnan(sd) else float("nan")
+            lo, hi = _bootstrap_ci95(arr * 100)   # bootstrap on % scale for [0,100] clamping
+            ci = f"[{lo:.1f}%, {hi:.1f}%]" if not np.isnan(lo) else "N/A"
+            lines.append(
+                f"  {_grp_lbl(wk):>8}  {n:>4}  {n_once:>7}  {f'{mu*100:.1f}%':>7}  "
+                f"{ci:>22}  {f'{med*100:.1f}%':>8}  {sd:>8.3f}  {var:>10.3f}"
+            )
+        lines.append("  " + "-" * 85)
+        if "ID" in cdf.columns:
+            pcts_a: List[float] = []; n_once_a = 0
+            for _, adf in cdf.groupby("ID"):
+                v = adf[col].dropna()
+                if len(v) == 0: continue
+                b = v.astype(bool)
+                pcts_a.append(float(b.mean()))   # proportion scale (0–1)
+                if b.any(): n_once_a += 1
+            n_a = len(pcts_a)
+            if n_a > 0:
+                arr_a = np.array(pcts_a)
+                mu_a, med_a = float(np.mean(arr_a)), float(np.median(arr_a))
+                sd_a  = float(np.std(arr_a, ddof=1)) if n_a > 1 else float("nan")
+                var_a = sd_a**2 if not np.isnan(sd_a) else float("nan")
+                lo_a, hi_a = _bootstrap_ci95(arr_a * 100)   # bootstrap on % scale
+                ci_a = f"[{lo_a:.1f}%, {hi_a:.1f}%]" if not np.isnan(lo_a) else "N/A"
+                lines.append(
+                    f"  {'All':>8}  {n_a:>4}  {n_once_a:>7}  {f'{mu_a*100:.1f}%':>7}  "
+                    f"{ci_a:>22}  {f'{med_a*100:.1f}%':>8}  {sd_a:>8.3f}  {var_a:>10.3f}"
+                )
+        lines.append("")
+
+    # ── Behavioral Prevalence ───────────────────────────────────────────────────
+    if beh_cols:
+        lines += [
+            "",
+            "=" * W,
+            f"BEHAVIORAL PREVALENCE  (proportion of animals showing \u22651 event, per {fl})",
+            "=" * W,
+            "Note: prevalence = n_true / n  (binomial proportion; Wilson 95% CI)",
+            "",
+        ]
+        for col in beh_cols:
+            lines += [
+                SEP,
+                f"  {col.upper()}",
+                SEP,
+                f"  {'Level':>8}  {'n':>4}  {'n\u22651':>7}  {'Prev%':>7}  {'95% CI (Wilson)':>24}",
+                "  " + "-" * 58,
+            ]
+            for wk in levels:
+                sub = cdf[cdf[wc] == wk]
+                if "ID" not in sub.columns: continue
+                n = sub["ID"].nunique(); n_once = 0
+                for _, adf in sub.groupby("ID"):
+                    v = adf[col].dropna()
+                    if len(v) > 0 and v.astype(bool).any(): n_once += 1
+                if n == 0: continue
+                prev = 100.0 * n_once / n
+                lo, hi = _wilson_ci(n_once, n)
+                ci = f"[{lo*100:.1f}%, {hi*100:.1f}%]" if not np.isnan(lo) else "N/A"
+                lines.append(
+                    f"  {_grp_lbl(wk):>8}  {n:>4}  {n_once:>7}  {prev:>6.1f}%  {ci:>24}"
+                )
+            lines.append("  " + "-" * 58)
+            if "ID" in cdf.columns:
+                n_a = cdf["ID"].nunique(); n_once_a = 0
+                for _, adf in cdf.groupby("ID"):
+                    v = adf[col].dropna()
+                    if len(v) > 0 and v.astype(bool).any(): n_once_a += 1
+                if n_a > 0:
+                    prev_a = 100.0 * n_once_a / n_a
+                    lo_a, hi_a = _wilson_ci(n_once_a, n_a)
+                    ci_a = f"[{lo_a*100:.1f}%, {hi_a*100:.1f}%]" if not np.isnan(lo_a) else "N/A"
+                    lines.append(
+                        f"  {'All':>8}  {n_a:>4}  {n_once_a:>7}  {prev_a:>6.1f}%  {ci_a:>24}"
+                    )
+            lines.append("")
+
+    # ── Starting Weight by Sex ──────────────────────────────────────────────────
+    if all(c in df.columns for c in ("Weight", "ID", "Sex", "Date")):
+        sw_rows: List[dict] = []
+        for sid, grp in df.sort_values(["ID", "Date"]).groupby("ID"):
+            first = grp.dropna(subset=["Weight"]).head(1)
+            if not first.empty:
+                svals = grp["Sex"].dropna().astype(str).str.strip().str.upper()
+                sex = "M" if any(v.startswith("M") for v in svals) else \
+                      "F" if any(v.startswith("F") for v in svals) else "Unknown"
+                sw_rows.append({"ID": str(sid), "Sex": sex,
+                                 "Weight": float(first["Weight"].iloc[0])})
+        if sw_rows:
+            sw = pd.DataFrame(sw_rows)
+            lines += [
+                "",
+                "=" * W,
+                "STARTING WEIGHT BY SEX",
+                "=" * W,
+                "Note: starting weight = first recorded weight per animal (earliest date)",
+                "Note: 95% CI = t-distribution (x\u0305 \u00b1 t\u2080.\u2097\u2085 * SD/\u221an)",
+                "",
+                "Individual starting weights:",
+                "-" * 44,
+                f"  {'ID':<18}  {'Sex':>4}  {'Starting Weight (g)':>20}",
+                "-" * 44,
+            ]
+            for _, row in sw.sort_values(["Sex", "ID"]).iterrows():
+                lines.append(f"  {row['ID']:<18}  {row['Sex']:>4}  {row['Weight']:>20.2f}")
+            lines += [
+                "",
+                "Summary statistics by sex:",
+                "-" * 54,
+                f"   {'Sex':>4}  {'n':>4}  {'Mean (g)':>10}  {'SD':>8}  {'':>22}  95% CI",
+                "-" * 54,
+            ]
+            for sex in sorted(sw["Sex"].unique()):
+                arr = sw[sw["Sex"] == sex]["Weight"].values.astype(float)
+                n_s = len(arr)
+                mu_s = float(np.mean(arr))
+                sd_s = float(np.std(arr, ddof=1)) if n_s > 1 else float("nan")
+                lo_s, hi_s = _ci95(arr)
+                ci_s = f"[{lo_s:.2f}, {hi_s:.2f}]" if not np.isnan(lo_s) else "N/A"
+                lines.append(f"     {sex:>4}  {n_s:>4}  {mu_s:>10.2f}  {sd_s:>8.3f}  {ci_s:>22}")
+            lines.append("-" * 54)
+            arr_a = sw["Weight"].values.astype(float)
+            n_aa = len(arr_a); mu_aa = float(np.mean(arr_a))
+            sd_aa = float(np.std(arr_a, ddof=1)) if n_aa > 1 else float("nan")
+            lo_aa, hi_aa = _ci95(arr_a)
+            ci_aa = f"[{lo_aa:.2f}, {hi_aa:.2f}]" if not np.isnan(lo_aa) else "N/A"
+            lines.append(f"     {'All':>4}  {n_aa:>4}  {mu_aa:>10.2f}  {sd_aa:>8.3f}  {ci_aa:>22}")
+
+    lines += ["", "=" * W, "END OF REPORT", "=" * W, ""]
+    report = "\n".join(lines)
+
+    if save_path is not None:
+        sp = Path(save_path).with_suffix(".txt")
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(report, encoding="utf-8")
+        print(f"  Saved \u2192 {sp.relative_to(_ROOT)}")
+
+    return report
+
+
 def figure_2() -> None:
     """Total Weight Change over Days — five separate cohort panels.
 
@@ -892,6 +1224,47 @@ def figure_2() -> None:
         )
     else:
         print(f"[2d] SKIPPED — not found: {MASTER_2WK}")
+
+    # ── Descriptive statistics reports (saved to OUT_FIG2) ──────────────────
+    print("\n" + "-" * 60)
+    print("FIGURE 2 — Descriptive Statistics Reports")
+    print("-" * 60)
+
+    if MASTER_0PCT.exists():
+        print("\n[stats-0%] 0% CA non-ramp ...")
+        _fig2_generate_descriptive_stats(
+            _load_master_csv(MASTER_0PCT),
+            mode="nonramp",
+            csv_path=MASTER_0PCT,
+            save_path=OUT_FIG2 / "descriptive_stats_0pct",
+        )
+
+    if MASTER_2PCT.exists():          # 6-animal cohort, NOT the 12-animal full cohort
+        print("\n[stats-2%] 2% CA (6-animal cohort) ...")
+        _fig2_generate_descriptive_stats(
+            _load_master_csv(MASTER_2PCT),
+            mode="nonramp",
+            csv_path=MASTER_2PCT,
+            save_path=OUT_FIG2 / "descriptive_stats_2pct_6animals",
+        )
+
+    if MASTER_RAMP.exists():
+        print("\n[stats-ramp] 5-wk slow ramp ...")
+        _fig2_generate_descriptive_stats(
+            _load_master_csv(MASTER_RAMP),
+            mode="ramp",
+            csv_path=MASTER_RAMP,
+            save_path=OUT_FIG2 / "descriptive_stats_slow_ramp",
+        )
+
+    if MASTER_2WK.exists():
+        print("\n[stats-2wk] 2-wk fast ramp ...")
+        _fig2_generate_descriptive_stats(
+            _load_master_csv(MASTER_2WK),
+            mode="ramp",
+            csv_path=MASTER_2WK,
+            save_path=OUT_FIG2 / "descriptive_stats_fast_ramp",
+        )
 
     print("\n[OK] Figure 2 complete.")
 
