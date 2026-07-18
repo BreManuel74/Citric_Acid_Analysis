@@ -136,7 +136,7 @@ for _out in [OUT_FIG2, OUT_FIG3, OUT_FIG4, OUT_FIG5,
 
 
 # =============================================================================
-# CANONICAL COHORT COLOURS
+# CANONICAL COHORT COLORS
 # These match across_cohort.py / across_cohort_lick.py exactly so that every
 # figure in the paper uses the same palette.
 # =============================================================================
@@ -147,14 +147,14 @@ COLOR_RAMP  = "#2da048"   # slow ramp — green
 COLOR_4PCT  = "#424143"   # 4 % CA (pilot) — dark grey
 COLOR_OTHER = "#7f3f98"   # fast ramp - purple
 
-# Sex marker styles (cohort colour is applied separately)
+# Sex marker styles (cohort color is applied separately)
 #   Males:   filled square  "s"
 #   Females: filled circle  "o"
 SEX_MARKER: Dict[str, str] = {"M": "s", "F": "o", "Unknown": "^"}
 
 
 def cohort_color(label: str) -> str:
-    """Return the canonical hex colour for a cohort label string."""
+    """Return the canonical hex color for a cohort label string."""
     lo = str(label).lower()
     if "0%" in lo:
         return COLOR_0PCT
@@ -162,6 +162,9 @@ def cohort_color(label: str) -> str:
         return COLOR_4PCT
     if "2%" in lo:
         return COLOR_2PCT
+    # Fast / 2-week ramp must be checked before the generic "ramp" branch
+    if "2-week" in lo or "2wk" in lo or "fast" in lo:
+        return COLOR_OTHER
     if "ramp" in lo:
         return COLOR_RAMP
     return COLOR_OTHER
@@ -559,6 +562,7 @@ def _draw_block_labels(
 #   2c — 5-week slow CA ramp, 1-day-normalised      (ramp mode)
 #   2d — 2-week fast CA ramp                        (ramp mode)
 #   2e — 4 % CA pilot, first 3 days                 (special: pilot CSV)
+#   2f - slope comparison
 #
 # Source column : "Total Change" (% body-weight change from baseline)
 # x-axis        : Day (integer, per-animal from first recording date)
@@ -585,7 +589,7 @@ def _fig2_plot_cohort(
     ----------
     df           : master_data_*.csv loaded via _load_master_csv()
     mode         : 'ramp' or 'nonramp'  (controls Day numbering and block type)
-    cohort_color : hex colour for all animal lines; sex encoded by marker only
+    cohort_color : hex color for all animal lines; sex encoded by marker only
     title        : figure title string
     save_path    : stem path (no extension); SVG saved via save_fig()
 
@@ -697,7 +701,7 @@ def _fig2_plot_pilot_4pct(
       Days 1, 2, 3 = first three treatment recording days.
 
     No block annotations are drawn (3-day span is too short).
-    Colour: COLOR_4PCT (#424143, dark grey).
+    Color: COLOR_4PCT (#424143, dark grey).
     """
     raw = pd.read_csv(csv_path)
     raw.columns = raw.columns.str.strip()
@@ -1378,7 +1382,7 @@ def _fig2_plot_slopes(
     Bar chart (mean ± SEM) of per-animal slopes, one bar per cohort, with
     overlaid individual data points and Dunn’s post-hoc significance brackets.
 
-    Colours are the canonical cohort palette from the module-level constants.
+    Colors are the canonical cohort palette from the module-level constants.
     """
     import re as _re
     from itertools import combinations as _comb
@@ -1743,12 +1747,1014 @@ def figure_2() -> None:
 
 
 # =============================================================================
-# FIGURE 3 — (add description when porting)
+# FIGURE 3 — Daily Weight Change Across Days
+#
+# Panel:
+#   3a — Mean ± SEM Daily Change per Day, three cohorts on one plot:
+#         0 % CA (nonramp), 2 % CA 6-animals (nonramp), 5-Wk Slow Ramp (ramp)
+#   3b — Mean ± SEM Aberrant Behavioral Metrics per Week, three cohorts on one plot:
+#        0 % CA (nonramp), 2 % CA 6-animals (nonramp), 5-Wk Slow Ramp (ramp)
+#   3c - 4-Cohort Transition-Day Daily Change
+#        2 % CA 12-animals (nonramp), 5-Wk Slow Ramp (ramp), 2-Wk Fast Ramp (ramp), 4 % CA Pilot (nonramp)
+#   3d - 2-Cohort Transition-Day Daily Change
+#        5-Wk Slow Ramp (ramp), 2-Wk Fast Ramp (ramp)
+#
+# Source column : "Daily Change" (% body-weight change from the previous day)
+# x-axis        : Day (integer, per-animal)
+#
+# Day alignment (critical — ramp and nonramp use different Day-0 conventions):
+#   nonramp  Day 0 = baseline recording (excluded; filter Day >= 1).
+#            Day 1 = first CA-exposure day.
+#   ramp     Day 1 = first recorded date (no separate baseline row).
+#            Day 1 IS included for the Daily Change plot — unlike the slope
+#            analysis, Daily Change on Day 1 is a real measurement, not a
+#            constructed zero.
+#   Both cohort types therefore start at Day 1 on the same x-axis.
 # =============================================================================
 
+def _fig3a_plot_daily_change_cohorts(
+    cohort_specs: List[Tuple[str, pd.DataFrame, str]],
+    save_path: Optional[Path] = None,
+) -> plt.Figure:
+    """
+    Figure 3a: Mean ± SEM Daily Change across Days, one line per cohort.
+
+    Parameters
+    ----------
+    cohort_specs : list of (label, df, mode)
+        label : cohort display name — drives legend text and color lookup
+        df    : master CSV DataFrame loaded by _load_master_csv()
+        mode  : 'ramp' or 'nonramp'  (controls Day numbering via _add_day_col)
+    save_path : stem path (no extension); SVG saved via save_fig()
+
+    Day alignment
+    -------------
+    nonramp cohorts
+        _add_day_col assigns Day 0 to the first recorded date (baseline).
+        Rows with Day 0 are excluded here (filter ``Day >= 1``).
+        Day 1 = first CA-exposure measurement.
+
+    ramp cohort
+        _add_day_col assigns Day 1 to the first recorded date.
+        Day 1 is retained — for Daily Change, the Day-1 value is a real
+        observation, not the TC=0 construction artefact that is excluded
+        from slope analysis.
+
+    Both cohort types plot from Day 1 on the same x-axis.
+    """
+    # ── Per-cohort, per-animal Daily Change series indexed by Day ────────────
+    cohort_series: Dict[str, Dict[str, pd.Series]] = {}
+    for label, df, mode in cohort_specs:
+        cdf = _add_day_col(df.copy(), mode)
+        cdf = cdf[cdf["Day"] >= 1].copy()               # drop nonramp baseline Day 0
+        cdf = cdf.dropna(subset=["Daily Change", "Day"])
+        series_by_id: Dict[str, pd.Series] = {}
+        for gid, g in cdf.groupby("ID", dropna=True):
+            ser = g.set_index("Day")["Daily Change"].sort_index()
+            ser = ser.groupby(level=0).last()            # resolve duplicate days
+            ser.name = str(gid)
+            series_by_id[str(gid)] = ser
+        cohort_series[label] = series_by_id
+
+    fig, ax = plt.subplots()
+
+    y_lo_all: List[float] = []
+    y_hi_all: List[float] = []
+    x_all:    List[float] = []
+
+    for label, series_dict in cohort_series.items():
+        if not series_dict:
+            continue
+        color = cohort_color(label)
+
+        # Aligned per-day mean and SEM across animals
+        all_days = sorted(set().union(*[set(s.index) for s in series_dict.values()]))
+        days_plot, means_plot, sems_plot = [], [], []
+        for day in all_days:
+            vals = [
+                float(s.at[day])
+                for s in series_dict.values()
+                if day in s.index and not np.isnan(float(s.at[day]))
+            ]
+            if not vals:
+                continue
+            mu  = float(np.mean(vals))
+            sem = float(stats.sem(vals)) if len(vals) > 1 else 0.0
+            days_plot.append(day)
+            means_plot.append(mu)
+            sems_plot.append(sem)
+
+        if not days_plot:
+            continue
+
+        d  = np.asarray(days_plot,  dtype=float)
+        mu = np.asarray(means_plot, dtype=float)
+        se = np.asarray(sems_plot,  dtype=float)
+
+        ax.plot(d, mu, color=color, linewidth=plt.rcParams["lines.linewidth"],
+                label=label, zorder=3)
+        ax.fill_between(d, mu - se, mu + se, color=color, alpha=0.2, zorder=2)
+
+        x_all.extend(d.tolist())
+        y_lo_all.extend((mu - se).tolist())
+        y_hi_all.extend((mu + se).tolist())
+
+    ax.set_xlabel("Day")
+    ax.set_ylabel("Daily Weight Change (%)")
+    ax.set_title("Daily Weight Change — 0% CA, 2% CA, 5-Wk Ramp")
+    ax.grid(False)
+
+    apply_common_plot_style(
+        ax,
+        start_x_at_zero=False,
+        remove_top_right=True,
+        remove_x_margins=True,
+        remove_y_margins=True,
+        ticks_in=True,
+        draw_zero_dotted_line=True,
+    )
+
+    # x-axis: integer ticks, left edge clamped to Day 1
+    if x_all:
+        x_lo   = int(min(x_all)); x_hi = int(max(x_all))
+        x_step = _auto_integer_step(x_lo, x_hi, target_ticks=10, allow_sub5=True)
+        _apply_integer_axis(ax, axis="x", data_min=x_lo, data_max=x_hi,
+                            step=x_step, clamp_min=1,
+                            left_pad_steps=0, right_pad_steps=0)
+
+    # y-axis: based on mean ± SEM bounds so shaded bands are fully visible
+    if y_lo_all and y_hi_all:
+        y_lo   = float(min(y_lo_all)); y_hi = float(max(y_hi_all))
+        y_step = _auto_integer_step(y_lo, y_hi, target_ticks=7)
+        _apply_integer_axis(ax, axis="y", data_min=y_lo, data_max=y_hi,
+                            step=y_step, left_pad_steps=0, right_pad_steps=1)
+
+    ax.legend(loc="best", frameon=False)
+    fig.tight_layout()
+
+    if save_path is not None:
+        save_fig(fig, save_path)
+    elif SHOW_PLOTS:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig
+
+
+def _fig3b_plot_behavioral_metrics(
+    cohort_specs: List[Tuple[str, pd.DataFrame, str]],
+    save_path: Optional[Path] = None,
+) -> plt.Figure:
+    """
+    Figure 3b: Three-panel line plot of aberrant behavioral observations per week.
+
+    Panels (left to right)
+    ----------------------
+    No Nest  — Nest Made? == False
+    Anxious  — Anxious Behaviors? == True
+    Lethargy — Lethargy? == True
+
+    For each cohort × week the per-animal % of aberrant observations is computed
+    (proportion of that animal's recordings that week showing the behaviour), then
+    mean ± SEM across animals is plotted as a line with a shaded error band.
+
+    Day / Week alignment
+    --------------------
+    nonramp  Day 0 = baseline (excluded; filter Day ≥ 1).  Day 1 = first
+             CA-exposure recording.  Week 1 = Days 1–7.
+    ramp     Day 1 = first recorded date (included).  Week 1 = Days 1–7.
+    Both cohort types share the same Week x-axis.
+
+    Parameters
+    ----------
+    cohort_specs : list of (label, df, mode)
+        label : cohort display name (legend text and color lookup)
+        df    : master CSV DataFrame loaded by _load_master_csv()
+        mode  : 'ramp' or 'nonramp'
+    save_path : stem path (no extension); SVG saved via save_fig()
+    """
+    BEHAVIORS: List[Tuple[str, bool, str]] = [
+        ("Nest Made?",         False, "No Nest"),
+        ("Anxious Behaviors?", True,  "Anxious"),
+        ("Lethargy?",          True,  "Lethargy"),
+    ]
+
+    def _is_aberrant(series: pd.Series, aberrant_val: bool) -> pd.Series:
+        """Coerce column to bool, return boolean series testing for aberrant_val."""
+        coerced = series.map({
+            True: True, False: False,
+            "yes": True, "no": False,
+            "Yes": True, "No": False,
+            "YES": True, "NO": False,
+        })
+        return coerced == aberrant_val
+
+    # ── Build per-cohort weekly stats ────────────────────────────────────────
+    # cohort_week_data[label][col][week] = (mean_pct, sem_pct)
+    cohort_week_data: Dict[str, Dict[str, Dict[int, Tuple[float, float]]]] = {}
+    all_weeks: set = set()
+
+    for label, df, mode in cohort_specs:
+        cdf = _add_day_col(df.copy(), mode)
+        cdf = cdf[cdf["Day"] >= 1].copy()   # drop nonramp baseline (Day 0)
+        cdf = _add_week_col(cdf)
+
+        beh_results: Dict[str, Dict[int, Tuple[float, float]]] = {}
+        for col, aberrant_val, _ in BEHAVIORS:
+            week_stats: Dict[int, Tuple[float, float]] = {}
+            if col not in cdf.columns:
+                beh_results[col] = {}
+                continue
+            for week_val, wdf in cdf.groupby("Week"):
+                if "ID" not in wdf.columns:
+                    continue
+                animal_pcts: List[float] = []
+                for _, adf in wdf.groupby("ID"):
+                    v = adf[col].dropna()
+                    if len(v) == 0:
+                        continue
+                    ab = _is_aberrant(v, aberrant_val)
+                    animal_pcts.append(100.0 * float(ab.mean()))
+                if not animal_pcts:
+                    continue
+                mu  = float(np.mean(animal_pcts))
+                sem = float(stats.sem(animal_pcts)) if len(animal_pcts) > 1 else 0.0
+                week_stats[int(week_val)] = (mu, sem)
+                all_weeks.add(int(week_val))
+            beh_results[col] = week_stats
+        cohort_week_data[label] = beh_results
+
+    if not all_weeks:
+        fig, axes = plt.subplots(1, 3, figsize=(9.0, 2.5))
+        for ax in axes:
+            ax.text(0.5, 0.5, "No behavioral data", ha="center", va="center",
+                    transform=ax.transAxes)
+        fig.tight_layout()
+        if save_path is not None:
+            save_fig(fig, save_path)
+        return fig
+
+    sorted_weeks = sorted(all_weeks)
+
+    # Shared y-axis ceiling: max(mean + SEM) × 1.1, floored at 5%
+    y_tops: List[float] = [
+        mu + sem
+        for beh_results in cohort_week_data.values()
+        for col, _, _ in BEHAVIORS
+        for mu, sem in beh_results.get(col, {}).values()
+    ]
+    y_max = max(max(y_tops) * 1.1, 5.0) if y_tops else 100.0
+
+    # ── Plot: 1 × 3 panels with shared y-axis ────────────────────────────────
+    fig, axes = plt.subplots(1, 3, sharey=True, figsize=(9.0, 2.5))
+
+    for ax_idx, (col, _, panel_title) in enumerate(BEHAVIORS):
+        ax = axes[ax_idx]
+
+        for label, beh_results in cohort_week_data.items():
+            week_stats = beh_results.get(col, {})
+            if not week_stats:
+                continue
+            color = cohort_color(label)
+            weeks_avail = sorted(week_stats.keys())
+            means = [week_stats[w][0] for w in weeks_avail]
+            sems  = [week_stats[w][1] for w in weeks_avail]
+
+            ax.errorbar(weeks_avail, means, yerr=sems,
+                        color=color, linewidth=plt.rcParams["lines.linewidth"],
+                        marker="o", markersize=plt.rcParams["lines.markersize"],
+                        capsize=3, capthick=0.8, elinewidth=0.8,
+                        label=label, zorder=3)
+
+        ax.set_title(panel_title)
+        ax.set_xlabel("Week")
+        ax.set_xticks(sorted_weeks)
+        ax.set_xticklabels([str(w) for w in sorted_weeks])
+        ax.set_xlim(sorted_weeks[0] - 0.5, sorted_weeks[-1] + 0.5)
+        ax.grid(False)
+        apply_common_plot_style(
+            ax,
+            start_x_at_zero=False,
+            remove_top_right=True,
+            remove_x_margins=False,
+            remove_y_margins=True,
+            ticks_in=True,
+            draw_zero_dotted_line=False,
+        )
+
+    axes[0].set_ylabel("% of Observations")
+    axes[0].set_ylim(0, y_max)
+    # Legend on last panel only
+    axes[-1].legend(loc="best", frameon=False)
+
+    fig.tight_layout()
+
+    if save_path is not None:
+        save_fig(fig, save_path)
+    elif SHOW_PLOTS:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig
+
+
+# =============================================================================
+# FIGURE 3c HELPERS — 4-Cohort Transition-Day Daily Change
+#
+# Each cohort contributes one Daily Change value per animal, taken at the day
+# that represents the 0 % → 1 % CA transition (or first CA exposure):
+#
+#   Cohort               Target day            Convention
+#   ──────────────────────────────────────────────────────────────────
+#   2% CA (6 animals)    Day 1  (0-based nonramp)  First CA-exposure recording
+#   4% CA (Pilot)        Day 1  (0-based)           First CA-exposure recording
+#   5-Week Ramp          Day 8  (1-based ramp)       0% → 1% CA transition
+#   2-Week Ramp          Day 4  (1-based ramp)       0% → 1% CA transition
+# =============================================================================
+
+def _fig3c_extract_transition_values() -> Dict[str, np.ndarray]:
+    """
+    Extract per-animal Daily Change at the cohort-specific transition day.
+
+    Returns
+    -------
+    Dict[str, np.ndarray]
+        Ordered dict: cohort label → 1-D array of per-animal Daily Change values.
+        Cohorts whose data file is missing are silently omitted.
+    """
+    result: Dict[str, np.ndarray] = {}
+
+    # ── 2% CA (12 animals, full cohort) — nonramp Day 1 (0-based) ───────────────
+    if MASTER_2PCT_FULL.exists():
+        cdf = _add_day_col(_load_master_csv(MASTER_2PCT_FULL), "nonramp")
+        vals = (cdf[cdf["Day"] == 1]
+                .dropna(subset=["Daily Change"])
+                .groupby("ID")["Daily Change"].mean()
+                .dropna().values.astype(float))
+        if len(vals) > 0:
+            result["2% CA"] = vals
+
+    # ── 4% CA (Pilot) — Day 1 (0-based, same nonramp convention) ─────────────────
+    if PILOT_CSV_1.exists():
+        raw = pd.read_csv(PILOT_CSV_1)
+        raw.columns = raw.columns.str.strip()
+        col_lower = {c.strip().lower(): c for c in raw.columns}
+        rename = {}
+        for key, canonical in [("id", "ID"), ("condition", "Condition"),
+                               ("date", "Date"), ("daily change", "Daily Change")]:
+            if key in col_lower and col_lower[key] != canonical:
+                rename[col_lower[key]] = canonical
+        if rename:
+            raw = raw.rename(columns=rename)
+        raw["Date"]         = pd.to_datetime(raw["Date"], errors="coerce")
+        raw["Daily Change"] = pd.to_numeric(raw["Daily Change"], errors="coerce")
+        df_p = raw[raw["Condition"].astype(str).str.strip().str.lower()
+                   .str.startswith("4%")].copy()
+        df_p = df_p.dropna(subset=["ID", "Date"]).reset_index(drop=True)
+        df_p = df_p.sort_values(["ID", "Date"]).reset_index(drop=True)
+        first_dates = df_p.groupby("ID")["Date"].transform("min")
+        df_p["Day"] = (df_p["Date"] - first_dates).dt.days.astype(int)
+        vals = (df_p[df_p["Day"] == 1]
+                .dropna(subset=["Daily Change"])
+                .groupby("ID")["Daily Change"].mean()
+                .dropna().values.astype(float))
+        if len(vals) > 0:
+            result["4% CA (Pilot)"] = vals
+
+    # ── 5-Week Ramp — ramp Day 8 (0% → 1% CA transition) ───────────────────────
+    if MASTER_RAMP.exists():
+        cdf = _add_day_col(_load_master_csv(MASTER_RAMP), "ramp")
+        vals = (cdf[cdf["Day"] == 8]
+                .dropna(subset=["Daily Change"])
+                .groupby("ID")["Daily Change"].mean()
+                .dropna().values.astype(float))
+        if len(vals) > 0:
+            result["5-Week Ramp"] = vals
+
+    # ── 2-Week Ramp — ramp Day 4 (0% → 1% CA transition) ───────────────────────
+    if MASTER_2WK.exists():
+        cdf = _add_day_col(_load_master_csv(MASTER_2WK), "ramp")
+        vals = (cdf[cdf["Day"] == 4]
+                .dropna(subset=["Daily Change"])
+                .groupby("ID")["Daily Change"].mean()
+                .dropna().values.astype(float))
+        if len(vals) > 0:
+            result["2-Week Ramp"] = vals
+
+    return result
+
+
+def _fig3c_kw_transition_analysis(
+    cohort_values: Dict[str, np.ndarray],
+) -> dict:
+    """
+    Kruskal-Wallis omnibus + Dunn’s post-hoc + HL shift on transition-day values.
+
+    Returns dict with keys:
+        groups, group_data, kruskal_wallis, eta2_H, pairwise.
+    Each pairwise entry: label_a, label_b, na, nb, z_stat, p_raw, p_adj,
+                         r_rb, hl_est, ci_lo, ci_hi.
+    """
+    labels     = [lbl for lbl, v in cohort_values.items() if len(v) > 0]
+    group_data = [cohort_values[lbl] for lbl in labels]
+
+    if len(labels) < 2:
+        return {"groups": labels, "group_data": group_data,
+                "kruskal_wallis": {}, "eta2_H": float("nan"), "pairwise": []}
+
+    kw_stat, kw_p = stats.kruskal(*group_data)
+    n_total = sum(len(g) for g in group_data)
+    k       = len(group_data)
+    eta2_H  = float((kw_stat - k + 1) / (n_total - k)) if (n_total - k) > 0 else float("nan")
+
+    dunn = _fig2_dunn_posthoc_internal(group_data, labels)
+    for r in dunn:
+        hl, lo, hi = _fig2_hl_bca_ci_internal(
+            cohort_values[r["label_a"]], cohort_values[r["label_b"]]
+        )
+        r["hl_est"], r["ci_lo"], r["ci_hi"] = hl, lo, hi
+
+    return {
+        "groups":         labels,
+        "group_data":     group_data,
+        "kruskal_wallis": {"statistic": float(kw_stat), "p_value": float(kw_p)},
+        "eta2_H":         eta2_H,
+        "pairwise":       dunn,
+    }
+
+
+def _fig3c_plot_transition_comparison(
+    cohort_values: Dict[str, np.ndarray],
+    kw_results:    dict,
+    save_path:     Optional[Path] = None,
+) -> plt.Figure:
+    """
+    Bar chart (mean ± SEM) with individual scatter points.
+
+    Significance brackets are drawn only for pairs with p_adj < 0.05 to keep
+    the 4-cohort, 6-pair plot compact.
+    """
+    import re as _re
+    from itertools import combinations as _comb
+
+    labels    = list(cohort_values.keys())
+    colors    = [cohort_color(lbl) for lbl in labels]
+    positions = list(range(len(labels)))
+
+    fig, ax = plt.subplots(figsize=(4.5, 3.0))
+
+    bar_means = [float(np.mean(v)) if len(v) > 0 else 0.0 for v in cohort_values.values()]
+    bar_sems  = [float(stats.sem(v)) if len(v) > 1 else 0.0 for v in cohort_values.values()]
+    ax.bar(positions, bar_means, width=0.65, color=colors, alpha=0.7,
+           yerr=bar_sems,
+           error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor="black"),
+           zorder=2)
+
+    rng = np.random.default_rng(42)
+    for i, vals in enumerate(cohort_values.values()):
+        jitter = rng.uniform(-0.15, 0.15, size=len(vals))
+        ax.scatter(np.full(len(vals), i) + jitter, vals,
+                   color=colors[i], alpha=0.85, s=12, zorder=3, edgecolors="none")
+
+    # Solid baseline at y = 0 (bars extend downward from here)
+    ax.axhline(0, color="black", linewidth=0.9, zorder=2)
+
+    # Only draw brackets for significant pairs.
+    # All means are negative (weight loss), so bars extend downward from 0.
+    # Brackets must start above 0 — anchor y_top on 0, not on scatter max.
+    pairwise = kw_results.get("pairwise", [])
+    dunn_map = {(r["label_a"], r["label_b"]): r["p_adj"] for r in pairwise}
+    dunn_map.update({(r["label_b"], r["label_a"]): r["p_adj"] for r in pairwise})
+
+    all_vals = np.concatenate(list(cohort_values.values()))
+    y_min_d  = float(np.nanmin(all_vals)) if len(all_vals) > 0 else -15.0
+    y_span   = max(abs(y_min_d), 0.1)   # full range from bottom to 0
+    step     = y_span * 0.12
+    tick_h   = step   * 0.15
+    y_top    = y_span * 0.05             # just above 0
+
+    sig_pairs = [
+        (i, j) for i, j in _comb(range(len(labels)), 2)
+        if dunn_map.get((labels[i], labels[j]), 1.0) < 0.05
+    ]
+    for level, (i, j) in enumerate(sig_pairs):
+        p_adj = dunn_map[(labels[i], labels[j])]
+        sig   = "***" if p_adj < 0.001 else "**" if p_adj < 0.01 else "*"
+        y_br  = y_top + level * step
+        ax.plot([i, i, j, j], [y_br - tick_h, y_br, y_br, y_br - tick_h],
+                color="black", linewidth=0.8, zorder=4)
+        ax.text((i + j) / 2, y_br + tick_h * 0.3, sig,
+                ha="center", va="bottom", fontsize=7, zorder=5)
+
+    ax.set_ylim(y_min_d - y_span * 0.08,
+                y_top + len(sig_pairs) * step + y_span * 0.25)
+
+    tick_labels = [_re.sub(r"\s*\(.*?\)", "", lbl).strip() for lbl in labels]
+    ax.set_xticks(positions)
+    ax.set_xticklabels(tick_labels, rotation=15, ha="right")
+    ax.set_xlim(-0.7, len(labels) - 1 + 0.7)
+    ax.set_ylabel("Daily Weight Change (%/day)")
+    ax.set_title("Transition-Day Daily Change — 4 Cohorts")
+    ax.grid(False)
+    apply_common_plot_style(ax, ticks_in=True, remove_top_right=True,
+                            remove_x_margins=False, remove_y_margins=True,
+                            draw_zero_dotted_line=False)
+    fig.tight_layout()
+
+    if save_path is not None:
+        save_fig(fig, save_path)
+    elif SHOW_PLOTS:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig
+
+
+def _fig3c_transition_report(
+    cohort_values: Dict[str, np.ndarray],
+    kw_results:    dict,
+    save_path:     Optional[Path] = None,
+) -> str:
+    """Text report for the 4-cohort transition-day KW analysis.
+
+    Format mirrors day1_transition_kw_all4.txt.
+    """
+    from datetime import datetime as _dt
+    from scipy.stats import t as _td
+
+    def _fp(p: float) -> str:
+        if np.isnan(p): return "N/A"
+        return f"{p:.2e}" if p < 0.001 else f"{p:.4f}"
+
+    def _sig(p: float) -> str:
+        if np.isnan(p): return "   "
+        return "***" if p < 0.001 else " **" if p < 0.01 else "  *" if p < 0.05 else " ns"
+
+    def _eta_lbl(e: float) -> str:
+        if np.isnan(e): return "N/A"
+        return ("large" if e >= 0.14 else "moderate" if e >= 0.06
+                else "small" if e >= 0.01 else "negligible")
+
+    def _ci95(arr: np.ndarray):
+        n = len(arr)
+        if n < 2: return float("nan"), float("nan")
+        se = float(np.std(arr, ddof=1)) / np.sqrt(n)
+        tc = float(_td.ppf(0.975, df=n - 1))
+        mu = float(np.mean(arr))
+        return mu - tc * se, mu + tc * se
+
+    W    = 135
+    kw   = kw_results.get("kruskal_wallis", {})
+    eta  = kw_results.get("eta2_H", float("nan"))
+    pair = kw_results.get("pairwise", [])
+    k    = len(kw_results.get("groups", []))
+
+    lines = [
+        "=" * W,
+        "4-COHORT COMPARISON — DAY-1 / TRANSITION-DAY DAILY CHANGE",
+        "=" * W,
+        f"Generated  : {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        "Target days (Daily Change extracted per animal):",
+        "  2% CA (12 animals) : Day 1  (0-based, nonramp) = first CA-exposure day",
+        "  4% CA (Pilot)      : Day 1  (0-based)          = first CA-exposure day",
+        "  5-Week Ramp        : Day 8  (1-based, ramp)    = 0% \u2192 1% CA transition",
+        "  2-Week Ramp        : Day 4  (1-based, ramp)    = 0% \u2192 1% CA transition",
+        "",
+        "Omnibus test : Kruskal-Wallis H-test",
+        "Omnibus ES   : eta2_H = (H \u2212 k + 1) / (n \u2212 k);"
+        "  <0.01 negligible, 0.01\u20130.06 small, 0.06\u20130.14 moderate, >=0.14 large",
+        "Post-hoc     : Dunn\u2019s test (pooled KW ranks, Holm-Bonferroni corrected)",
+        "Post-hoc ES  : r_rb = z / \u221a(nA+nB);"
+        "  |r| <0.1 negligible, 0.1\u20130.3 small, 0.3\u20130.5 medium, >=0.5 large",
+        "HL estimate  : Hodges-Lehmann shift (A\u2212B); 95% CI = BCa bootstrap (n=2 000, seed=0)",
+        "",
+        "Kruskal-Wallis result:",
+        f"  H({k - 1}) = {kw.get('statistic', float('nan')):.4f},  "
+        f"p = {_fp(kw.get('p_value', float('nan')))}  "
+        f"{_sig(kw.get('p_value', float('nan')))}",
+        f"  Effect size: eta2_H = {eta:.4f}  ({_eta_lbl(eta)})",
+        "",
+        "Descriptive statistics  (95% CI = t-based, two-tailed):",
+        f"  {'Cohort':<32}  {'n':>4}  {'Mean (%/day)':>13}  {'SEM':>8}  {'95% CI':>26}",
+        "  " + "-" * 90,
+    ]
+    for label, vals in cohort_values.items():
+        n = len(vals)
+        if n == 0: continue
+        mu  = float(np.mean(vals))
+        sem = float(stats.sem(vals)) if n > 1 else float("nan")
+        lo, hi = _ci95(vals)
+        ci_str = f"[{lo:.4f}, {hi:.4f}]" if not np.isnan(lo) else "N/A"
+        lines.append(
+            f"  {label:<32}  {n:>4}  {mu:>13.4f}  {sem:>8.4f}  {ci_str:>26}"
+        )
+
+    lines += [
+        "",
+        "Pairwise comparisons (Dunn\u2019s test, Holm-Bonferroni corrected):",
+        f"  {'Pair':<48}  {'nA':>4}  {'nB':>4}  {'z(Dunn)':>9}  "
+        f"{'p_raw':>10}  {'p_adj (Holm)':>13}  {'sig':>4}  "
+        f"{'HL_est':>9}  {'95% CI (HL)':>24}  {'r_rb':>6}",
+        "  " + "-" * 145,
+    ]
+    for r in pair:
+        cmp    = f"{r['label_a']}  vs  {r['label_b']}"
+        hl_str = (f"{r.get('hl_est', float('nan')):>9.4f}"
+                  if not np.isnan(r.get("hl_est", float("nan"))) else f"{'N/A':>9}")
+        ci_str = (f"[{r['ci_lo']:.4f}, {r['ci_hi']:.4f}]"
+                  if not np.isnan(r.get("ci_lo", float("nan"))) else "N/A")
+        lines.append(
+            f"  {cmp:<48}  {r['na']:>4}  {r['nb']:>4}  {r['z_stat']:>9.4f}  "
+            f"{_fp(r['p_raw']):>10}  {_fp(r['p_adj']):>13}  "
+            f"{_sig(r['p_adj']):>4}  {hl_str}  {ci_str:>24}  {r['r_rb']:>6.3f}"
+        )
+    lines += [
+        "",
+        "  r_rb : z/\u221a(nA+nB); |r| <0.1 negligible, 0.1-0.3 small, 0.3-0.5 medium, \u22650.5 large",
+        "  HL   : Hodges-Lehmann location shift (A \u2212 B)",
+        "  95% CI: BCa bootstrap on HL estimate (n=2 000 resamples, seed=0)",
+        "  *p<0.05  **p<0.01  ***p<0.001  ns=not significant",
+        "=" * W,
+    ]
+
+    report = "\n".join(lines)
+
+    if save_path is not None:
+        sp = Path(save_path).with_suffix(".txt")
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(report, encoding="utf-8")
+        print(f"  Saved \u2192 {sp.relative_to(_ROOT)}")
+
+    return report
+
+
+# =============================================================================
+# FIGURE 3d HELPERS — 1%→2% CA Transition-Day Ramp Comparison
+#
+# Compares the Daily Change at the 1%→2% CA transition day between the
+# slow (5-week) and fast (2-week) CA ramp cohorts.
+#
+#   5-Week Ramp : Day 15  (1-based ramp) — first day on 2% CA
+#   2-Week Ramp : Day  7  (1-based ramp) — first day on 2% CA
+#
+# Statistical test: Mann-Whitney U (two-sided), k=1 comparison,
+#                   no multiple-comparison correction needed.
+# Effect size     : r_rb = 1 − 2U / (nA × nB)   [range −1, +1]
+# CI              : Hodges-Lehmann shift ± 95% BCa bootstrap CI
+# =============================================================================
+
+def _fig3d_extract_1pct_to_2pct_values() -> Dict[str, np.ndarray]:
+    """
+    Extract per-animal Daily Change at the 1%→2% CA transition day.
+
+    Returns
+    -------
+    Dict[str, np.ndarray]
+        Ordered dict: cohort label → 1-D array of Daily Change values.
+        Cohorts whose data file is missing are silently omitted.
+    """
+    result: Dict[str, np.ndarray] = {}
+
+    # ── 5-Week Slow Ramp — ramp Day 15 (1%→2% CA) ──────────────────────────
+    if MASTER_RAMP.exists():
+        cdf = _add_day_col(_load_master_csv(MASTER_RAMP), "ramp")
+        vals = (cdf[cdf["Day"] == 15]
+                .dropna(subset=["Daily Change"])
+                .groupby("ID")["Daily Change"].mean()
+                .dropna().values.astype(float))
+        if len(vals) > 0:
+            result["5-Week Ramp"] = vals
+
+    # ── 2-Week Fast Ramp — ramp Day 7 (1%→2% CA) ──────────────────────────
+    if MASTER_2WK.exists():
+        cdf = _add_day_col(_load_master_csv(MASTER_2WK), "ramp")
+        vals = (cdf[cdf["Day"] == 7]
+                .dropna(subset=["Daily Change"])
+                .groupby("ID")["Daily Change"].mean()
+                .dropna().values.astype(float))
+        if len(vals) > 0:
+            result["2-Week Ramp"] = vals
+
+    return result
+
+
+def _fig3d_mwu_analysis(
+    cohort_values: Dict[str, np.ndarray],
+) -> dict:
+    """
+    Mann-Whitney U test + Hodges-Lehmann shift for the 1%→2% transition.
+
+    Returns dict with keys:
+        groups, group_data, mwu (U, p_value, nA, nB), r_rb, hl_est, ci_lo, ci_hi.
+    r_rb = 1 − 2U / (nA × nB) consistent with across_cohort _run_rampramp_menu.
+    """
+    labels = list(cohort_values.keys())
+    if len(labels) < 2:
+        return {"groups": labels, "group_data": [], "mwu": {},
+                "r_rb": float("nan"), "hl_est": float("nan"),
+                "ci_lo": float("nan"), "ci_hi": float("nan")}
+
+    a, b = cohort_values[labels[0]], cohort_values[labels[1]]
+    nA, nB = len(a), len(b)
+    U, p   = stats.mannwhitneyu(a, b, alternative="two-sided")
+    r_rb   = 1.0 - 2.0 * float(U) / (nA * nB)
+    hl, ci_lo, ci_hi = _fig2_hl_bca_ci_internal(a, b)
+
+    return {
+        "groups":     labels,
+        "group_data": [a, b],
+        "mwu":        {"U": float(U), "p_value": float(p), "nA": nA, "nB": nB},
+        "r_rb":       float(r_rb),
+        "hl_est":     float(hl),
+        "ci_lo":      float(ci_lo),
+        "ci_hi":      float(ci_hi),
+    }
+
+
+def _fig3d_plot_1pct_to_2pct(
+    cohort_values: Dict[str, np.ndarray],
+    mwu_results:   dict,
+    save_path:     Optional[Path] = None,
+) -> plt.Figure:
+    """
+    Bar chart (mean ± SEM) with individual scatter points for the
+    1%→2% transition-day comparison between 5-Wk Ramp and 2-Wk Ramp.
+
+    Y-axis fixed to [−8, 2] to match across_cohort.py _run_rampramp_menu.
+    """
+    labels   = list(cohort_values.keys())
+    colors   = [cohort_color(lbl) for lbl in labels]
+    x_pos    = np.array([0.2, 0.8])
+    bar_w    = 0.35
+
+    fig, ax = plt.subplots()
+
+    bar_means = [float(np.mean(cohort_values[lbl])) for lbl in labels]
+    bar_sems  = [
+        float(stats.sem(cohort_values[lbl])) if len(cohort_values[lbl]) > 1 else 0.0
+        for lbl in labels
+    ]
+
+    for i, lbl in enumerate(labels):
+        ax.bar(x_pos[i], bar_means[i], width=bar_w,
+               color=colors[i], alpha=0.7, zorder=2)
+        ax.errorbar(x_pos[i], bar_means[i], yerr=bar_sems[i],
+                    fmt="none", color="black",
+                    capsize=4, capthick=0.8, elinewidth=0.8, zorder=3)
+
+    rng = np.random.default_rng(42)
+    for i, lbl in enumerate(labels):
+        vals   = cohort_values[lbl]
+        jitter = rng.uniform(-0.10, 0.10, size=len(vals))
+        ax.scatter(x_pos[i] + jitter, vals,
+                   color=colors[i], alpha=0.85, s=12, zorder=4, edgecolors="none")
+
+    # Solid baseline
+    ax.axhline(0, color="black", linewidth=0.9, zorder=2)
+
+    # Fixed y limits (matching original)
+    ylim_bot, ylim_top = -8.0, 2.0
+    g_span  = ylim_top - ylim_bot
+    tick_h  = 0.04 * g_span
+    bkt_y   = ylim_top - tick_h * 3.5
+
+    # Significance bracket
+    p_val = mwu_results.get("mwu", {}).get("p_value", float("nan"))
+    if not np.isnan(p_val):
+        sig = "***" if p_val < 0.001 else "**" if p_val < 0.01 else "*" if p_val < 0.05 else "ns"
+        ax.plot([x_pos[0], x_pos[1]], [bkt_y, bkt_y],
+                color="black", lw=0.8, zorder=5)
+        ax.plot([x_pos[0], x_pos[0]], [bkt_y - tick_h, bkt_y],
+                color="black", lw=0.8, zorder=5)
+        ax.plot([x_pos[1], x_pos[1]], [bkt_y - tick_h, bkt_y],
+                color="black", lw=0.8, zorder=5)
+        ax.text(0.5 * (x_pos[0] + x_pos[1]), bkt_y + tick_h * 0.3, sig,
+                ha="center", va="bottom", fontsize=7, zorder=6)
+
+    ax.set_ylim(ylim_bot, ylim_top)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(["5-Wk Ramp\n(Day 15)", "2-Wk Ramp\n(Day 7)"])
+    ax.set_xlim(-0.1, 1.1)
+    ax.set_ylabel("Daily Weight Change (%/day)")
+    ax.set_title("1%\u21922% Transition Day\nDaily Weight Change")
+    ax.grid(False)
+    apply_common_plot_style(ax, ticks_in=True, remove_top_right=True,
+                            remove_x_margins=False, remove_y_margins=True,
+                            draw_zero_dotted_line=False)
+    fig.tight_layout()
+
+    if save_path is not None:
+        save_fig(fig, save_path)
+    elif SHOW_PLOTS:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig
+
+
+def _fig3d_transition_report(
+    cohort_values: Dict[str, np.ndarray],
+    mwu_results:   dict,
+    save_path:     Optional[Path] = None,
+) -> str:
+    """Text report for the 1%→2% ramp transition MWU analysis.
+
+    Format mirrors the RAMP vs 2-WEEK RAMP report from across_cohort.py
+    _run_rampramp_menu.
+    """
+    from datetime import datetime as _dt
+    from scipy.stats import t as _td
+
+    def _fp(p: float) -> str:
+        if np.isnan(p): return "N/A"
+        return f"{p:.2e}" if p < 0.001 else f"{p:.4f}"
+
+    def _sig(p: float) -> str:
+        if np.isnan(p): return "   "
+        return "***" if p < 0.001 else " **" if p < 0.01 else "  *" if p < 0.05 else " ns"
+
+    def _ci95(arr: np.ndarray):
+        n = len(arr)
+        if n < 2: return float("nan"), float("nan")
+        from scipy.stats import t as _td2
+        se = float(np.std(arr, ddof=1)) / np.sqrt(n)
+        tc = float(_td2.ppf(0.975, df=n - 1))
+        mu = float(np.mean(arr))
+        return mu - tc * se, mu + tc * se
+
+    labels = mwu_results.get("groups", [])
+    mwu    = mwu_results.get("mwu", {})
+    W      = 108
+
+    lines = [
+        "=" * W,
+        "RAMP vs 2-WEEK RAMP \u2014 CA% TRANSITION DAY DAILY CHANGE",
+        "=" * W,
+        f"Generated  : {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Cohorts    : {', '.join(labels)}",
+        "",
+        "Transition days  \u2014  5-Week Ramp : Day 15 (1%\u21922% CA)",
+        "                   2-Week Ramp : Day  7 (1%\u21922% CA)",
+        "",
+        "Statistical test : Mann-Whitney U (two-sided)",
+        "Correction       : None (k=1 comparison; no correction needed)",
+        "Effect size      : r_rb = 1 \u2212 2U / (nA \u00d7 nB);  range [\u22121, +1], "
+        "positive = 5-Wk Ramp > 2-Wk Ramp",
+        "CI               : Hodges-Lehmann shift (A\u2212B) \u00b1 95% BCa bootstrap "
+        "(n=2 000 resamples, seed=0)",
+        "",
+        "Descriptive statistics  (95% CI = t-based, two-tailed):",
+        f"  {'Cohort':<22}  {'n':>4}  {'Mean (%/day)':>13}  {'SEM':>8}  {'95% CI':>26}",
+        "  " + "-" * 78,
+    ]
+    for lbl, vals in cohort_values.items():
+        n  = len(vals)
+        mu = float(np.mean(vals))
+        se = float(stats.sem(vals)) if n > 1 else float("nan")
+        lo, hi = _ci95(vals)
+        ci_str = f"[{lo:.4f}, {hi:.4f}]" if not np.isnan(lo) else "N/A"
+        lines.append(f"  {lbl:<22}  {n:>4}  {mu:>13.4f}  {se:>8.4f}  {ci_str:>26}")
+
+    nA  = mwu.get("nA", 0); nB = mwu.get("nB", 0)
+    U   = mwu.get("U",    float("nan"))
+    p   = mwu.get("p_value", float("nan"))
+    rrb = mwu_results.get("r_rb",    float("nan"))
+    hl  = mwu_results.get("hl_est",  float("nan"))
+    clo = mwu_results.get("ci_lo",   float("nan"))
+    chi = mwu_results.get("ci_hi",   float("nan"))
+
+    U_str  = f"{U:.1f}"   if not np.isnan(U)   else "N/A"
+    rrb_s  = f"{rrb:.3f}" if not np.isnan(rrb) else "N/A"
+    hl_s   = f"{hl:.4f}"  if not np.isnan(hl)  else "N/A"
+    ci_s   = f"[{clo:.4f}, {chi:.4f}]" if not np.isnan(clo) else "N/A"
+
+    lines += [
+        "",
+        "Mann-Whitney U result:",
+        f"  {'Trans.':<12}  {'n_Ramp':>6}  {'n_2Wk':>6}  {'U':>8}  "
+        f"{'p_raw':>10}  {'p_adj':>10}  {'r_rb':>6}  {'HL_est':>9}  {'95% CI (HL)':>22}  sig",
+        "  " + "-" * W,
+        f"  {'1%->2%':<12}  {nA:>6}  {nB:>6}  {U_str:>8}  "
+        f"{_fp(p):>10}  {_fp(p):>10}  {rrb_s:>6}  {hl_s:>9}  {ci_s:>22}  {_sig(p)}",
+        "",
+        "  r_rb  : 1 \u2212 2U/(nA\u00d7nB); positive = 5-Wk Ramp daily change > 2-Wk Ramp",
+        "  HL    : Hodges-Lehmann location shift (5-Wk Ramp \u2212 2-Wk Ramp)",
+        "  95% CI: BCa bootstrap on HL estimate (n=2 000 resamples, seed=0)",
+        "  *p<0.05  **p<0.01  ***p<0.001  ns=not significant",
+        "=" * W,
+    ]
+
+    report = "\n".join(lines)
+
+    if save_path is not None:
+        sp = Path(save_path).with_suffix(".txt")
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(report, encoding="utf-8")
+        print(f"  Saved \u2192 {sp.relative_to(_ROOT)}")
+
+    return report
+
+
 def figure_3() -> None:
-    """Placeholder — port the Figure 3 panels here."""
-    pass
+    """Daily Weight Change, Behavioral Metrics, and Transition-Day Comparisons — Figure 3.
+
+    SVG files saved in OUT_FIG3:
+      fig3a_daily_change_cohorts  — mean ± SEM daily change per day,
+                                     0 % CA, 2 % CA (6 animals), 5-Wk Slow Ramp
+      fig3b_behavioral_metrics    — No Nest / Anxious / Lethargy % per week,
+                                     three panels (1 × 3), same three cohorts
+      fig3c_transition_comparison — 0%→1% transition bar chart + KW, 4 cohorts
+      fig3d_transition_1pct_2pct  — 1%→2% transition bar chart + MWU,
+                                     5-Wk vs 2-Wk Ramp only
+
+    Text reports in OUT_FIG3:
+      fig3c_transition_kw_report.txt   — KW omnibus + Dunn’s + HL for 3c
+      fig3d_transition_mwu_report.txt  — MWU + HL for 3d
+
+    Day alignment
+    -------------
+    nonramp (0 % CA, 2 % CA) : Day 0 = baseline (excluded), Day 1 = first treatment day.
+    ramp (5-Wk)               : Day 1 = first recording (included for daily-change plots).
+    Both cohorts share the same Day 1 / Week 1 origin on the x-axis.
+    """
+    print("\n" + "=" * 60)
+    print("FIGURE 3 — Daily Weight Change")
+    print("=" * 60)
+
+    # ── 3a: Daily Change — 0%, 2% (6 animals), 5-wk slow ramp ───────────────
+    _cohort_specs_3a: List[Tuple[str, pd.DataFrame, str]] = []
+    if MASTER_0PCT.exists():
+        _cohort_specs_3a.append(("0% CA",            _load_master_csv(MASTER_0PCT),  "nonramp"))
+    if MASTER_2PCT.exists():
+        _cohort_specs_3a.append(("2% CA (6 animals)", _load_master_csv(MASTER_2PCT),  "nonramp"))
+    if MASTER_RAMP.exists():
+        _cohort_specs_3a.append(("5-Week Ramp",       _load_master_csv(MASTER_RAMP),  "ramp"))
+
+    if _cohort_specs_3a:
+        print("\n[3a] Daily Change across days — 0%, 2% (6 animals), 5-wk slow ramp ...")
+        _fig3a_plot_daily_change_cohorts(
+            _cohort_specs_3a,
+            save_path=OUT_FIG3 / "fig3a_daily_change_cohorts",
+        )
+    else:
+        print("[3a] SKIPPED — no cohort data found")
+
+    # ── 3b: Behavioral metrics — No Nest, Anxious, Lethargy per week ──────────
+    _cohort_specs_3b: List[Tuple[str, pd.DataFrame, str]] = []
+    if MASTER_0PCT.exists():
+        _cohort_specs_3b.append(("0% CA",            _load_master_csv(MASTER_0PCT),  "nonramp"))
+    if MASTER_2PCT.exists():
+        _cohort_specs_3b.append(("2% CA (6 animals)", _load_master_csv(MASTER_2PCT),  "nonramp"))
+    if MASTER_RAMP.exists():
+        _cohort_specs_3b.append(("5-Week Ramp",       _load_master_csv(MASTER_RAMP),  "ramp"))
+
+    if _cohort_specs_3b:
+        print("\n[3b] Behavioral metrics (No Nest, Anxious, Lethargy) per week ...")
+        _fig3b_plot_behavioral_metrics(
+            _cohort_specs_3b,
+            save_path=OUT_FIG3 / "fig3b_behavioral_metrics",
+        )
+    else:
+        print("[3b] SKIPPED — no cohort data found")
+
+    # ── 3c: 4-cohort transition-day comparison ──────────────────────────────────
+    print("\n[3c] Transition-day Daily Change — 4 cohorts ...")
+    _trans_vals = _fig3c_extract_transition_values()
+    if len(_trans_vals) >= 2:
+        _kw_trans = _fig3c_kw_transition_analysis(_trans_vals)
+        _fig3c_plot_transition_comparison(
+            _trans_vals, _kw_trans,
+            save_path=OUT_FIG3 / "fig3c_transition_comparison",
+        )
+        _fig3c_transition_report(
+            _trans_vals, _kw_trans,
+            save_path=OUT_FIG3 / "fig3c_transition_kw_report",
+        )
+    else:
+        print("[3c] SKIPPED — fewer than 2 cohorts available")
+
+    # ── 3d: 1%→2% transition — 5-Wk Ramp vs 2-Wk Ramp ──────────────────────
+    print("\n[3d] 1%→2% transition — 5-Wk Ramp (Day 15) vs 2-Wk Ramp (Day 7) ...")
+    _trans_1pct_2pct = _fig3d_extract_1pct_to_2pct_values()
+    if len(_trans_1pct_2pct) >= 2:
+        _mwu_3d = _fig3d_mwu_analysis(_trans_1pct_2pct)
+        _fig3d_plot_1pct_to_2pct(
+            _trans_1pct_2pct, _mwu_3d,
+            save_path=OUT_FIG3 / "fig3d_transition_1pct_2pct",
+        )
+        _fig3d_transition_report(
+            _trans_1pct_2pct, _mwu_3d,
+            save_path=OUT_FIG3 / "fig3d_transition_mwu_report",
+        )
+    else:
+        print("[3d] SKIPPED — fewer than 2 ramp cohorts available")
+
+    print("\n[OK] Figure 3 complete.")
 
 
 # =============================================================================
