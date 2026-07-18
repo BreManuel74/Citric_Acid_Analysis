@@ -14,6 +14,8 @@ NOTE: There will be minor formatting differences between the figures produced by
 The final figures were polished in Adobe Illustrator for font consistency, line thickness, 
 evenly spaced x and y axis limits, panel alignment, etc.
 
+NOTE: This script requires R to be installed and available in the system PATH. 
+
 Usage
 -----
   python figure_maker.py
@@ -31,6 +33,9 @@ from __future__ import annotations
 # =============================================================================
 
 import math
+import subprocess
+import tempfile
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -101,7 +106,7 @@ CAP_LOGS_2PCT_FULL: List[Path] = sorted(DIR_2PCT_FULL.glob("capacitive_log_*.csv
 # ── 2-week CA (fast) ramp cohort ─────────────────────────────────────────────────────
 DIR_2WK           = _ROOT / "2_week_files"
 MASTER_2WK        = DIR_2WK / "master_data_2wk.csv"
-# (no lick master or capacitive logs for 2-wk ramp — add if available)
+# (no lick master or capacitive logs for 2-wk ramp)
 
 # ── CAH cohort ────────────────────────────────────────────────────────────────
 DIR_CAH           = _ROOT / "CAH_cohort"
@@ -1588,6 +1593,661 @@ def _fig2_slope_analysis_report(
     return report
 
 
+def _fig2_run_nparld_total_change(
+    cohort_specs: List[Tuple[str, pd.DataFrame, str]],
+    save_path: Optional[Path] = None,
+) -> dict:
+    """
+    Nonparametric repeated-measures analysis (nparLD F1-LD-F1) for Total Change.
+
+    Ported verbatim from across_cohort.py run_nparld_cohort_week_r.
+    Calls R via subprocess — requires R with the nparLD package installed.
+
+    Parameters
+    ----------
+    cohort_specs : list of (label, df, mode)
+        label : cohort label stored in the report
+        df    : master CSV DataFrame from _load_master_csv()
+        mode  : 'ramp' or 'nonramp'
+    save_path : stem path; report written as .txt
+
+    Returns
+    -------
+    dict with keys: r_output, report_str, report_path, n_subjects, cohorts, weeks, p_values
+    """
+    from datetime import datetime as _dt
+    import os as _os
+    import glob as _glob
+
+    measure = "Total Change"
+
+    # ── Data preparation (figure_maker convention) ─────────────────────────
+    # nonramp: Day 0 = baseline (drop Day 0, keep Day >= 1)
+    # ramp   : Day 1 = TC=0 construction artefact (drop Day 1, keep Day > 1)
+    frames = []
+    for label, df, mode in cohort_specs:
+        cdf = _add_day_col(df.copy(), mode)
+        if mode == "ramp":
+            cdf = cdf[cdf["Day"] > 1].copy()   # exclude TC=0 baseline
+        else:
+            cdf = cdf[cdf["Day"] >= 1].copy()  # exclude pre-treatment baseline
+        cdf = _add_week_col(cdf)
+        if measure not in cdf.columns:
+            print(f"  [WARNING] '{measure}' not found in cohort '{label}' — skipping")
+            continue
+        cdf["_Cohort"] = label
+        frames.append(cdf[["ID", "_Cohort", "Week", measure]].dropna(subset=[measure]))
+
+    if not frames:
+        print(f"  [ERROR] No data available for nparLD {measure}.")
+        return {}
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.rename(columns={measure: "TotalChange", "_Cohort": "Cohort"})
+
+    # ── Per-animal per-week mean ────────────────────────────────────────────
+    weekly = (
+        combined
+        .groupby(["ID", "Cohort", "Week"], as_index=False)["TotalChange"]
+        .mean()
+    )
+
+    # Complete-case filter
+    week_counts  = weekly.groupby("ID")["Week"].nunique()
+    all_weeks_n  = weekly["Week"].nunique()
+    complete_ids = week_counts[week_counts == all_weeks_n].index
+    n_dropped    = weekly["ID"].nunique() - len(complete_ids)
+    weekly = weekly[weekly["ID"].isin(complete_ids)].copy()
+
+    if weekly.empty or len(complete_ids) < 3:
+        print(f"  [ERROR] Insufficient complete-case animals ({len(complete_ids)}) for nparLD.")
+        return {}
+
+    week_levels   = sorted(weekly["Week"].unique())
+    cohort_levels = sorted(weekly["Cohort"].unique())
+    n_subjects    = int(weekly["ID"].nunique())
+
+    # ── Write temp CSV ──────────────────────────────────────────────────────
+    tmp_csv = Path(tempfile.mktemp(suffix=".csv"))
+    weekly[["ID", "Cohort", "Week", "TotalChange"]].to_csv(str(tmp_csv), index=False)
+
+    _csv_r     = str(tmp_csv).replace("\\", "/")
+    _wk_levels = ", ".join(str(w) for w in week_levels)
+    _co_levels = ", ".join(f'"{c}"' for c in cohort_levels)
+
+    _td  = tempfile.gettempdir().replace("\\", "/")
+    _uid = str(id(weekly))[-6:]
+    _ats_csv   = f"{_td}/nwt_ats_{_uid}.csv"
+    _box_csv   = f"{_td}/nwt_box_{_uid}.csv"
+    _wts_csv   = f"{_td}/nwt_wts_{_uid}.csv"
+    _rte_csv   = f"{_td}/nwt_rte_{_uid}.csv"
+    _pair_csv  = f"{_td}/nwt_pair_{_uid}.csv"
+    _time_csv  = f"{_td}/nwt_time_{_uid}.csv"
+    _wkmwu_csv = f"{_td}/nwt_wkmwu_{_uid}.csv"
+
+    r_script = (
+        "options(warn=1, scipen=999)\n"
+        "set.seed(42)\n"
+        "if (!require(\"nparLD\", quietly=TRUE, warn.conflicts=FALSE)) {\n"
+        "  install.packages(\"nparLD\", repos=\"https://cran.r-project.org\", quiet=TRUE)\n"
+        "  library(nparLD)\n"
+        "}\n"
+        f"data <- read.csv(\"{_csv_r}\")\n"
+        f"data$Week   <- factor(data$Week,   levels=c({_wk_levels}))\n"
+        f"data$Cohort <- factor(data$Cohort, levels=c({_co_levels}))\n"
+        "data$ID <- factor(data$ID)\n"
+        "result <- f1.ld.f1(\n"
+        "  y=data$TotalChange, time=data$Week, group=data$Cohort, subject=data$ID,\n"
+        "  time.name=\"Week\", group.name=\"Cohort\", description=FALSE\n"
+        ")\n"
+        f"ats <- as.data.frame(result$ANOVA.test); ats$effect <- rownames(ats)\n"
+        f"write.csv(ats, \"{_ats_csv}\", row.names=FALSE)\n"
+        f"if (!is.null(result$ANOVA.test.mod.Box)) {{\n"
+        f"  box <- as.data.frame(result$ANOVA.test.mod.Box); box$effect <- rownames(box)\n"
+        f"  write.csv(box, \"{_box_csv}\", row.names=FALSE)\n"
+        f"}} else write.csv(data.frame(), \"{_box_csv}\", row.names=FALSE)\n"
+        f"wts <- as.data.frame(result$Wald.test); wts$effect <- rownames(wts)\n"
+        f"write.csv(wts, \"{_wts_csv}\", row.names=FALSE)\n"
+        f"write.csv(as.data.frame(result$RTE), \"{_rte_csv}\", row.names=TRUE)\n"
+        f"if (!is.null(result$pair.comparison)) {{\n"
+        f"  write.csv(result$pair.comparison, \"{_pair_csv}\", row.names=FALSE)\n"
+        f"}} else write.csv(data.frame(), \"{_pair_csv}\", row.names=FALSE)\n"
+        f"if (!is.null(result$ANOVA.test.time)) {{\n"
+        f"  att <- as.data.frame(result$ANOVA.test.time); att$cohort <- rownames(att)\n"
+        f"  write.csv(att, \"{_time_csv}\", row.names=FALSE)\n"
+        f"}} else write.csv(data.frame(), \"{_time_csv}\", row.names=FALSE)\n"
+        "wk_rows <- list(); k_row <- 1\n"
+        "for (wk in levels(data$Week)) {\n"
+        "  sub <- data[data$Week == wk, ]\n"
+        "  cohs <- as.character(levels(droplevels(sub$Cohort)))\n"
+        "  if (length(cohs) < 2) next\n"
+        "  pm <- combn(length(cohs), 2)\n"
+        "  for (k in seq_len(ncol(pm))) {\n"
+        "    g1 <- cohs[pm[1,k]]; g2 <- cohs[pm[2,k]]\n"
+        "    x  <- sub$TotalChange[sub$Cohort == g1]\n"
+        "    y  <- sub$TotalChange[sub$Cohort == g2]\n"
+        "    x  <- x[!is.na(x)]; y <- y[!is.na(y)]\n"
+        "    if (length(x)<1 || length(y)<1) next\n"
+        "    tryCatch({\n"
+        "      wt <- wilcox.test(x, y, exact=FALSE, conf.int=TRUE)\n"
+        "      wk_rows[[k_row]] <- data.frame(\n"
+        "        week=as.integer(wk), g1=g1, n1=length(x), g2=g2, n2=length(y),\n"
+        "        U=as.numeric(wt$statistic), p_raw=wt$p.value,\n"
+        "        hl=as.numeric(wt$estimate), ci_lo=wt$conf.int[1], ci_hi=wt$conf.int[2],\n"
+        "        stringsAsFactors=FALSE)\n"
+        "      k_row <- k_row + 1\n"
+        "    }, error=function(e) {\n"
+        "      tryCatch({\n"
+        "        wt2 <- wilcox.test(x, y, exact=FALSE, conf.int=FALSE)\n"
+        "        wk_rows[[k_row]] <<- data.frame(\n"
+        "          week=as.integer(wk), g1=g1, n1=length(x), g2=g2, n2=length(y),\n"
+        "          U=as.numeric(wt2$statistic), p_raw=wt2$p.value,\n"
+        "          hl=NA_real_, ci_lo=NA_real_, ci_hi=NA_real_,\n"
+        "          stringsAsFactors=FALSE)\n"
+        "        k_row <<- k_row + 1\n"
+        "      }, error=function(e2) NULL)\n"
+        "    })\n"
+        "  }\n"
+        "}\n"
+        f"if (length(wk_rows)>0) write.csv(do.call(rbind,wk_rows),\"{_wkmwu_csv}\",row.names=FALSE) else write.csv(data.frame(),\"{_wkmwu_csv}\",row.names=FALSE)\n"
+        "cat(\"NPARLD_WT_DONE\\n\")\n"
+    )
+
+    tmp_r = Path(tempfile.mktemp(suffix=".R"))
+    tmp_r.write_text(r_script, encoding="utf-8")
+
+    # ── Locate Rscript ──────────────────────────────────────────────────────
+    rscript = shutil.which("Rscript") or shutil.which("Rscript.exe")
+    if rscript is None:
+        for _pat in (
+            r"C:\Program Files\R\R-*\bin\Rscript.exe",
+            r"C:\Program Files\R\R-*\bin\x64\Rscript.exe",
+        ):
+            _m = sorted(_glob.glob(_pat))
+            if _m:
+                rscript = _m[-1]
+                break
+
+    if rscript is None:
+        print("ERROR: 'Rscript' not found. Install R and add to PATH. nparLD skipped.")
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+        return {}
+
+    r_output = ""
+    try:
+        proc = subprocess.run(
+            [rscript, "--vanilla", str(tmp_r)],
+            capture_output=True, text=True, timeout=300,
+        )
+        r_output = proc.stdout
+        r_stderr = proc.stderr.strip()
+        if proc.returncode != 0:
+            print(f"R exited with code {proc.returncode}.")
+        if r_stderr:
+            non_trivial = [ln for ln in r_stderr.splitlines()
+                           if not ln.startswith("Loading") and ln.strip()]
+            if non_trivial:
+                print("R messages:\n" + "\n".join(non_trivial))
+    except FileNotFoundError:
+        print("ERROR: 'Rscript' not found. nparLD skipped.")
+        return {}
+    except subprocess.TimeoutExpired:
+        print("ERROR: R script timed out after 300 s. nparLD skipped.")
+        return {}
+    finally:
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+
+    # ── Read back result CSVs ───────────────────────────────────────────────
+    def _safe_read_csv(fp):
+        try:    return pd.read_csv(fp) if _os.path.exists(fp) else pd.DataFrame()
+        except Exception: return pd.DataFrame()
+
+    ats_df   = _safe_read_csv(_ats_csv)
+    box_df   = _safe_read_csv(_box_csv)
+    wts_df   = _safe_read_csv(_wts_csv)
+    rte_df   = _safe_read_csv(_rte_csv)
+    pair_df  = _safe_read_csv(_pair_csv)
+    time_df  = _safe_read_csv(_time_csv)
+    wkmwu_df = _safe_read_csv(_wkmwu_csv)
+
+    for _fp in [_ats_csv, _box_csv, _wts_csv, _rte_csv, _pair_csv, _time_csv, _wkmwu_csv]:
+        try:    _os.unlink(_fp)
+        except Exception: pass
+
+    # ── Fix zero p-values underflowed by R ─────────────────────────────────
+    def _fix_zero_pvals(df, stat_cols, df1_cols, p_col, mode="ats", df2_col=None):
+        if df.empty or p_col not in df.columns: return df
+        s_c  = next((c for c in stat_cols if c in df.columns), None)
+        d1_c = next((c for c in df1_cols  if c in df.columns), None)
+        if s_c is None or d1_c is None: return df
+        df = df.copy()
+        for idx in df.index:
+            try:
+                pv = float(df.at[idx, p_col])
+            except (TypeError, ValueError): continue
+            if np.isnan(pv) or pv != 0.0: continue
+            try:
+                st = float(df.at[idx, s_c])
+                d1 = float(df.at[idx, d1_c])
+                if mode == "ats" and d1 > 0:
+                    df.at[idx, p_col] = float(stats.chi2.sf(st * d1, d1))
+                elif mode == "wts" and d1 > 0:
+                    df.at[idx, p_col] = float(stats.chi2.sf(st, d1))
+                elif mode == "box" and df2_col and df2_col in df.columns:
+                    d2 = float(df.at[idx, df2_col])
+                    if d2 > 0:
+                        df.at[idx, p_col] = float(stats.f.sf(st, d1, d2))
+            except Exception: pass
+        return df
+
+    _ats_pc  = next((c for c in ["p-value", "p.value", "Pr(>F)"]     if c in ats_df.columns),  None)
+    _wts_pc  = next((c for c in ["p-value", "p.value", "Pr(>Chisq)"] if c in wts_df.columns),  None)
+    _box_pc  = next((c for c in ["p-value", "p.value"]                if c in box_df.columns),  None)
+    _pair_pc = next((c for c in ["p-value", "p.value"]                if c in pair_df.columns), None)
+    _time_pc = next((c for c in ["p-value", "p.value"]                if c in time_df.columns), None)
+    if _ats_pc:  ats_df  = _fix_zero_pvals(ats_df,  ["Statistic","ATS","F"],   ["df","df1","Df"], _ats_pc,  "ats")
+    if _wts_pc:  wts_df  = _fix_zero_pvals(wts_df,  ["Statistic","WTS","Chisq"],["df","Df"],       _wts_pc,  "wts")
+    if _box_pc:  box_df  = _fix_zero_pvals(box_df,  ["Statistic","ATS","F"],   ["df1","df","Df"], _box_pc,  "box", df2_col="df2")
+    if _pair_pc: pair_df = _fix_zero_pvals(pair_df, ["Statistic","ATS"],       ["df","df1"],       _pair_pc, "ats")
+    if _time_pc: time_df = _fix_zero_pvals(time_df, ["Statistic","ATS"],       ["df","df1"],       _time_pc, "ats")
+
+    # ── Local formatting helpers ────────────────────────────────────────────
+    def _fp_nw(p: float) -> str:
+        try:
+            if np.isnan(p): return "n/a"
+        except (TypeError, ValueError): return "n/a"
+        p = float(p)
+        return f"{p:.2e}" if p < 0.001 else f"{p:.4f}"
+
+    def _sig_nw(p: float) -> str:
+        try:
+            if np.isnan(p): return ""
+        except (TypeError, ValueError): return ""
+        p = float(p)
+        if p < 0.001: return "***"
+        if p < 0.01:  return "**"
+        if p < 0.05:  return "*"
+        if p < 0.10:  return "."
+        return ""
+
+    def _holm_nw(p_list):
+        n = len(p_list)
+        if n == 0: return []
+        order = sorted(range(n), key=lambda i: p_list[i])
+        adj = [0.0] * n; running_min = 1.0
+        for rank, idx in enumerate(reversed(order)):
+            k = n - rank
+            adj[idx] = min(running_min, p_list[idx] * k)
+            running_min = adj[idx]
+        return adj
+
+    # ── Build report ────────────────────────────────────────────────────────
+    W   = 80
+    _ts = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+    report_lines: List[str] = [
+        "=" * W,
+        "  NONPARAMETRIC REPEATED MEASURES ANALYSIS  (R: nparLD)",
+        "  Design: F1-LD-F1  (1 between-subjects \u00d7 1 within-subjects factor)",
+        "=" * W,
+        f"  Generated         : {_ts}",
+        f"  Measure           : {measure}",
+        f"  Between factor    : Cohort  ({', '.join(cohort_levels)})",
+        f"  Within factor     : Week    ({', '.join(str(w) for w in week_levels)})",
+        f"  N subjects        : {n_subjects} (complete cases across all weeks)",
+        "",
+        "  Test statistics:",
+        "    ATS = ANOVA-Type Statistic (F-approximation, recommended for small n)",
+        "    WTS = Wald-Type Statistic  (Chi-sq, asymptotic, shown for reference)",
+        "    RTE = Relative Treatment Effect (rank-based mean, 0-1 scale)",
+        "",
+        "  Post-hoc (per week): Mann-Whitney U + Holm correction",
+        "    HL = Hodges-Lehmann estimator (x \u2212 y); 95% CI via wilcox.test",
+        "    r_rb = rank-biserial correlation = 1 \u2212 2U/(n\u2081\u00b7n\u2082)",
+        "=" * W,
+        "",
+        "  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10",
+        "",
+        "\u2550" * W,
+        f"  DEPENDENT VARIABLE:  {measure}",
+        "\u2550" * W,
+        "",
+        "  Model Information",
+        f"    {'Model (R)':<40} F1 LD F1 Model",
+        f"    {'Method':<40} Nonparametric rank-based (nparLD)",
+        f"    {'Between-subjects factor':<40} Cohort  ({', '.join(cohort_levels)})",
+        f"    {'Within-subjects factor':<40} Week    ({', '.join(str(w) for w in week_levels)})",
+        f"    {'N subjects (complete data)':<40} {n_subjects}",
+        f"    {'N subjects dropped':<40} {n_dropped}",
+        "",
+        "  Note: nparLD uses rank transformation; no parametric model is fit.",
+        "  Residuals, R\u00b2, AIC/BIC are not applicable. Inference is based on",
+        "  Relative Treatment Effects (RTEs) which are bounded in [0, 1].",
+        "",
+    ]
+
+    # ATS table
+    if not ats_df.empty:
+        _s_c  = next((c for c in ["Statistic","ATS","F"]     if c in ats_df.columns), None)
+        _d1_c = next((c for c in ["df1","df","Df"]           if c in ats_df.columns), None)
+        _d2_c = next((c for c in ["df2"]                      if c in ats_df.columns), None)
+        _p_c  = next((c for c in ["p-value","p.value","Pr(>F)"] if c in ats_df.columns), None)
+        report_lines += [
+            "  ANOVA-Type Statistics (ATS)  \u2014  F-approximation, recommended for small n",
+            f"  {'Effect':<30}  {'ATS':>10}  {'df1':>8}  {'df2':>8}  {'p-value':>10}  Sig",
+            "  " + "\u2500" * 74,
+        ]
+        for _, row in ats_df.iterrows():
+            eff  = str(row.get("effect", "")).strip()
+            stat = float(row[_s_c])  if _s_c  else np.nan
+            df1  = float(row[_d1_c]) if _d1_c else np.nan
+            df2  = float(row[_d2_c]) if _d2_c else np.nan
+            pv   = float(row[_p_c])  if _p_c  else np.nan
+            df2s = f"{df2:>8.2f}" if not np.isnan(df2) else f"{'\u2014':>8}"
+            report_lines.append(
+                f"  {eff:<30}  {stat:>10.4f}  {df1:>8.2f}  {df2s}  {_fp_nw(pv):>10}  {_sig_nw(pv)}"
+            )
+        report_lines.append("")
+
+    # Box approximation
+    if not box_df.empty:
+        _bs_c  = next((c for c in ["Statistic","ATS","F"] if c in box_df.columns), None)
+        _bd1_c = next((c for c in ["df1","df","Df"]       if c in box_df.columns), None)
+        _bd2_c = next((c for c in ["df2"]                  if c in box_df.columns), None)
+        _bp_c  = next((c for c in ["p-value","p.value","Pr(>F)"] if c in box_df.columns), None)
+        report_lines += [
+            "  ATS with Box approximation  \u2014  preferred for small between-subjects N",
+            f"  {'Effect':<30}  {'Statistic':>10}  {'df1':>8}  {'df2':>8}  {'p-value':>10}  Sig",
+            "  " + "\u2500" * 74,
+        ]
+        for _, row in box_df.iterrows():
+            eff  = str(row.get("effect", "")).strip()
+            stat = float(row[_bs_c])  if _bs_c  else np.nan
+            df1  = float(row[_bd1_c]) if _bd1_c else np.nan
+            df2  = float(row[_bd2_c]) if _bd2_c else np.nan
+            pv   = float(row[_bp_c])  if _bp_c  else np.nan
+            df2s = f"{df2:>8.4f}" if not np.isnan(df2) else f"{'\u2014':>8}"
+            report_lines.append(
+                f"  {eff:<30}  {stat:>10.4f}  {df1:>8.4f}  {df2s}  {_fp_nw(pv):>10}  {_sig_nw(pv)}"
+            )
+        report_lines.append("")
+
+    # WTS table
+    if not wts_df.empty:
+        _ws_c = next((c for c in ["Statistic","WTS","Chisq"] if c in wts_df.columns), None)
+        _wd_c = next((c for c in ["df","Df"]                  if c in wts_df.columns), None)
+        _wp_c = next((c for c in ["p-value","p.value","Pr(>Chisq)"] if c in wts_df.columns), None)
+        report_lines += [
+            "  Wald-Type Statistics (WTS)  \u2014  Chi-square, asymptotic (shown for reference)",
+            f"  {'Effect':<30}  {'WTS (chi-sq)':>12}  {'df':>6}  {'p-value':>10}  Sig",
+            "  " + "\u2500" * 66,
+        ]
+        for _, row in wts_df.iterrows():
+            eff  = str(row.get("effect", "")).strip()
+            stat = float(row[_ws_c]) if _ws_c else np.nan
+            df_  = float(row[_wd_c]) if _wd_c else np.nan
+            pv   = float(row[_wp_c]) if _wp_c else np.nan
+            report_lines.append(
+                f"  {eff:<30}  {stat:>12.4f}  {df_:>6.2f}  {_fp_nw(pv):>10}  {_sig_nw(pv)}"
+            )
+        report_lines.append("")
+
+    # RTE section
+    if not rte_df.empty:
+        if "Unnamed: 0" in rte_df.columns:
+            rte_df = rte_df.rename(columns={"Unnamed: 0": "label"})
+        _lbl_c  = "label" if "label" in rte_df.columns else rte_df.columns[0]
+        _est_c  = next((c for c in ["RTE","Estimate","rte"] if c in rte_df.columns), None)
+        _nobs_c = next((c for c in ["Nobs","nobs","N"]      if c in rte_df.columns), None)
+        report_lines += [
+            "  Relative Treatment Effects (RTEs)  \u2014  rank-based effect sizes (0-1 scale)",
+            "  Interpretation: RTE near 0.5 = no effect; >0.5 = higher ranks in this cell",
+            "",
+        ]
+        cohort_rte_rows, week_rte_rows, cell_rte_rows = [], [], []
+        for _, row in rte_df.iterrows():
+            lbl = str(row.get(_lbl_c, "")).strip()
+            if ":" in lbl:          cell_rte_rows.append((lbl, row))
+            elif lbl.startswith("Week"): week_rte_rows.append((lbl, row))
+            else:                   cohort_rte_rows.append((lbl, row))
+
+        def _rte_line(lbl, row):
+            est  = float(row[_est_c])  if _est_c  else np.nan
+            nobs = int(row[_nobs_c]) if (_nobs_c and not pd.isna(row.get(_nobs_c))) else None
+            ns   = f"  n={nobs}" if nobs is not None else ""
+            return f"      {lbl:<36}  {est:>6.4f}{ns}"
+
+        if cohort_rte_rows:
+            report_lines.append("  Between-subjects (Cohort marginal):")
+            for lbl, row in cohort_rte_rows: report_lines.append(_rte_line(lbl, row))
+            report_lines.append("")
+        if week_rte_rows:
+            report_lines.append("  Within-subjects (Week marginal):")
+            for lbl, row in week_rte_rows: report_lines.append(_rte_line(lbl, row))
+            report_lines.append("")
+        if cell_rte_rows:
+            report_lines.append("  Cell RTEs (Cohort \u00d7 Week):")
+            for lbl, row in cell_rte_rows: report_lines.append(_rte_line(lbl, row))
+            report_lines.append("")
+
+    # Pairwise comparisons
+    _cohort_rte_map: Dict[str, float] = {}
+    if not rte_df.empty and _est_c:
+        for _, _crrow in rte_df.iterrows():
+            _crlbl = str(_crrow.get(_lbl_c, "")).strip()
+            if ":" not in _crlbl and not _crlbl.startswith("Week"):
+                _crgrp = _crlbl.replace("Cohort", "", 1).strip()
+                try: _cohort_rte_map[_crgrp] = float(_crrow[_est_c])
+                except Exception: pass
+
+    if not pair_df.empty:
+        _pc_pair = next((c for c in pair_df.columns if "pair" in c.lower()), pair_df.columns[0])
+        _pc_test = next((c for c in pair_df.columns if "test" in c.lower()), None)
+        _pc_stat = next((c for c in ["Statistic","ATS"]  if c in pair_df.columns), None)
+        _pc_df   = next((c for c in ["df","Df"]           if c in pair_df.columns), None)
+        _pc_p    = next((c for c in ["p-value","p.value"] if c in pair_df.columns), None)
+
+        _parsed: List[dict] = []
+        for _, row in pair_df.iterrows():
+            try:
+                plbl = str(row.get(_pc_pair, "")).replace("Cohort", "").replace(":", " vs ")
+                tlbl = str(row.get(_pc_test, "")) if _pc_test else ""
+                stat = float(row[_pc_stat]) if _pc_stat else np.nan
+                df_v = float(row[_pc_df])   if _pc_df   else np.nan
+                pv   = float(row[_pc_p])    if _pc_p    else np.nan
+                _parsed.append({"pair": plbl, "test": tlbl, "stat": stat, "df": df_v, "p_raw": pv})
+            except Exception:
+                _parsed.append({"raw": str(row.to_dict())})
+
+        # Holm correction within each test type
+        _ttype_idx: Dict[str, list] = {}
+        for _pi, _pr in enumerate(_parsed):
+            if "test" in _pr and "p_raw" in _pr:
+                _ttype_idx.setdefault(_pr["test"], []).append(_pi)
+        for _tt, _tidxs in _ttype_idx.items():
+            _adjs = _holm_nw([_parsed[i]["p_raw"] for i in _tidxs])
+            for _ti, _ap in zip(_tidxs, _adjs):
+                _parsed[_ti]["p_adj"] = _ap
+
+        report_lines += [
+            "  Pairwise Group Comparisons  (from nparLD $pair.comparison)",
+            "  Holm-Bonferroni correction applied within each test type (Cohort / Week / Cohort:Week)",
+            "  Effect size: |\u0394RTE| = absolute difference in marginal RTEs (Cohort tests only)",
+            f"  {'Pair':<28}  {'Test':<12}  {'ATS':>11}  {'df':>6}  {'p (raw)':>10}  {'p (Holm)':>10}  {'|\u0394RTE|':>8}  Sig",
+            "  " + "\u2500" * 102,
+        ]
+        for _pr in _parsed:
+            if "raw" in _pr:
+                report_lines.append("  " + _pr["raw"])
+            else:
+                _p_adj = _pr.get("p_adj", _pr["p_raw"])
+                if "Cohort" in _pr["test"] and "Week" not in _pr["test"] and _cohort_rte_map:
+                    _pp = [p.strip() for p in _pr["pair"].split(" vs ")]
+                    if len(_pp) == 2:
+                        _r1 = _cohort_rte_map.get(_pp[0], float("nan"))
+                        _r2 = _cohort_rte_map.get(_pp[1], float("nan"))
+                        _dv = abs(_r1 - _r2) if not (np.isnan(_r1) or np.isnan(_r2)) else float("nan")
+                        _ds = f"{_dv:.3f}" if not np.isnan(_dv) else "N/A"
+                    else:
+                        _ds = "N/A"
+                else:
+                    _ds = "\u2014"
+                report_lines.append(
+                    f"  {_pr['pair']:<28}  {_pr['test']:<12}  ATS={_pr['stat']:>9.4f}  "
+                    f"df={_pr['df']:>6.2f}  {_fp_nw(_pr['p_raw']):>10}  "
+                    f"{_fp_nw(_p_adj):>10}  {_ds:>8}  {_sig_nw(_p_adj)}"
+                )
+        report_lines.append("")
+
+    # Within-group time effects
+    if not time_df.empty:
+        _tc_coh  = "cohort" if "cohort" in time_df.columns else time_df.columns[-1]
+        _tc_stat = next((c for c in ["Statistic","ATS"] if c in time_df.columns), None)
+        _tc_df   = next((c for c in ["df","Df"]          if c in time_df.columns), None)
+        _tc_p    = next((c for c in ["p-value","p.value"] if c in time_df.columns), None)
+        report_lines += [
+            "  Within-Group Time Effects  (ATS per cohort, from nparLD $ANOVA.test.time)",
+            "  " + "\u2500" * 77,
+            f"  {'Cohort':<18}  {'ATS':>10}  {'df':>8}  {'p-value':>12}  Sig",
+            "  " + "\u2500" * 56,
+        ]
+        for _, row in time_df.iterrows():
+            coh  = str(row.get(_tc_coh, "")).strip()
+            stat = float(row[_tc_stat]) if _tc_stat else np.nan
+            df_  = float(row[_tc_df])   if _tc_df   else np.nan
+            pv   = float(row[_tc_p])    if _tc_p    else np.nan
+            report_lines.append(
+                f"  {coh:<18}  {stat:>10.4f}  {df_:>8.4f}  {_fp_nw(pv):>12}  {_sig_nw(pv)}"
+            )
+        report_lines.append("")
+
+    # Per-week MWU
+    if not wkmwu_df.empty:
+        report_lines += [
+            "  Between-Cohort Comparisons at Each Week  (Mann-Whitney U, Holm corrected within each week)",
+            "  Effect size: r_rb = rank-biserial correlation = 1 \u2212 2U/(n\u2081\u00b7n\u2082); range [\u22121, 1], positive = group1 > group2",
+            "  HL = Hodges-Lehmann estimator of location shift (x \u2212 y); 95% CI via wilcox.test",
+            "  " + "\u2500" * 88,
+        ]
+        for _wk_val in sorted(wkmwu_df["week"].unique()):
+            _wk_sub  = wkmwu_df[wkmwu_df["week"] == _wk_val].copy()
+            _p_adjs  = _holm_nw(_wk_sub["p_raw"].tolist())
+            report_lines.append(f"  Week: {int(_wk_val)}")
+            for (_idx, _row), _pa in zip(_wk_sub.iterrows(), _p_adjs):
+                _g1, _n1 = str(_row["g1"]), int(_row["n1"])
+                _g2, _n2 = str(_row["g2"]), int(_row["n2"])
+                _U_v  = float(_row["U"])
+                _pr_v = float(_row["p_raw"])
+                _hl   = float(_row["hl"])
+                _ci_lo = float(_row["ci_lo"])
+                _ci_hi = float(_row["ci_hi"])
+                _rrb  = 1.0 - 2.0 * _U_v / (_n1 * _n2)
+                report_lines.append(
+                    f"    {_g1} (n={_n1}) vs {_g2} (n={_n2}) :  "
+                    f"U={_U_v:.0f}  p_raw={_fp_nw(_pr_v)}  p_holm={_fp_nw(_pa)}  "
+                    f"r_rb={_rrb:+.3f}  {_sig_nw(_pa)}"
+                )
+                if np.isnan(_hl):
+                    report_lines.append("      HL=[N/A]  95%CI [N/A, N/A]")
+                else:
+                    report_lines.append(f"      HL={_hl:+.4f}  95%CI [{_ci_lo:+.4f}, {_ci_hi:+.4f}]")
+            report_lines.append("")
+
+    # Collapsed across-weeks MWU
+    _coll_groups = sorted(weekly["Cohort"].unique())
+    if len(_coll_groups) >= 2:
+        _coll_means = weekly.groupby(["ID", "Cohort"], as_index=False)["TotalChange"].mean()
+        _coll_pairs_raw, _coll_pairs_info = [], []
+        for _ci in range(len(_coll_groups)):
+            for _cj in range(_ci + 1, len(_coll_groups)):
+                _ga, _gb = _coll_groups[_ci], _coll_groups[_cj]
+                _va = _coll_means[_coll_means["Cohort"] == _ga]["TotalChange"].dropna().values
+                _vb = _coll_means[_coll_means["Cohort"] == _gb]["TotalChange"].dropna().values
+                if len(_va) > 0 and len(_vb) > 0:
+                    _U_c, _p_c = stats.mannwhitneyu(_va, _vb, alternative="two-sided")
+                    _U_c = float(_U_c)
+                    _rrb_c = 1.0 - 2.0 * _U_c / (len(_va) * len(_vb))
+                    _hl_c  = float(np.median(np.subtract.outer(_va, _vb).ravel()))
+                    _rng_c = np.random.default_rng(42)
+                    _bt_c  = np.array([
+                        np.median(np.subtract.outer(
+                            _rng_c.choice(_va, size=len(_va), replace=True),
+                            _rng_c.choice(_vb, size=len(_vb), replace=True)
+                        ).ravel()) for _ in range(2000)
+                    ])
+                    _ci_lo_c = float(np.percentile(_bt_c, 2.5))
+                    _ci_hi_c = float(np.percentile(_bt_c, 97.5))
+                else:
+                    _U_c = float("nan"); _p_c = 1.0
+                    _rrb_c = float("nan"); _hl_c = float("nan")
+                    _ci_lo_c = float("nan"); _ci_hi_c = float("nan")
+                _coll_pairs_raw.append(_p_c)
+                _coll_pairs_info.append((_ga, len(_va), _gb, len(_vb), _U_c, _p_c, _rrb_c, _hl_c, _ci_lo_c, _ci_hi_c))
+        _coll_adj = _holm_nw(_coll_pairs_raw)
+        report_lines += [
+            "  Between-Cohort Comparisons Collapsed Across Weeks  (per-animal mean; MWU, Holm corrected)",
+            "  Effect size: r_rb = rank-biserial correlation = 1 \u2212 2U/(n\u2081\u00b7n\u2082); range [\u22121, 1], positive = group1 > group2",
+            "  HL = Hodges-Lehmann estimator of location shift (x \u2212 y); 95% CI via bootstrap percentile (2000 resamples)",
+            "  " + "\u2500" * 88,
+        ]
+        for (_ga, _na, _gb, _nb, _U_c, _pr_c, _rrb_c, _hl_c, _ci_lo_c, _ci_hi_c), _pa_c in zip(_coll_pairs_info, _coll_adj):
+            _rrb_s = f"{_rrb_c:+.3f}" if not np.isnan(_rrb_c) else "N/A"
+            _u_s   = f"{_U_c:.0f}"    if not np.isnan(_U_c)   else "N/A"
+            _hl_s  = f"{_hl_c:+.4f}"  if not np.isnan(_hl_c)  else "N/A"
+            _ci_s  = (f"[{_ci_lo_c:+.4f}, {_ci_hi_c:+.4f}]"
+                      if not (np.isnan(_ci_lo_c) or np.isnan(_ci_hi_c)) else "[N/A]")
+            report_lines.append(
+                f"    {_ga} (n={_na}) vs {_gb} (n={_nb}) :  "
+                f"U={_u_s}  p_raw={_fp_nw(_pr_c)}  p_holm={_fp_nw(_pa_c)}  "
+                f"r_rb={_rrb_s}  {_sig_nw(_pa_c)}"
+            )
+            report_lines.append(f"      HL={_hl_s}  95%CI {_ci_s}")
+        report_lines.append("")
+
+    report_lines += [
+        "  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10", "",
+        "=" * W, "  End of nparLD Report", "=" * W,
+    ]
+    report_str = "\n".join(report_lines)
+
+    # ── Save report ────────────────────────────────────────────────────────
+    report_path: Optional[Path] = None
+    if save_path is not None:
+        sp = Path(save_path).with_suffix(".txt")
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(report_str, encoding="utf-8")
+        print(f"  Saved \u2192 {sp.relative_to(_ROOT)}")
+        report_path = sp
+
+    # Build p_values convenience DataFrame
+    p_values: Optional[pd.DataFrame] = None
+    if not ats_df.empty:
+        _p_col_ats  = next((c for c in ["p-value","p.value","Pr(>F)"] if c in ats_df.columns), None)
+        _s_col_ats  = next((c for c in ["Statistic","ATS","F"]         if c in ats_df.columns), None)
+        _d1_col_ats = next((c for c in ["df1","df","Df"]                if c in ats_df.columns), None)
+        if _p_col_ats and "effect" in ats_df.columns:
+            _pv_cols   = ["effect", _p_col_ats]
+            _pv_rename = {"effect": "Effect", _p_col_ats: "p_value"}
+            if _s_col_ats:
+                _pv_cols.append(_s_col_ats)
+                _pv_rename[_s_col_ats] = "Statistic"
+            if _d1_col_ats:
+                _pv_cols.append(_d1_col_ats)
+                _pv_rename[_d1_col_ats] = "df"
+            p_values = ats_df[_pv_cols].rename(columns=_pv_rename)
+
+    return {
+        "r_output"   : r_output,
+        "report_str" : report_str,
+        "report_path": report_path,
+        "n_subjects" : n_subjects,
+        "cohorts"    : cohort_levels,
+        "weeks"      : week_levels,
+        "p_values"   : p_values,
+    }
+
+
 def figure_2() -> None:
     """Total Weight Change over Days — six panels for Figure 2.
 
@@ -1742,6 +2402,24 @@ def figure_2() -> None:
         )
     else:
         print("[2f] SKIPPED — fewer than 2 slope cohorts available")
+
+    # ── 2g: nparLD Total Change — 0%, 2% (6 animals), 5-wk slow ramp ────────
+    _nparld_specs: List[Tuple[str, pd.DataFrame, str]] = []
+    if MASTER_0PCT.exists():
+        _nparld_specs.append(("0%",           _load_master_csv(MASTER_0PCT),  "nonramp"))
+    if MASTER_2PCT.exists():
+        _nparld_specs.append(("2% 6 animals", _load_master_csv(MASTER_2PCT),  "nonramp"))
+    if MASTER_RAMP.exists():
+        _nparld_specs.append(("ramp",          _load_master_csv(MASTER_RAMP),  "ramp"))
+
+    if len(_nparld_specs) >= 2:
+        print(f"\n[2g] nparLD Total Change ({len(_nparld_specs)} cohorts) ...")
+        _fig2_run_nparld_total_change(
+            _nparld_specs,
+            save_path=OUT_FIG2 / "nparld_total_change",
+        )
+    else:
+        print("[2g] SKIPPED — fewer than 2 cohorts available")
 
     print("\n[OK] Figure 2 complete.")
 
@@ -2756,6 +3434,229 @@ def figure_3() -> None:
 
     print("\n[OK] Figure 3 complete.")
 
+
+# =============================================================================
+# LICK DETECTION PIPELINE  (shared infrastructure for Figure 4 and beyond)
+#
+# These functions are copied verbatim from lick_analysis.py / across_cohort_lick.py
+# so that figure_maker.py remains fully self-contained.
+#
+# Detection pipeline (in order):
+#   1. load_capacitive_csv         — load CSV, derive Time_sec column
+#   2. get_sensor_columns          — sorted Sensor_N column list
+#   3. compute_sensor_KDE          — KDE mode per sensor (with disk cache)
+#   4. compute_KDE_normalizations  — abs((value - KDE) / KDE) per sensor
+#   5. compute_fixed_thresholds    — fixed 0.01 threshold Series
+#   6. detect_events_above_threshold — find_peaks-based lick event detection
+# =============================================================================
+
+def load_capacitive_csv(csv_path: Path) -> pd.DataFrame:
+    """Load and clean a capacitive CSV file.
+
+    Returns DataFrame with Time_sec column and sensor readings.
+    """
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV not found: {csv_path}")
+
+    df = pd.read_csv(csv_path)
+
+    if "Arduino_Timestamp" not in df.columns:
+        raise ValueError(f"No Arduino_Timestamp column found in {csv_path}")
+
+    # Clean timestamp data
+    df["Arduino_Timestamp"] = pd.to_numeric(df["Arduino_Timestamp"], errors="coerce")
+    df = df.dropna(subset=["Arduino_Timestamp"]).copy()
+    df["Arduino_Timestamp"] = df["Arduino_Timestamp"].astype("int64")
+
+    # Compute time in seconds
+    df["Time_sec"] = df["Arduino_Timestamp"] / 1000.0
+
+    return df
+
+
+def get_sensor_columns(df: pd.DataFrame) -> List[str]:
+    """Return list of sensor columns in sorted numeric order."""
+    sensor_cols = [c for c in df.columns
+                   if c.startswith("Sensor_") and not c.endswith("_deviation")]
+
+    def key(c: str) -> int:
+        try:
+            return int(c.split("_")[1])
+        except (IndexError, ValueError):
+            return 0
+
+    sensor_cols.sort(key=key)
+    return sensor_cols
+
+
+def compute_sensor_KDE(
+    df: pd.DataFrame,
+    sensor_cols: List[str],
+    cache_file: Optional[Path] = None,
+    verbose: bool = False,
+) -> pd.Series:
+    """Compute the KDE (Kernel Density Estimation) peak for each sensor column.
+
+    Returns a Series indexed by sensor column names with their KDE peak values.
+    The KDE peak represents the most probable value in the distribution.
+
+    Parameters
+    ----------
+    df          : DataFrame containing sensor data
+    sensor_cols : list of sensor column names
+    cache_file  : optional path to save/load cached KDE values (speeds up re-runs)
+    verbose     : whether to print per-sensor processing info
+    """
+    # Try to load from cache if available
+    if cache_file and Path(cache_file).exists():
+        try:
+            cached_df  = pd.read_csv(cache_file, index_col=0)
+            cached_kdes = cached_df["KDE_Peak"]
+            if all(col in cached_kdes.index for col in sensor_cols):
+                if verbose:
+                    print(f"  \u2713 Loaded KDE values from cache: {Path(cache_file).name}")
+                return cached_kdes[sensor_cols]
+            else:
+                if verbose:
+                    print("  \u26a0 Cache incomplete, recomputing KDE values")
+        except Exception as e:
+            if verbose:
+                print(f"  \u26a0 Error loading cache ({e}), recomputing KDE values")
+
+    kdes: dict = {}
+    for col in sensor_cols:
+        series = pd.to_numeric(df[col], errors="coerce").dropna()
+        if len(series) > 1:
+            try:
+                kde     = stats.gaussian_kde(series)
+                x_eval  = np.linspace(series.min(), series.max(), 1000)
+                density = kde(x_eval)
+                kdes[col] = float(x_eval[np.argmax(density)])
+                if verbose:
+                    print(f"  {col}: KDE={kdes[col]:.2f}, mean={series.mean():.2f}, "
+                          f"std={series.std():.2f}, min={series.min():.2f}, max={series.max():.2f}")
+            except Exception:
+                kdes[col] = float(series.mean())
+                if verbose:
+                    print(f"  {col}: KDE failed, using mean={kdes[col]:.2f}")
+        else:
+            kdes[col] = float(series.iloc[0]) if len(series) == 1 else None
+            if verbose:
+                print(f"  {col}: Insufficient data, KDE={kdes[col]}")
+
+    result = pd.Series(kdes)
+
+    if cache_file is not None:
+        try:
+            Path(cache_file).parent.mkdir(parents=True, exist_ok=True)
+            result.to_csv(cache_file, header=["KDE_Peak"])
+            if verbose:
+                print(f"  \u2713 Saved KDE values to cache: {Path(cache_file).name}")
+        except Exception as e:
+            if verbose:
+                print(f"  \u26a0 Could not save cache: {e}")
+
+    return result
+
+
+def compute_KDE_normalizations(
+    df: pd.DataFrame,
+    sensor_cols: List[str],
+    sensor_kdes: pd.Series,
+) -> pd.DataFrame:
+    """Compute KDE normalization for each sensor: abs((value \u2212 KDE) / KDE).
+
+    For each sensor column, creates a new column with suffix ``_deviation``
+    containing the absolute normalised value: abs((capacitance \u2212 KDE) / KDE).
+
+    Returns a copy of the dataframe with the new normalisation columns added.
+    """
+    df_out = df.copy()
+    for col in sensor_cols:
+        kde_val = sensor_kdes[col]
+        dev_col = f"{col}_deviation"
+        if kde_val is not None and kde_val != 0 and col in df.columns:
+            sensor_series = pd.to_numeric(df[col], errors="coerce")
+            df_out[dev_col] = abs((sensor_series - kde_val) / kde_val)
+        else:
+            df_out[dev_col] = pd.NA
+    return df_out
+
+
+def compute_fixed_thresholds(
+    sensor_cols: List[str],
+    fixed_threshold: float = 0.01,
+) -> pd.Series:
+    """Return a fixed-threshold Series (default 0.01) for every sensor.
+
+    Uses the EXACT lick detection algorithm from lick_detection.py — a fixed
+    threshold applied to KDE-normalised deviations (not a dynamic z-score).
+    """
+    return pd.Series({col: fixed_threshold for col in sensor_cols})
+
+
+def detect_events_above_threshold(
+    df: pd.DataFrame,
+    sensor_cols: List[str],
+    thresholds: pd.Series,
+) -> pd.DataFrame:
+    """Detect lick events where KDE-normalised deviation exceeds threshold.
+
+    Uses ``scipy.signal.find_peaks`` for robust peak detection in the discrete
+    sampled deviation signal.  For each sensor produces three columns:
+
+      ``{sensor}_event``      bool   — True at detected peak samples
+      ``{sensor}_deviation``  float  — KDE-normalised deviation value
+      ``{sensor}_derivative`` float  — forward-difference derivative
+
+    Parameters
+    ----------
+    df          : DataFrame with Time_sec and ``{sensor}_deviation`` columns
+    sensor_cols : list of sensor column names (e.g. ``['Sensor_1', ...]``)
+    thresholds  : Series of per-sensor threshold values
+                  (from ``compute_fixed_thresholds``)
+    """
+    if not HAS_SCIPY_SIGNAL:
+        raise ImportError("scipy.signal.find_peaks is required for lick detection. "
+                          "Install scipy: pip install scipy")
+
+    result = pd.DataFrame({"Time_sec": df["Time_sec"]})
+
+    for sensor_col in sensor_cols:
+        dev_col   = f"{sensor_col}_deviation"
+        event_col = f"{sensor_col}_event"
+        deriv_col = f"{sensor_col}_derivative"
+
+        if dev_col not in df.columns:
+            result[event_col] = False
+            result[dev_col]   = np.nan
+            result[deriv_col] = np.nan
+            continue
+
+        threshold = thresholds.get(sensor_col)
+        if threshold is None or not np.isfinite(threshold):
+            result[event_col] = False
+            result[dev_col]   = df[dev_col]
+            result[deriv_col] = np.nan
+            continue
+
+        deviations = pd.to_numeric(df[dev_col], errors="coerce")
+        result[dev_col] = deviations
+
+        # Forward-difference derivative
+        clean_dev  = deviations.fillna(0).values
+        derivative = np.zeros_like(clean_dev)
+        derivative[:-1] = np.diff(clean_dev)
+        derivative[-1]  = derivative[-2] if len(derivative) > 1 else 0.0
+        result[deriv_col] = derivative
+
+        # Peak detection
+        peaks, _ = find_peaks(clean_dev, height=threshold, distance=1)
+        peak_mask = np.zeros(len(clean_dev), dtype=bool)
+        peak_mask[peaks] = True
+        result[event_col] = peak_mask
+
+    return result
 
 # =============================================================================
 # FIGURE 4 — (add description when porting)
