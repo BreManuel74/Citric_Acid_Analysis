@@ -3686,6 +3686,174 @@ def detect_events_above_threshold(
 #   5-Week Ramp  : LICK_MASTER_RAMP, CAP_LOGS_RAMP
 # =============================================================================
 
+def _fig4_generate_lick_descriptive_stats_report(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    save_report: bool = True,
+) -> None:
+    """Generate descriptive statistics report for lick analysis DVs across all loaded cohorts.
+
+    For each cohort, computes per-week (or per-recording-date) descriptive statistics:
+      - Total_Licks, Fecal_Count: mean, median, SD, variance, 95% CI (t-dist)
+      - First_5min_Lick_Pct: mean, median, SD, variance, 95% CI (t-dist)
+
+    Parameters
+    ----------
+    cohort_dfs : Dict[str, pd.DataFrame]
+        Dictionary mapping cohort label to DataFrame with columns:
+        ID, Date, Sex, CA%, Cohort, Sensor, Total_Licks, First_5min_Lick_Pct, Fecal_Count, Week
+    save_report : bool, optional
+        If True, save report to a text file. Default is True.
+    """
+    from datetime import datetime as _dt
+    from scipy.stats import t as _t_dist
+
+    print("\n" + "=" * 80)
+    print("LICK ANALYSIS — DESCRIPTIVE STATISTICS")
+    print("=" * 80)
+
+    def _ci95(arr):
+        """Compute 95% CI using t-distribution."""
+        n = len(arr)
+        if n < 2:
+            return float('nan'), float('nan')
+        se = float(np.std(arr, ddof=1)) / np.sqrt(n)
+        margin = float(_t_dist.ppf(0.975, df=n - 1)) * se
+        mean = float(np.mean(arr))
+        return mean - margin, mean + margin
+
+    all_reports = []
+
+    for cohort_label, df in cohort_dfs.items():
+        if df.empty:
+            print(f"\n[{cohort_label}] SKIPPED — empty DataFrame")
+            continue
+
+        print(f"\n[{cohort_label}]")
+        df_sorted = df.sort_values(["ID", "Date"]).copy()
+
+        # Group by Week (already assigned by _fig4_load_lick_cohorts)
+        weeks = sorted(df_sorted["Week"].dropna().unique())
+        if not weeks:
+            print(f"  No weeks found")
+            continue
+
+        cohort_report_lines = [
+            "=" * 80,
+            f"LICK DESCRIPTIVE STATISTICS — {cohort_label.upper()}",
+            "=" * 80,
+            f"Generated: {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Weeks: {len(weeks)} (0–{max(weeks)})",
+            "=" * 80,
+            "",
+        ]
+
+        dv_specs = [
+            ("Total_Licks",           "Total Licks",              "count"),
+            ("Fecal_Count",           "Fecal Count",              "count"),
+            ("First_5min_Lick_Pct",   "% Licks in First 5 Min",   "%"),
+        ]
+
+        for dv_col, dv_label, dv_type in dv_specs:
+            cohort_report_lines += [
+                "\u2500" * 70,
+                f"  {dv_label.upper()}  ({dv_type})",
+                "\u2500" * 70,
+                f"  {'Week':>6}  {'n':>4}  {'Mean':>10}  {'Median':>10}  "
+                f"{'SD':>10}  {'Var':>10}  {'95% CI':>25}",
+                f"  {'-' * 68}",
+            ]
+
+            all_week_vals = []
+            for w in weeks:
+                week_df = df_sorted[df_sorted["Week"] == w]
+                if week_df.empty:
+                    cohort_report_lines.append(
+                        f"  {w:>6}  {0:>4}  {'N/A':>10}  {'N/A':>10}  "
+                        f"{'N/A':>10}  {'N/A':>10}  {'N/A':>25}"
+                    )
+                    continue
+
+                # Extract per-animal values (one value per animal per week)
+                arr = week_df[dv_col].values
+                arr = np.asarray(arr, dtype=float)
+                arr_valid = arr[~np.isnan(arr)]
+                all_week_vals.append(arr_valid)
+
+                if len(arr_valid) == 0:
+                    cohort_report_lines.append(
+                        f"  {w:>6}  {0:>4}  {'N/A':>10}  {'N/A':>10}  "
+                        f"{'N/A':>10}  {'N/A':>10}  {'N/A':>25}"
+                    )
+                    continue
+
+                n = len(arr_valid)
+                mean_v = float(np.mean(arr_valid))
+                median_v = float(np.median(arr_valid))
+                sd_v = float(np.std(arr_valid, ddof=1)) if n >= 2 else float('nan')
+                var_v = float(np.var(arr_valid, ddof=1)) if n >= 2 else float('nan')
+                ci_lo, ci_hi = _ci95(arr_valid)
+                ci_str = f"[{ci_lo:.3f}, {ci_hi:.3f}]" if not np.isnan(ci_lo) else "N/A"
+
+                cohort_report_lines.append(
+                    f"  {w:>6}  {n:>4}  {mean_v:>10.3f}  {median_v:>10.3f}  "
+                    f"{sd_v:>10.3f}  {var_v:>10.3f}  {ci_str:>25}"
+                )
+
+            # Collapsed "All" row — mean per animal across all weeks
+            if all_week_vals:
+                # Compute per-animal mean across all weeks
+                animals_in_cohort = df_sorted["ID"].unique()
+                per_animal_means = []
+                for animal_id in animals_in_cohort:
+                    animal_all_vals = df_sorted[df_sorted["ID"] == animal_id][dv_col].values
+                    animal_all_vals = np.asarray(animal_all_vals, dtype=float)
+                    animal_valid = animal_all_vals[~np.isnan(animal_all_vals)]
+                    if len(animal_valid) > 0:
+                        per_animal_means.append(float(np.mean(animal_valid)))
+                
+                _all_valid = np.asarray(per_animal_means, dtype=float)
+                if len(_all_valid) > 0:
+                    _an = len(_all_valid)
+                    _am = float(np.mean(_all_valid))
+                    _amed = float(np.median(_all_valid))
+                    _asd = float(np.std(_all_valid, ddof=1)) if _an >= 2 else float('nan')
+                    _avar = float(np.var(_all_valid, ddof=1)) if _an >= 2 else float('nan')
+                    _aci_lo, _aci_hi = _ci95(_all_valid)
+                    _aci_str = f"[{_aci_lo:.3f}, {_aci_hi:.3f}]" if not np.isnan(_aci_lo) else "N/A"
+
+                    cohort_report_lines.append(f"  {'-' * 68}")
+                    cohort_report_lines.append(
+                        f"  {'All':>6}  {_an:>4}  {_am:>10.3f}  {_amed:>10.3f}  "
+                        f"{_asd:>10.3f}  {_avar:>10.3f}  {_aci_str:>25}"
+                    )
+
+            cohort_report_lines.append("")
+
+        cohort_report_lines += ["=" * 80, ""]
+        all_reports.append("\n".join(cohort_report_lines))
+
+    # ── Save combined report ──────────────────────────────────────────────
+    if save_report and all_reports:
+        lines = [
+            "=" * 80,
+            "FIGURE 4 — LICK DESCRIPTIVE STATISTICS REPORT",
+            "=" * 80,
+            f"Generated: {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "=" * 80,
+            "",
+        ]
+        lines.extend("\n".join(all_reports).split("\n"))
+        lines += ["=" * 80, "END OF REPORT", "=" * 80, ""]
+
+        rpt_path = OUT_FIG4 / f"fig4_lick_descriptive_stats.txt"
+        try:
+            rpt_path.parent.mkdir(parents=True, exist_ok=True)
+            rpt_path.write_text("\n".join(lines), encoding='utf-8')
+            print(f"\n[Saved] Descriptive stats report → {rpt_path.name}")
+        except Exception as _e:
+            print(f"\n[WARNING] Could not save report: {_e}")
+
+
 def _fig4_process_cohort_cap_files(
     master_csv: Path,
     capacitive_files: List[Path],
@@ -3817,7 +3985,6 @@ def _fig4_load_lick_cohorts(
         cohort_dfs[label] = df
         print(f"    → {df['ID'].nunique()} animals, {df['Week'].nunique()} weeks")
     return cohort_dfs
-
 
 def _fig4b_plot_sensor_deviation_with_events(
     cap_log_path: Path,
@@ -4068,6 +4235,10 @@ def figure_4() -> None:
         print(f"\n[4g] Fecal Count per week ...")
         _fig4g_plot_fecal_count(
             _cohort_dfs, save_path=OUT_FIG4 / "fig4g_fecal_count")
+
+        # ── Generate descriptive statistics report ──────────────────────
+        print(f"\n[4 Stats] Generating descriptive statistics report ...")
+        _fig4_generate_lick_descriptive_stats_report(_cohort_dfs, save_report=True)
     else:
         print("[4c/4e/4g] SKIPPED \u2014 no cohort data loaded")
 
