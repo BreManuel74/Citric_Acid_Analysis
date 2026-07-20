@@ -3662,15 +3662,162 @@ def detect_events_above_threshold(
 # =============================================================================
 # FIGURE 4 — Lick Detection
 #
-# Panel:
-#   4B — KDE-normalised deviation trace for a single sensor, first 5 seconds,
-#        with detected lick events overlaid.
-#        Sensor_10 (Animal A2R, 2/25/26, 2% CA 6 animals cohort).
-#        Fixed detection threshold = 0.01 (consistent with lick_detection.py).
+# Panels:
+#   4B — Single sensor KDE-normalised deviation, first 5 seconds, detected events.
+#        Sensor_10 (A2R, 2/25/26, 2% CA 6 animals).  Fixed threshold 0.01.
+#   4C — Total Licks per animal per week, mean ± SEM.  3 cohorts.
+#   4E — % of Licks in First 5 Minutes per week, mean ± SEM.  3 cohorts.
+#   4G — Fecal Count per week, mean ± SEM.  3 cohorts.
 #
-# Source data : capacitive_log_2026-2-25.csv  (DIR_2PCT)
-# Animal      : A2R  →  selected_sensor = 10  (from 2%_lick_data.csv)
+# Cohorts for 4C / 4E / 4G:  0% CA, 2% CA (6 animals), 5-Week Ramp
+#
+# Data pipeline (4C / 4E / 4G)
+# Ported verbatim from across_cohort_lick.py _run_lick_all3_menu
+# options 1 (Total Licks), 3 (% First 5 min), 4 (Fecal Count):
+#   load_capacitive_csv  → compute_sensor_KDE (disk-cached)
+#   → compute_KDE_normalizations → compute_fixed_thresholds (0.01)
+#   → detect_events_above_threshold (first 30 min only)
+#   → per-animal: Total_Licks, First_5min_Lick_Pct, Fecal_Count
+#   → assign sequential Week numbers from sorted unique recording dates
+#
+# Source CSVs for 4C / 4E / 4G:
+#   0% CA        : LICK_MASTER_0PCT, CAP_LOGS_0PCT
+#   2% CA        : LICK_MASTER_2PCT, CAP_LOGS_2PCT
+#   5-Week Ramp  : LICK_MASTER_RAMP, CAP_LOGS_RAMP
 # =============================================================================
+
+def _fig4_process_cohort_cap_files(
+    master_csv: Path,
+    capacitive_files: List[Path],
+    ca_percent: float,
+    cohort_label: str,
+    fixed_threshold: float = 0.01,
+) -> pd.DataFrame:
+    """Process all capacitive log files for one cohort; return per-animal records.
+
+    Ported verbatim from across_cohort_lick.py process_cohort_capacitive_files,
+    trimmed to only the columns needed for Figures 4C, 4E, 4G.
+
+    Each capacitive log filename encodes the recording date in the form
+    ``capacitive_log_YYYY-M-D.csv``.  That date is matched against the lick
+    master CSV to identify which animal was attached to which sensor.  One row
+    per animal per session is returned containing:
+        ID, Date, Sex, CA%, Cohort, Sensor, Total_Licks,
+        First_5min_Lick_Pct, Fecal_Count
+    """
+    master_df = pd.read_csv(master_csv)
+    master_df.columns = master_df.columns.str.strip().str.lower()
+    has_sex = "sex" in master_df.columns
+    all_records: List[dict] = []
+
+    for cap_file in sorted(capacitive_files):
+        if not cap_file.exists():
+            continue
+
+        # ── Date extraction from filename ──────────────────────────────────
+        date_str: Optional[str] = None
+        stem = cap_file.stem
+        if "capacitive_log_" in stem:
+            date_part = stem.split("capacitive_log_")[1]
+            try:
+                yr, mo, dy = [int(x) for x in date_part.split("-")]
+                date_str = f"{mo}/{dy}/{str(yr)[2:]}"
+            except Exception:
+                continue
+        if date_str is None:
+            continue
+
+        # ── Lick detection pipeline ─────────────────────────────────────────
+        try:
+            cap_df          = load_capacitive_csv(cap_file)
+            all_sensors     = get_sensor_columns(cap_df)
+            _cache          = cap_file.parent / "kde_cache" / (cap_file.stem + "_kde_cache.csv")
+            sensor_kdes     = compute_sensor_KDE(cap_df, all_sensors, cache_file=_cache, verbose=False)
+            cap_df          = compute_KDE_normalizations(cap_df, all_sensors, sensor_kdes)
+            thresh          = compute_fixed_thresholds(all_sensors, fixed_threshold)
+            events_df       = detect_events_above_threshold(cap_df, all_sensors, thresh)
+            # Restrict to first 30 minutes — exact behaviour from source
+            events_df       = events_df[events_df["Time_sec"] < 1800].copy()
+        except Exception as e:
+            print(f"  [WARNING] {cap_file.name}: {e}")
+            continue
+
+        # ── Per-sensor lick counts ──────────────────────────────────────────
+        s_licks = {}
+        for sc in all_sensors:
+            ec = f"{sc}_event"
+            s_licks[sc] = int(events_df[ec].sum()) if ec in events_df.columns else 0
+
+        # ── Match animals via master CSV ────────────────────────────────────
+        master_df["_date_norm"] = master_df["date"].astype(str).str.strip()
+        date_rows = master_df[master_df["_date_norm"] == date_str].copy()
+        if date_rows.empty:
+            continue
+
+        for _, arow in date_rows.iterrows():
+            animal_id  = str(arow["animal_id"]).strip()
+            sensor_num = int(arow["selected_sensors"])
+            sc         = f"Sensor_{sensor_num}"
+
+            n_licks     = s_licks.get(sc, 0)
+
+            ec = f"{sc}_event"
+            if ec in events_df.columns and n_licks >= 2:
+                f5          = int((events_df[ec] & (events_df["Time_sec"] < 300)).sum())
+                first5_pct  = f5 / n_licks * 100.0
+            else:
+                first5_pct  = np.nan          # < 2 licks: exclude from frontloading mean
+
+            sex = str(arow.get("sex", "Unknown")).strip().upper() if has_sex else "Unknown"
+            sex = sex if sex.startswith(("M", "F")) else "Unknown"
+
+            all_records.append({
+                "ID":                  animal_id,
+                "Date":                date_str,
+                "Sex":                 sex,
+                "CA%":                 ca_percent,
+                "Cohort":              cohort_label,
+                "Sensor":              sensor_num,
+                "Total_Licks":         n_licks,
+                "First_5min_Lick_Pct": first5_pct,
+                "Fecal_Count":         pd.to_numeric(
+                    arow.get("fecal_count", np.nan), errors="coerce"),
+            })
+
+    return pd.DataFrame(all_records) if all_records else pd.DataFrame()
+
+
+def _fig4_load_lick_cohorts(
+    cohort_specs: List[Tuple[str, Path, List[Path], float]],
+) -> Dict[str, pd.DataFrame]:
+    """Load and process lick data for each cohort.
+
+    Ported from across_cohort_lick.py load_lick_cohorts.
+    Assigns 0-based sequential Week numbers from sorted unique recording dates.
+
+    Parameters
+    ----------
+    cohort_specs : list of (label, master_csv_path, cap_log_list, ca_percent)
+    """
+    cohort_dfs: Dict[str, pd.DataFrame] = {}
+    for label, master_csv, cap_logs, ca_pct in cohort_specs:
+        if not master_csv.exists():
+            print(f"  [SKIP] {label}: master CSV not found"); continue
+        avail = [p for p in cap_logs if p.exists()]
+        if not avail:
+            print(f"  [SKIP] {label}: no capacitive logs found"); continue
+        print(f"  Loading {label} ({len(avail)} logs) ...")
+        df = _fig4_process_cohort_cap_files(master_csv, avail, ca_pct, label)
+        if df.empty:
+            print(f"  [WARN] {label}: no records"); continue
+        df["Date"] = pd.to_datetime(df["Date"], format="%m/%d/%y", errors="coerce")
+        df = df.sort_values(["ID", "Date"]).reset_index(drop=True)
+        unique_dates = sorted(df["Date"].dropna().unique())
+        df["Week"] = df["Date"].map({d: i for i, d in enumerate(unique_dates)})
+        cohort_dfs[label] = df
+        print(f"    → {df['ID'].nunique()} animals, {df['Week'].nunique()} weeks")
+    return cohort_dfs
+
 
 def _fig4b_plot_sensor_deviation_with_events(
     cap_log_path: Path,
@@ -3678,61 +3825,34 @@ def _fig4b_plot_sensor_deviation_with_events(
     fixed_threshold: float = 0.01,
     save_path: Optional[Path] = None,
 ) -> plt.Figure:
-    """
-    Figure 4B: Single sensor KDE-normalised deviation with detected lick events.
+    """Figure 4B: Single sensor KDE-normalised deviation + detected lick events.
 
     Ported verbatim from lick_detection.py plot_single_sensor_deviation_with_events.
-    Runs the full lick detection pipeline then plots the first 5 seconds.
-
-    Pipeline
-    --------
-    load_capacitive_csv → compute_sensor_KDE (all sensors, disk-cached)
-    → compute_KDE_normalizations → compute_fixed_thresholds
-    → detect_events_above_threshold → plot
-
-    Parameters
-    ----------
-    cap_log_path    : Path to capacitive_log_*.csv
-    sensor_col      : e.g. 'Sensor_10'
-    fixed_threshold : KDE-normalised deviation threshold for peak detection (default 0.01)
-    save_path       : stem path (no extension); SVG saved via save_fig()
+    Runs the full lick detection pipeline, then plots the first 5 seconds.
     """
-    # ── Load raw capacitive data ────────────────────────────────────────────
-    cap_df = load_capacitive_csv(cap_log_path)
-    sensor_cols_all = get_sensor_columns(cap_df)
+    cap_df          = load_capacitive_csv(cap_log_path)
+    all_sensors     = get_sensor_columns(cap_df)
+    _cache          = cap_log_path.parent / "kde_cache" / (cap_log_path.stem + "_kde_cache.csv")
+    sensor_kdes     = compute_sensor_KDE(cap_df, all_sensors, cache_file=_cache, verbose=False)
+    cap_df          = compute_KDE_normalizations(cap_df, all_sensors, sensor_kdes)
+    thresh          = compute_fixed_thresholds([sensor_col], fixed_threshold)
+    events_df       = detect_events_above_threshold(cap_df, [sensor_col], thresh)
 
-    # ── KDE computation (uses disk cache if present) ────────────────────────
-    _cache = cap_log_path.parent / "kde_cache" / (cap_log_path.stem + "_kde_cache.csv")
-    sensor_kdes = compute_sensor_KDE(cap_df, sensor_cols_all,
-                                     cache_file=_cache, verbose=False)
-
-    # ── Normalise deviations + detect events ───────────────────────────────
-    cap_df    = compute_KDE_normalizations(cap_df, sensor_cols_all, sensor_kdes)
-    thresh    = compute_fixed_thresholds([sensor_col], fixed_threshold=fixed_threshold)
-    events_df = detect_events_above_threshold(cap_df, [sensor_col], thresh)
-
-    # ── Plot first 5 seconds ────────────────────────────────────────────────
     dev_col   = f"{sensor_col}_deviation"
     event_col = f"{sensor_col}_event"
     t_min, t_max = 0.0, 5.0
-
     mask   = (events_df["Time_sec"] >= t_min) & (events_df["Time_sec"] <= t_max)
     df_win = events_df.loc[mask]
 
     fig, ax = plt.subplots()
-
     ax.plot(df_win["Time_sec"], df_win[dev_col],
             color="#747575", linewidth=0.8, label="Capacitance")
-
     if event_col in df_win.columns:
-        ev_mask = df_win[event_col].astype(bool)
-        ax.scatter(df_win.loc[ev_mask, "Time_sec"],
-                   df_win.loc[ev_mask, dev_col],
+        ev = df_win[event_col].astype(bool)
+        ax.scatter(df_win.loc[ev, "Time_sec"], df_win.loc[ev, dev_col],
                    color="#eb0d8c", s=15, zorder=5, label="Detected events")
-
-    ax.axhline(y=fixed_threshold, color="#2278b5",
-               linestyle="-", linewidth=1.0, label="Threshold")
-
+    ax.axhline(y=fixed_threshold, color="#2278b5", linestyle="-", linewidth=1.0,
+               label="Threshold")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Capacitance (a.u.)")
     ax.set_title(f"{sensor_col} \u2014 2% CA (A2R, 2/25/26)")
@@ -3741,11 +3861,9 @@ def _fig4b_plot_sensor_deviation_with_events(
     ax.set_ylim(0.00, 0.03)
     ax.margins(x=0)
     ax.grid(False)
-
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(direction="in", which="both", length=4)
-
     fig.tight_layout()
 
     if save_path is not None:
@@ -3754,7 +3872,151 @@ def _fig4b_plot_sensor_deviation_with_events(
         plt.show()
     else:
         plt.close(fig)
+    return fig
 
+
+def _fig4c_plot_total_licks(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    save_path: Optional[Path] = None,
+) -> plt.Figure:
+    """Figure 4C: Total Licks per animal per week, mean ± SEM, 3 cohorts.
+
+    Ported from across_cohort_lick.py plot_lick_measure_by_cohort
+    (option 1 of _run_lick_all3_menu, measure='Total_Licks', group_by_sex=False).
+    """
+    frames   = [df.copy() for df in cohort_dfs.values()]
+    combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    fig, ax = plt.subplots()
+    if not combined.empty and "Total_Licks" in combined.columns:
+        for lbl in sorted(cohort_dfs.keys()):
+            grp  = combined[combined["Cohort"] == lbl]
+            if grp.empty: continue
+            wks  = grp.groupby("Week")["Total_Licks"].agg(["mean", "sem", "count"]).reset_index()
+            n_pw = int(wks["count"].iloc[0]) if len(wks) > 0 else 0
+            ax.errorbar(wks["Week"], wks["mean"], yerr=wks["sem"],
+                        label=f"{lbl} (n={n_pw}/week)",
+                        marker="o", linewidth=0.9, capsize=5,
+                        color=cohort_color(lbl))
+
+    weeks = sorted(combined["Week"].dropna().unique()) if not combined.empty else []
+    ax.set_xticks(weeks)
+    ax.set_xticklabels([str(int(w) + 1) for w in weeks])
+    ax.set_xlabel("Week")
+    ax.set_ylabel("Total Licks per Animal")
+    ax.set_title("Total Licks per Animal")
+    ax.set_ylim(bottom=0, top=2500)
+    ax.set_yticks(range(0, 2501, 500))
+    ax.legend(loc="best", frameon=False)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(False)
+    ax.tick_params(direction="in", which="both", length=4)
+    fig.tight_layout()
+
+    if save_path is not None:
+        save_fig(fig, save_path)
+    elif SHOW_PLOTS:
+        plt.show()
+    else:
+        plt.close(fig)
+    return fig
+
+
+def _fig4e_plot_first5min_pct(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    save_path: Optional[Path] = None,
+) -> plt.Figure:
+    """Figure 4E: % of Licks in First 5 Minutes per week, mean ± SEM, 3 cohorts.
+
+    Ported from _run_lick_all3_menu option 3 (First_5min_Lick_Pct column).
+    Animals with < 2 licks are excluded from the mean (NaN in First_5min_Lick_Pct).
+    """
+    frames   = [df.copy() for df in cohort_dfs.values()]
+    combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    fig, ax = plt.subplots()
+    if not combined.empty and "First_5min_Lick_Pct" in combined.columns:
+        for lbl in sorted(cohort_dfs.keys()):
+            grp  = combined[combined["Cohort"] == lbl]
+            if grp.empty: continue
+            wks  = (grp.groupby("Week")["First_5min_Lick_Pct"]
+                    .agg(["mean", "sem", "count"]).reset_index())
+            n_pw = int(wks["count"].iloc[0]) if len(wks) > 0 else 0
+            ax.errorbar(wks["Week"], wks["mean"], yerr=wks["sem"],
+                        label=f"{lbl} (n={n_pw}/week)",
+                        marker="o", linewidth=0.9, capsize=5,
+                        color=cohort_color(lbl))
+
+    weeks = sorted(combined["Week"].dropna().unique()) if not combined.empty else []
+    ax.set_xticks(weeks)
+    ax.set_xticklabels([str(int(w) + 1) for w in weeks])
+    ax.set_xlabel("Week")
+    ax.set_ylabel("% Licks in First 5 min")
+    ax.set_title("% Licks in First 5 min")
+    ax.set_ylim(0, 100)
+    ax.legend(loc="best", frameon=False)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(False)
+    ax.tick_params(direction="in", which="both", length=4)
+    fig.tight_layout()
+
+    if save_path is not None:
+        save_fig(fig, save_path)
+    elif SHOW_PLOTS:
+        plt.show()
+    else:
+        plt.close(fig)
+    return fig
+
+
+def _fig4g_plot_fecal_count(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    save_path: Optional[Path] = None,
+) -> plt.Figure:
+    """Figure 4G: Fecal Count per week, mean ± SEM, 3 cohorts.
+
+    Ported from across_cohort_lick.py plot_fecal_counts_by_week
+    (option 4 of _run_lick_all3_menu, group_by_cohort=True).
+    Groups by Cohort label (not CA%) so the ramp cohort plots as a single line.
+    """
+    frames   = [df.copy() for df in cohort_dfs.values()]
+    combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    fig, ax = plt.subplots()
+    if not combined.empty and "Fecal_Count" in combined.columns:
+        for lbl in sorted(cohort_dfs.keys()):
+            grp  = combined[combined["Cohort"] == lbl]
+            if grp.empty: continue
+            wks  = (grp.groupby("Week")["Fecal_Count"]
+                    .agg(["mean", "sem", "count"]).reset_index())
+            n_pw = int(wks["count"].iloc[0]) if len(wks) > 0 else 0
+            ax.errorbar(wks["Week"], wks["mean"], yerr=wks["sem"],
+                        label=f"{lbl} (n={n_pw}/week)",
+                        marker="o", linewidth=0.9, capsize=5,
+                        color=cohort_color(lbl))
+
+    weeks = sorted(combined["Week"].dropna().unique()) if not combined.empty else []
+    ax.set_xticks(weeks)
+    ax.set_xticklabels([str(int(w) + 1) for w in weeks])
+    ax.set_xlabel("Week")
+    ax.set_ylabel("Fecal Count")
+    ax.set_title("Fecal Count")
+    ax.set_ylim(bottom=0, top=10)
+    ax.legend(loc="best", frameon=False)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(False)
+    ax.tick_params(direction="in", which="both", length=4)
+    fig.tight_layout()
+
+    if save_path is not None:
+        save_fig(fig, save_path)
+    elif SHOW_PLOTS:
+        plt.show()
+    else:
+        plt.close(fig)
     return fig
 
 
@@ -3762,29 +4024,52 @@ def figure_4() -> None:
     """Lick Detection — Figure 4.
 
     SVG files saved in OUT_FIG4:
-      fig4b_sensor10_deviation_events — KDE-normalised deviation + detected peaks,
-                                         Sensor_10 (A2R), 2/25/26, 2% CA 6 animals
+      fig4b_sensor10_deviation_events — deviation + detected events (Sensor_10, A2R, 2/25/26)
+      fig4c_total_licks                — Total Licks per animal, 3 cohorts × week
+      fig4e_first5min_lick_pct         — % Licks in First 5 min, 3 cohorts × week
+      fig4g_fecal_count                — Fecal Count, 3 cohorts × week
 
-    Panel:
-      4B — Single sensor lick-event trace.  Sensor_10 corresponds to animal A2R
-           in the 2% CA 6-animals cohort on 2/25/26 (from 2%_lick_data.csv).
-           Fixed detection threshold 0.01; first 5 seconds plotted.
+    Cohorts for 4C/4E/4G: 0% CA, 2% CA (6 animals), 5-Week Ramp.
+    Processing is the exact pipeline from across_cohort_lick.py _run_lick_all3_menu.
     """
     print("\n" + "=" * 60)
     print("FIGURE 4 \u2014 Lick Detection")
     print("=" * 60)
 
-    # ── 4b: Sensor_10 (A2R) deviation + lick events, 2/25/26 ───────────────
+    # ── 4b: single sensor deviation trace ─────────────────────────────────
     _cap_log = DIR_2PCT / "capacitive_log_2026-2-25.csv"
     if _cap_log.exists():
         print("\n[4b] Sensor_10 deviation + events (A2R, 2/25/26, 2% 6 animals) ...")
         _fig4b_plot_sensor_deviation_with_events(
-            cap_log_path=_cap_log,
-            sensor_col="Sensor_10",
+            cap_log_path=_cap_log, sensor_col="Sensor_10",
             save_path=OUT_FIG4 / "fig4b_sensor10_deviation_events",
         )
     else:
         print(f"[4b] SKIPPED \u2014 not found: {_cap_log}")
+
+    # ── 4c / 4e / 4g: load all three lick cohorts ─────────────────────────
+    print("\n[4c/4e/4g] Loading lick cohorts ...")
+    _lick_specs: List[Tuple[str, Path, List[Path], float]] = [
+        ("0% CA",             LICK_MASTER_0PCT,  CAP_LOGS_0PCT,  0.0),
+        ("2% CA (6 animals)", LICK_MASTER_2PCT,  CAP_LOGS_2PCT,  2.0),
+        ("5-Week Ramp",       LICK_MASTER_RAMP,  CAP_LOGS_RAMP,  0.0),
+    ]
+    _cohort_dfs = _fig4_load_lick_cohorts(_lick_specs)
+
+    if _cohort_dfs:
+        print(f"\n[4c] Total Licks per week ...")
+        _fig4c_plot_total_licks(
+            _cohort_dfs, save_path=OUT_FIG4 / "fig4c_total_licks")
+
+        print(f"\n[4e] % Licks in First 5 min per week ...")
+        _fig4e_plot_first5min_pct(
+            _cohort_dfs, save_path=OUT_FIG4 / "fig4e_first5min_lick_pct")
+
+        print(f"\n[4g] Fecal Count per week ...")
+        _fig4g_plot_fecal_count(
+            _cohort_dfs, save_path=OUT_FIG4 / "fig4g_fecal_count")
+    else:
+        print("[4c/4e/4g] SKIPPED \u2014 no cohort data loaded")
 
     print("\n[OK] Figure 4 complete.")
 
