@@ -1,4 +1,4 @@
-"""
+﻿"""
 figure_maker.py — Publication Figure Generation Script
 
 Standalone script for producing all paper figures and extended-data panels.
@@ -322,7 +322,7 @@ def save_fig(
     path.parent.mkdir(parents=True, exist_ok=True)
     svg_path = path.with_suffix(".svg")
     fig.savefig(str(svg_path), format="svg", bbox_inches="tight")
-    print(f"  Saved → {svg_path.relative_to(_ROOT)}")
+    print(f"  Saved to {svg_path.relative_to(_ROOT)}")
     if not SHOW_PLOTS:
         plt.close(fig)
 
@@ -345,7 +345,7 @@ def _load_master_csv(path: Path, encoding: Optional[str] = None) -> pd.DataFrame
     if "Date" in df.columns:
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
 
-    # Strip trailing "%" before numeric conversion (handles "3%" → 3.0)
+    # Strip trailing "%" before numeric conversion (handles "3%"  to  3.0)
     if "CA (%)" in df.columns:
         df["CA (%)"] = (
             df["CA (%)"].astype(str)
@@ -453,7 +453,7 @@ def _build_total_change_series(
 
     Returns
     -------
-    dict  str(animal_id) → pd.Series(index=Day[int], values=Total Change[float]).
+    dict  str(animal_id)  to  pd.Series(index=Day[int], values=Total Change[float]).
     Duplicate Day values for the same animal are resolved by keeping the last.
     """
     cdf = _add_day_col(df, mode)
@@ -468,7 +468,7 @@ def _build_total_change_series(
 
 
 def _build_ca_series_by_day(df: pd.DataFrame) -> pd.Series:
-    """Ramp mode: Series(Day → CA%) for block-boundary annotations.
+    """Ramp mode: Series(Day  to  CA%) for block-boundary annotations.
 
     Template rows (CA% filled but no measurements recorded) are excluded
     so that unreached concentrations do not appear as phantom blocks.
@@ -491,7 +491,7 @@ def _build_ca_series_by_day(df: pd.DataFrame) -> pd.Series:
 
 
 def _build_week_series_by_day(df: pd.DataFrame) -> pd.Series:
-    """Nonramp mode: Series(Day → Week) for block-boundary annotations."""
+    """Nonramp mode: Series(Day  to  Week) for block-boundary annotations."""
     cdf = _add_day_col(df, "nonramp")
     cdf = _add_week_col(cdf)
     cdf = cdf.dropna(subset=["Day", "Week"])
@@ -602,8 +602,8 @@ def _fig2_plot_cohort(
     Animal lines
     ------------
     All animals share *cohort_color*; sex is encoded by marker shape:
-      Male   → filled square  "s"
-      Female → filled circle  "o"
+      Male    to  filled square  "s"
+      Female  to  filled circle  "o"
 
     Axes
     ----
@@ -2743,14 +2743,14 @@ def _fig3b_plot_behavioral_metrics(
 # FIGURE 3c HELPERS — 4-Cohort Transition-Day Daily Change
 #
 # Each cohort contributes one Daily Change value per animal, taken at the day
-# that represents the 0 % → 1 % CA transition (or first CA exposure):
+# that represents the 0 %  to  1 % CA transition (or first CA exposure):
 #
 #   Cohort               Target day            Convention
 #   ──────────────────────────────────────────────────────────────────
 #   2% CA (6 animals)    Day 1  (0-based nonramp)  First CA-exposure recording
 #   4% CA (Pilot)        Day 1  (0-based)           First CA-exposure recording
-#   5-Week Ramp          Day 8  (1-based ramp)       0% → 1% CA transition
-#   2-Week Ramp          Day 4  (1-based ramp)       0% → 1% CA transition
+#   5-Week Ramp          Day 8  (1-based ramp)       0%  to  1% CA transition
+#   2-Week Ramp          Day 4  (1-based ramp)       0%  to  1% CA transition
 # =============================================================================
 
 def _fig3c_extract_transition_values() -> Dict[str, np.ndarray]:
@@ -2760,7 +2760,7 @@ def _fig3c_extract_transition_values() -> Dict[str, np.ndarray]:
     Returns
     -------
     Dict[str, np.ndarray]
-        Ordered dict: cohort label → 1-D array of per-animal Daily Change values.
+        Ordered dict: cohort label  to  1-D array of per-animal Daily Change values.
         Cohorts whose data file is missing are silently omitted.
     """
     result: Dict[str, np.ndarray] = {}
@@ -2802,7 +2802,7 @@ def _fig3c_extract_transition_values() -> Dict[str, np.ndarray]:
         if len(vals) > 0:
             result["4% CA (Pilot)"] = vals
 
-    # ── 5-Week Ramp — ramp Day 8 (0% → 1% CA transition) ───────────────────────
+    # ── 5-Week Ramp — ramp Day 8 (0%  to  1% CA transition) ───────────────────────
     if MASTER_RAMP.exists():
         cdf = _add_day_col(_load_master_csv(MASTER_RAMP), "ramp")
         vals = (cdf[cdf["Day"] == 8]
@@ -2812,7 +2812,7 @@ def _fig3c_extract_transition_values() -> Dict[str, np.ndarray]:
         if len(vals) > 0:
             result["5-Week Ramp"] = vals
 
-    # ── 2-Week Ramp — ramp Day 4 (0% → 1% CA transition) ───────────────────────
+    # ── 2-Week Ramp — ramp Day 4 (0%  to  1% CA transition) ───────────────────────
     if MASTER_2WK.exists():
         cdf = _add_day_col(_load_master_csv(MASTER_2WK), "ramp")
         vals = (cdf[cdf["Day"] == 4]
@@ -3072,9 +3072,9 @@ def _fig3c_transition_report(
 
 
 # =============================================================================
-# FIGURE 3d HELPERS — 1%→2% CA Transition-Day Ramp Comparison
+# FIGURE 3d HELPERS — 1% to 2% CA Transition-Day Ramp Comparison
 #
-# Compares the Daily Change at the 1%→2% CA transition day between the
+# Compares the Daily Change at the 1% to 2% CA transition day between the
 # slow (5-week) and fast (2-week) CA ramp cohorts.
 #
 #   5-Week Ramp : Day 15  (1-based ramp) — first day on 2% CA
@@ -3088,17 +3088,17 @@ def _fig3c_transition_report(
 
 def _fig3d_extract_1pct_to_2pct_values() -> Dict[str, np.ndarray]:
     """
-    Extract per-animal Daily Change at the 1%→2% CA transition day.
+    Extract per-animal Daily Change at the 1% to 2% CA transition day.
 
     Returns
     -------
     Dict[str, np.ndarray]
-        Ordered dict: cohort label → 1-D array of Daily Change values.
+        Ordered dict: cohort label  to  1-D array of Daily Change values.
         Cohorts whose data file is missing are silently omitted.
     """
     result: Dict[str, np.ndarray] = {}
 
-    # ── 5-Week Slow Ramp — ramp Day 15 (1%→2% CA) ──────────────────────────
+    # ── 5-Week Slow Ramp — ramp Day 15 (1% to 2% CA) ──────────────────────────
     if MASTER_RAMP.exists():
         cdf = _add_day_col(_load_master_csv(MASTER_RAMP), "ramp")
         vals = (cdf[cdf["Day"] == 15]
@@ -3108,7 +3108,7 @@ def _fig3d_extract_1pct_to_2pct_values() -> Dict[str, np.ndarray]:
         if len(vals) > 0:
             result["5-Week Ramp"] = vals
 
-    # ── 2-Week Fast Ramp — ramp Day 7 (1%→2% CA) ──────────────────────────
+    # ── 2-Week Fast Ramp — ramp Day 7 (1% to 2% CA) ──────────────────────────
     if MASTER_2WK.exists():
         cdf = _add_day_col(_load_master_csv(MASTER_2WK), "ramp")
         vals = (cdf[cdf["Day"] == 7]
@@ -3125,7 +3125,7 @@ def _fig3d_mwu_analysis(
     cohort_values: Dict[str, np.ndarray],
 ) -> dict:
     """
-    Mann-Whitney U test + Hodges-Lehmann shift for the 1%→2% transition.
+    Mann-Whitney U test + Hodges-Lehmann shift for the 1% to 2% transition.
 
     Returns dict with keys:
         groups, group_data, mwu (U, p_value, nA, nB), r_rb, hl_est, ci_lo, ci_hi.
@@ -3161,7 +3161,7 @@ def _fig3d_plot_1pct_to_2pct(
 ) -> plt.Figure:
     """
     Bar chart (mean ± SEM) with individual scatter points for the
-    1%→2% transition-day comparison between 5-Wk Ramp and 2-Wk Ramp.
+    1% to 2% transition-day comparison between 5-Wk Ramp and 2-Wk Ramp.
 
     Y-axis fixed to [−8, 2] to match across_cohort.py _run_rampramp_menu.
     """
@@ -3241,7 +3241,7 @@ def _fig3d_transition_report(
     mwu_results:   dict,
     save_path:     Optional[Path] = None,
 ) -> str:
-    """Text report for the 1%→2% ramp transition MWU analysis.
+    """Text report for the 1% to 2% ramp transition MWU analysis.
 
     Format mirrors the RAMP vs 2-WEEK RAMP report from across_cohort.py
     _run_rampramp_menu.
@@ -3347,8 +3347,8 @@ def figure_3() -> None:
                                      0 % CA, 2 % CA (6 animals), 5-Wk Slow Ramp
       fig3b_behavioral_metrics    — No Nest / Anxious / Lethargy % per week,
                                      three panels (1 × 3), same three cohorts
-      fig3c_transition_comparison — 0%→1% transition bar chart + KW, 4 cohorts
-      fig3d_transition_1pct_2pct  — 1%→2% transition bar chart + MWU,
+      fig3c_transition_comparison — 0% to 1% transition bar chart + KW, 4 cohorts
+      fig3d_transition_1pct_2pct  — 1% to 2% transition bar chart + MWU,
                                      5-Wk vs 2-Wk Ramp only
 
     Text reports in OUT_FIG3:
@@ -3417,8 +3417,8 @@ def figure_3() -> None:
     else:
         print("[3c] SKIPPED — fewer than 2 cohorts available")
 
-    # ── 3d: 1%→2% transition — 5-Wk Ramp vs 2-Wk Ramp ──────────────────────
-    print("\n[3d] 1%→2% transition — 5-Wk Ramp (Day 15) vs 2-Wk Ramp (Day 7) ...")
+    # ── 3d: 1% to 2% transition — 5-Wk Ramp vs 2-Wk Ramp ──────────────────────
+    print("\n[3d] 1% to 2% transition — 5-Wk Ramp (Day 15) vs 2-Wk Ramp (Day 7) ...")
     _trans_1pct_2pct = _fig3d_extract_1pct_to_2pct_values()
     if len(_trans_1pct_2pct) >= 2:
         _mwu_3d = _fig3d_mwu_analysis(_trans_1pct_2pct)
@@ -3666,19 +3666,22 @@ def detect_events_above_threshold(
 #   4B — Single sensor KDE-normalised deviation, first 5 seconds, detected events.
 #        Sensor_10 (A2R, 2/25/26, 2% CA 6 animals).  Fixed threshold 0.01.
 #   4C — Total Licks per animal per week, mean ± SEM.  3 cohorts.
+#   4D — Repeated measures correlation of Total Licks vs Total Weight Change per week, 0% cohort only.
 #   4E — % of Licks in First 5 Minutes per week, mean ± SEM.  3 cohorts.
+#   4F — Repeated measures correlation of Total Licks vs Total Weight Change per week, 2% 6 animals cohort only.
 #   4G — Fecal Count per week, mean ± SEM.  3 cohorts.
+#   4H — Repeated measures correlation of Total Licks vs Total Weight Change per week, 5-Week Ramp cohort only.
 #
 # Cohorts for 4C / 4E / 4G:  0% CA, 2% CA (6 animals), 5-Week Ramp
 #
 # Data pipeline (4C / 4E / 4G)
 # Ported verbatim from across_cohort_lick.py _run_lick_all3_menu
 # options 1 (Total Licks), 3 (% First 5 min), 4 (Fecal Count):
-#   load_capacitive_csv  → compute_sensor_KDE (disk-cached)
-#   → compute_KDE_normalizations → compute_fixed_thresholds (0.01)
-#   → detect_events_above_threshold (first 30 min only)
-#   → per-animal: Total_Licks, First_5min_Lick_Pct, Fecal_Count
-#   → assign sequential Week numbers from sorted unique recording dates
+#   load_capacitive_csv   to  compute_sensor_KDE (disk-cached)
+#    to  compute_KDE_normalizations  to  compute_fixed_thresholds (0.01)
+#    to  detect_events_above_threshold (first 30 min only)
+#    to  per-animal: Total_Licks, First_5min_Lick_Pct, Fecal_Count
+#    to  assign sequential Week numbers from sorted unique recording dates
 #
 # Source CSVs for 4C / 4E / 4G:
 #   0% CA        : LICK_MASTER_0PCT, CAP_LOGS_0PCT
@@ -3849,7 +3852,7 @@ def _fig4_generate_lick_descriptive_stats_report(
         try:
             rpt_path.parent.mkdir(parents=True, exist_ok=True)
             rpt_path.write_text("\n".join(lines), encoding='utf-8')
-            print(f"\n[Saved] Descriptive stats report → {rpt_path.name}")
+            print(f"\n[Saved] Descriptive stats report  to  {rpt_path.name}")
         except Exception as _e:
             print(f"\n[WARNING] Could not save report: {_e}")
 
@@ -3950,6 +3953,8 @@ def _fig4_process_cohort_cap_files(
                 "First_5min_Lick_Pct": first5_pct,
                 "Fecal_Count":         pd.to_numeric(
                     arow.get("fecal_count", np.nan), errors="coerce"),
+                "Total_Weight_Change": pd.to_numeric(
+                    arow.get("total_weight_change", np.nan), errors="coerce"),
             })
 
     return pd.DataFrame(all_records) if all_records else pd.DataFrame()
@@ -3983,8 +3988,9 @@ def _fig4_load_lick_cohorts(
         unique_dates = sorted(df["Date"].dropna().unique())
         df["Week"] = df["Date"].map({d: i for i, d in enumerate(unique_dates)})
         cohort_dfs[label] = df
-        print(f"    → {df['ID'].nunique()} animals, {df['Week'].nunique()} weeks")
+        print(f"     to  {df['ID'].nunique()} animals, {df['Week'].nunique()} weeks")
     return cohort_dfs
+
 
 def _fig4b_plot_sensor_deviation_with_events(
     cap_log_path: Path,
@@ -4187,6 +4193,304 @@ def _fig4g_plot_fecal_count(
     return fig
 
 
+def _fig4_prepare_rmcorr_data_for_cohort(
+    cohort_name: str,
+    cohort_df: pd.DataFrame,
+    cohort_color: str,
+) -> Optional[Dict]:
+    """Prepare licks vs weight data for rmcorr analysis.
+
+    Uses Total_Weight_Change already present in cohort_df (from the lick master CSV),
+    matching lick_analysis.py's approach exactly.
+    
+    Parameters
+    ----------
+    cohort_name : str
+        Label for the cohort (e.g., "0% CA", "2% CA (6 animals)", "5-Week Ramp")
+    cohort_df : pd.DataFrame
+        Lick data loaded from pipeline (columns: ID, Date, Week, Total_Licks,
+        Total_Weight_Change, etc.)
+    cohort_color : str
+        Hex color for plotting
+    
+    Returns
+    -------
+    Dict or None
+        Dictionary with keys 'name', 'weekly_data', 'color' if successful, else None
+    """
+    if cohort_df.empty:
+        return None
+    
+    # Use Total_Weight_Change already embedded in cohort_df (from lick master CSV)
+    # This matches lick_analysis.py which uses total_weight_change from the lick master
+    if "Total_Weight_Change" not in cohort_df.columns:
+        print(f"    [WARNING] Total_Weight_Change not found in cohort_df — was it loaded by _fig4_process_cohort_cap_files?")
+        return None
+    
+    try:
+        cohort_df_copy = cohort_df.copy()
+        cohort_df_copy["Date"] = pd.to_datetime(cohort_df_copy["Date"], errors="coerce")
+        
+        # Group by week and compute per-animal means
+        weekly_data = {}
+        for week_num in sorted(cohort_df_copy["Week"].dropna().unique()):
+            week_df = cohort_df_copy[cohort_df_copy["Week"] == week_num]
+            
+            grouped = week_df.groupby("ID")
+            lick_means   = grouped["Total_Licks"].mean().values
+            weight_means = grouped["Total_Weight_Change"].mean().values
+            animal_ids   = grouped.size().index.tolist()
+            
+            if len(lick_means) >= 1:
+                weekly_data[int(week_num)] = {
+                    "avg_licks_per_animal": lick_means,
+                    "avg_total_weight_per_animal": weight_means,
+                    "animal_ids": animal_ids,
+                    "ca_percent": week_df["CA%"].iloc[0] if "CA%" in week_df.columns else np.nan,
+                }
+        
+        if not weekly_data:
+            print(f"    [WARNING] No weekly data extracted")
+            return None
+        
+        return {
+            "name": cohort_name,
+            "weekly_data": weekly_data,
+            "color": cohort_color,
+        }
+    
+    except Exception as e:
+        print(f"  [WARNING] Failed to prepare rmcorr data for {cohort_name}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def _fig4_plot_rmcorr_for_cohort(
+    rmcorr_data: Dict,
+    save_path: Optional[Path] = None,
+) -> Optional[plt.Figure]:
+    """Plot rmcorr for a single cohort.
+    
+    Parameters
+    ----------
+    rmcorr_data : Dict
+        Dictionary with 'name', 'weekly_data', 'color' from _fig4_prepare_rmcorr_data_for_cohort
+    save_path : Path, optional
+        Path for saving the figure
+    
+    Returns
+    -------
+    plt.Figure or None
+    """
+    if rmcorr_data is None:
+        return None
+    
+    cohort_name = rmcorr_data["name"]
+    weekly_data = rmcorr_data["weekly_data"]
+    cohort_color_hex = rmcorr_data["color"]
+    
+    # Convert to the format expected by the rmcorr plotting function
+    weekly_averages = {}
+    for week_idx, data in weekly_data.items():
+        weekly_averages[week_idx] = data
+    
+    # Build flat per-animal-per-week data
+    records = []
+    for week_idx, data in weekly_data.items():
+        lick_arr = np.asarray(data['avg_licks_per_animal'], dtype=float)
+        wt_arr   = np.asarray(data['avg_total_weight_per_animal'], dtype=float)
+        ids      = data.get('animal_ids', [f"Animal_{j+1}" for j in range(len(lick_arr))])
+        ca_pct_val = data.get('ca_percent', np.nan)
+        for aid, lk, wt in zip(ids, lick_arr, wt_arr):
+            records.append({'mouse_id': str(aid), 'licks': lk, 'weight_pct': wt,
+                             'ca_percent': ca_pct_val})
+    
+    if not records:
+        return None
+    
+    _df = pd.DataFrame(records).dropna(subset=['licks', 'weight_pct'])
+    if _df.shape[0] < 5 or _df['mouse_id'].nunique() < 3:
+        print(f"    Not enough data for rmcorr (need ≥3 mice, ≥5 observations)")
+        return None
+    
+    unique_animals = list(_df['mouse_id'].unique())
+    n_animals      = len(unique_animals)
+    
+    # ── attempt rmcorr via rpy2 ──────────────────────────────────────────
+    _r_rm  = np.nan
+    _p_rm  = np.nan
+    _ci_lo = np.nan
+    _ci_hi = np.nan
+    _slope = np.nan
+    _rmcorr_ok = False
+
+    try:
+        import os as _osi
+        import glob as _globi
+
+        if _osi.name == 'nt':
+            _r_home = _osi.environ.get('R_HOME', '')
+            if _r_home:
+                for _p in [_osi.path.join(_r_home, 'bin', 'x64'),
+                            _osi.path.join(_r_home, 'bin')]:
+                    if _osi.path.isdir(_p):
+                        if _p not in _osi.environ.get('PATH', ''):
+                            _osi.environ['PATH'] = _p + _osi.pathsep + _osi.environ.get('PATH', '')
+                        try:
+                            _osi.add_dll_directory(_p)
+                        except (AttributeError, OSError):
+                            pass
+
+        import rpy2.robjects as _ro2
+        import rpy2.robjects.packages as _rpkgs2
+        _rpkgs2.importr('rmcorr')
+
+        import tempfile as _tmpi
+        _uid  = str(id(_df))[-6:]
+        _tdir = _tmpi.gettempdir().replace('\\', '/')
+        _csv  = f"{_tdir}/rmcorr_in_{_uid}.csv"
+        _out  = f"{_tdir}/rmcorr_out_{_uid}.csv"
+
+        _df.to_csv(_csv, index=False)
+        _ro2.globalenv['r_rmc_in']  = _csv
+        _ro2.globalenv['r_rmc_out'] = _out
+
+        _ro2.r("""
+            suppressPackageStartupMessages(library(rmcorr))
+            .d <- read.csv(r_rmc_in)
+            .d$mouse_id <- factor(.d$mouse_id)
+            .rmc <- rmcorr(participant = mouse_id,
+                           measure1    = weight_pct,
+                           measure2    = licks,
+                           dataset     = .d)
+            .all_coefs <- stats::coef(.rmc$model)
+            .slope     <- as.numeric(.all_coefs["weight_pct"])
+            .lvls <- levels(.d$mouse_id)
+            .intercepts <- sapply(.lvls, function(.lv) {
+                sx <- .d$weight_pct[.d$mouse_id == .lv]
+                sy <- .d$licks[.d$mouse_id == .lv]
+                if (length(sx) == 0 || is.na(.slope)) return(NA_real_)
+                mean(sy) - .slope * mean(sx)
+            })
+            .out_df <- data.frame(
+                mouse_id  = .lvls,
+                intercept = as.numeric(.intercepts),
+                slope     = .slope,
+                r_rm      = .rmc$r,
+                p_val     = .rmc$p,
+                ci_lo     = .rmc$CI[1],
+                ci_hi     = .rmc$CI[2],
+                df_rm     = .rmc$df
+            )
+            write.csv(.out_df, r_rmc_out, row.names = FALSE)
+        """)
+
+        _res_df = pd.read_csv(_out)
+        for _fp in [_csv, _out]:
+            try:    _osi.unlink(_fp)
+            except Exception: pass
+
+        _r_rm  = float(_res_df['r_rm'].iloc[0])
+        _p_rm  = float(_res_df['p_val'].iloc[0])
+        _ci_lo = float(_res_df['ci_lo'].iloc[0])
+        _ci_hi = float(_res_df['ci_hi'].iloc[0])
+        _df_rm = float(_res_df['df_rm'].iloc[0])
+        _slope = float(_res_df['slope'].iloc[0])
+        
+        if np.isnan(_slope) and not np.isnan(_r_rm):
+            _sx = _df.groupby('mouse_id')['weight_pct'].apply(lambda v: v - v.mean()).std()
+            _sy = _df.groupby('mouse_id')['licks'].apply(lambda v: v - v.mean()).std()
+            if _sx > 0:
+                _slope = _r_rm * float(_sy) / float(_sx)
+        
+        _rmcorr_ok = True
+        #print(f"    rmcorr: r_rm = {_r_rm:.4f},  p = {_p_rm:.4f},  "
+        #      f"95% CI [{_ci_lo:.4f}, {_ci_hi:.4f}]")
+
+    except Exception as _rmc_exc:
+        print(f"    rmcorr not available ({type(_rmc_exc).__name__})")
+    
+    # ── matplotlib figure ─────────────────────────────────────────────────
+    _ms = plt.rcParams.get('lines.markersize', 6)
+    
+    if _rmcorr_ok:
+        _p_str = f"p = {_p_rm:.4f}" if _p_rm >= 0.0001 else f"p = {_p_rm:.4e}"
+        _ann = (f"$r_{{rm}}$ = {_r_rm:.3f}\n"
+                f"{_p_str}\n"
+                f"95% CI [{_ci_lo:.3f}, {_ci_hi:.3f}]\n"
+                f"n = {n_animals} mice")
+        if not np.isnan(_slope):
+            _line_xs = np.linspace(-50, 50, 500)
+            _grand_intercept = _df['licks'].mean() - _slope * _df['weight_pct'].mean()
+            _line_ys = _grand_intercept + _slope * _line_xs
+        else:
+            _line_xs = _line_ys = None
+        _line_kw = dict(color='black', linewidth=1.2, zorder=4)
+    else:
+        _valid = _df[['weight_pct', 'licks']].dropna()
+        if len(_valid) >= 3:
+            _rho, _pv = stats.spearmanr(_valid['weight_pct'], _valid['licks'])
+            _sl, _ic, *_ = stats.linregress(_valid['weight_pct'], _valid['licks'])
+            _line_xs = np.linspace(-50, 50, 500)
+            _line_ys = _sl * _line_xs + _ic
+            _p_str = f"p = {_pv:.4f}" if _pv >= 0.0001 else f"p = {_pv:.4e}"
+            _ann = (f"Spearman \u03c1 = {_rho:.3f}\n{_p_str}\nn = {n_animals} mice")
+        else:
+            _line_xs = _line_ys = None
+            _ann = f"n = {n_animals} mice"
+        _line_kw = dict(color='dimgray', linestyle='--', zorder=2)
+    
+    # ── single axis ────────────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(3.5, 2.5))
+    for _, _row in _df.iterrows():
+        ax.scatter(_row['weight_pct'], _row['licks'],
+                   color=cohort_color_hex, marker='o',
+                   s=_ms ** 2, edgecolors='black', linewidths=0.5,
+                   alpha=0.8, zorder=4)
+    if _line_xs is not None:
+        ax.plot(_line_xs, _line_ys, **_line_kw)
+    
+    ax.set_xlim(-20, 10)
+    ax.text(0.03, 0.97, _ann,
+            transform=ax.transAxes, va='top', ha='left', fontsize=7.5,
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.75, edgecolor='gray'))
+    ax.set_xlabel('Total Weight Change (%)')
+    ax.set_ylabel('Lick Count')
+    ax.set_title(f'rmcorr: Licks ~ Weight Change\n({cohort_name})', weight='bold')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(direction='in', which='both', length=5)
+    plt.tight_layout()
+    
+    # ── save ──────────────────────────────────────────────────────────────
+    if save_path is not None:
+        save_fig(fig, save_path)
+        
+        if _rmcorr_ok:
+            _p_str_txt = f"p = {_p_rm:.4f}" if _p_rm >= 0.0001 else f"p = {_p_rm:.4e}"
+            report_text = "\n".join([
+                "=" * 70,
+                "REPEATED-MEASURES CORRELATION  (Bakdash & Marusich 2017)",
+                "=" * 70,
+                f"  Cohort: {cohort_name}",
+                f"  r_rm  = {_r_rm:.4f}",
+                f"  {_p_str_txt}",
+                f"  95% CI  [{_ci_lo:.4f}, {_ci_hi:.4f}]",
+                f"  n mice  = {n_animals}",
+                f"  n obs   = {_df.shape[0]}",
+                "=" * 70,
+            ])
+        else:
+            report_text = f"rmcorr not available for {cohort_name}"
+        
+        report_path = save_path.parent / (save_path.stem + "_report.txt")
+        report_path.write_text(report_text, encoding='utf-8')
+    
+    plt.close(fig)
+    return fig
+
+
 def figure_4() -> None:
     """Lick Detection — Figure 4.
 
@@ -4239,6 +4543,25 @@ def figure_4() -> None:
         # ── Generate descriptive statistics report ──────────────────────
         print(f"\n[4 Stats] Generating descriptive statistics report ...")
         _fig4_generate_lick_descriptive_stats_report(_cohort_dfs, save_report=True)
+
+        # ── 4d / 4f / 4h: rmcorr licks vs weight for each cohort ────────────
+        print(f"\n[4d/4f/4h] Generating rmcorr plots (licks vs weight) ...")
+        _rmcorr_specs = [
+            ("0% CA",             COLOR_0PCT,   OUT_FIG4 / "fig4d_rmcorr_0pct"),
+            ("2% CA (6 animals)", COLOR_2PCT,   OUT_FIG4 / "fig4f_rmcorr_2pct"),
+            ("5-Week Ramp",       COLOR_RAMP,   OUT_FIG4 / "fig4h_rmcorr_ramp"),
+        ]
+        
+        for cohort_label, color, save_path in _rmcorr_specs:
+            if cohort_label in _cohort_dfs:
+                print(f"  [{cohort_label}] rmcorr ...")
+                rmcorr_data = _fig4_prepare_rmcorr_data_for_cohort(
+                    cohort_label, _cohort_dfs[cohort_label], color
+                )
+                if rmcorr_data is not None:
+                    _fig4_plot_rmcorr_for_cohort(rmcorr_data, save_path=save_path)
+                else:
+                    print(f"    [SKIP] Could not prepare rmcorr data")
     else:
         print("[4c/4e/4g] SKIPPED \u2014 no cohort data loaded")
 
@@ -4332,3 +4655,5 @@ if __name__ == "__main__":
     extended_data_1()
     extended_data_2_3()
     extended_data_4_5()
+
+
