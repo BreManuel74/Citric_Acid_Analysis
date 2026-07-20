@@ -10,11 +10,12 @@ used for each figure are copied directly into the relevant figure section below.
 Readers can view the exact code that produced each figure without consulting
 any other file.
 
-NOTE: There will be minor formatting differences between the figures produced by this script and the final published figures.  
-The final figures were polished in Adobe Illustrator for font consistency, line thickness, 
-evenly spaced x and y axis limits, panel alignment, etc.
+NOTE: There will be minor formatting differences between the figures produced by this script
+and the final published figures. The final figures were polished in Adobe Illustrator for 
+font consistency, line thickness, evenly spaced x and y axis limits, panel alignment, etc.
 
-NOTE: This script requires R to be installed and available in the system PATH. 
+NOTE: This script requires R to be installed and available in the system PATH, including all
+neecessary R packages (e.g. nonparLD). 
 
 Usage
 -----
@@ -3659,12 +3660,133 @@ def detect_events_above_threshold(
     return result
 
 # =============================================================================
-# FIGURE 4 — (add description when porting)
+# FIGURE 4 — Lick Detection
+#
+# Panel:
+#   4B — KDE-normalised deviation trace for a single sensor, first 5 seconds,
+#        with detected lick events overlaid.
+#        Sensor_10 (Animal A2R, 2/25/26, 2% CA 6 animals cohort).
+#        Fixed detection threshold = 0.01 (consistent with lick_detection.py).
+#
+# Source data : capacitive_log_2026-2-25.csv  (DIR_2PCT)
+# Animal      : A2R  →  selected_sensor = 10  (from 2%_lick_data.csv)
 # =============================================================================
 
+def _fig4b_plot_sensor_deviation_with_events(
+    cap_log_path: Path,
+    sensor_col: str,
+    fixed_threshold: float = 0.01,
+    save_path: Optional[Path] = None,
+) -> plt.Figure:
+    """
+    Figure 4B: Single sensor KDE-normalised deviation with detected lick events.
+
+    Ported verbatim from lick_detection.py plot_single_sensor_deviation_with_events.
+    Runs the full lick detection pipeline then plots the first 5 seconds.
+
+    Pipeline
+    --------
+    load_capacitive_csv → compute_sensor_KDE (all sensors, disk-cached)
+    → compute_KDE_normalizations → compute_fixed_thresholds
+    → detect_events_above_threshold → plot
+
+    Parameters
+    ----------
+    cap_log_path    : Path to capacitive_log_*.csv
+    sensor_col      : e.g. 'Sensor_10'
+    fixed_threshold : KDE-normalised deviation threshold for peak detection (default 0.01)
+    save_path       : stem path (no extension); SVG saved via save_fig()
+    """
+    # ── Load raw capacitive data ────────────────────────────────────────────
+    cap_df = load_capacitive_csv(cap_log_path)
+    sensor_cols_all = get_sensor_columns(cap_df)
+
+    # ── KDE computation (uses disk cache if present) ────────────────────────
+    _cache = cap_log_path.parent / "kde_cache" / (cap_log_path.stem + "_kde_cache.csv")
+    sensor_kdes = compute_sensor_KDE(cap_df, sensor_cols_all,
+                                     cache_file=_cache, verbose=False)
+
+    # ── Normalise deviations + detect events ───────────────────────────────
+    cap_df    = compute_KDE_normalizations(cap_df, sensor_cols_all, sensor_kdes)
+    thresh    = compute_fixed_thresholds([sensor_col], fixed_threshold=fixed_threshold)
+    events_df = detect_events_above_threshold(cap_df, [sensor_col], thresh)
+
+    # ── Plot first 5 seconds ────────────────────────────────────────────────
+    dev_col   = f"{sensor_col}_deviation"
+    event_col = f"{sensor_col}_event"
+    t_min, t_max = 0.0, 5.0
+
+    mask   = (events_df["Time_sec"] >= t_min) & (events_df["Time_sec"] <= t_max)
+    df_win = events_df.loc[mask]
+
+    fig, ax = plt.subplots()
+
+    ax.plot(df_win["Time_sec"], df_win[dev_col],
+            color="#747575", linewidth=0.8, label="Capacitance")
+
+    if event_col in df_win.columns:
+        ev_mask = df_win[event_col].astype(bool)
+        ax.scatter(df_win.loc[ev_mask, "Time_sec"],
+                   df_win.loc[ev_mask, dev_col],
+                   color="#eb0d8c", s=15, zorder=5, label="Detected events")
+
+    ax.axhline(y=fixed_threshold, color="#2278b5",
+               linestyle="-", linewidth=1.0, label="Threshold")
+
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Capacitance (a.u.)")
+    ax.set_title(f"{sensor_col} \u2014 2% CA (A2R, 2/25/26)")
+    ax.legend(loc="best", frameon=False)
+    ax.set_xlim(t_min, t_max)
+    ax.set_ylim(0.00, 0.03)
+    ax.margins(x=0)
+    ax.grid(False)
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(direction="in", which="both", length=4)
+
+    fig.tight_layout()
+
+    if save_path is not None:
+        save_fig(fig, save_path)
+    elif SHOW_PLOTS:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig
+
+
 def figure_4() -> None:
-    """Placeholder — port the Figure 4 panels here."""
-    pass
+    """Lick Detection — Figure 4.
+
+    SVG files saved in OUT_FIG4:
+      fig4b_sensor10_deviation_events — KDE-normalised deviation + detected peaks,
+                                         Sensor_10 (A2R), 2/25/26, 2% CA 6 animals
+
+    Panel:
+      4B — Single sensor lick-event trace.  Sensor_10 corresponds to animal A2R
+           in the 2% CA 6-animals cohort on 2/25/26 (from 2%_lick_data.csv).
+           Fixed detection threshold 0.01; first 5 seconds plotted.
+    """
+    print("\n" + "=" * 60)
+    print("FIGURE 4 \u2014 Lick Detection")
+    print("=" * 60)
+
+    # ── 4b: Sensor_10 (A2R) deviation + lick events, 2/25/26 ───────────────
+    _cap_log = DIR_2PCT / "capacitive_log_2026-2-25.csv"
+    if _cap_log.exists():
+        print("\n[4b] Sensor_10 deviation + events (A2R, 2/25/26, 2% 6 animals) ...")
+        _fig4b_plot_sensor_deviation_with_events(
+            cap_log_path=_cap_log,
+            sensor_col="Sensor_10",
+            save_path=OUT_FIG4 / "fig4b_sensor10_deviation_events",
+        )
+    else:
+        print(f"[4b] SKIPPED \u2014 not found: {_cap_log}")
+
+    print("\n[OK] Figure 4 complete.")
 
 
 # =============================================================================
@@ -3747,7 +3869,6 @@ if __name__ == "__main__":
     figure_2()
     figure_3()
     figure_4()
-    figure_5()
     figure_6()
     figure_7()
     figure_8()
