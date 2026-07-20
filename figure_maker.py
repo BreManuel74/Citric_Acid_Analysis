@@ -3857,6 +3857,964 @@ def _fig4_generate_lick_descriptive_stats_report(
             print(f"\n[WARNING] Could not save report: {_e}")
 
 
+# =============================================================================
+# FIGURE 4 STATISTICAL INFRASTRUCTURE
+# Helpers required by fig4_nparLD_lick_analysis, ported from
+# across_cohort_lick.py so figure_maker.py stays self-contained.
+# =============================================================================
+
+from datetime import datetime as _fig4_datetime  # noqa: E402
+
+try:
+    import rpy2.robjects  # noqa: F401
+    HAS_RPY2 = True
+except ImportError:
+    HAS_RPY2 = False
+
+_OMNIBUS_MEASURE_LABELS = {
+    "Total_Licks":          "Total Licks",
+    "First_5min_Lick_Pct":  "% Licks in First 5 min",
+    "Fecal_Count":          "Fecal Count",
+}
+
+
+def _ensure_r_path() -> None:
+    """Add R\\bin\\x64 to PATH on Windows before any rpy2 call."""
+    import os, sys
+    if sys.platform != 'win32':
+        return
+    r_home = os.environ.get('R_HOME', '')
+    if not r_home:
+        try:
+            import rpy2.situation as _sit
+            r_home = _sit.get_r_home() or ''
+        except Exception:
+            pass
+    if not r_home:
+        return
+    for _sub in (os.path.join(r_home, 'bin', 'x64'), os.path.join(r_home, 'bin')):
+        if os.path.isdir(_sub) and _sub.lower() not in os.environ.get('PATH', '').lower():
+            os.environ['PATH'] = _sub + os.pathsep + os.environ['PATH']
+
+
+def combine_lick_cohorts(cohort_dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Concatenate per-cohort DataFrames, filling Cohort and CA% if absent."""
+    frames = []
+    for label, df in cohort_dfs.items():
+        d = df.copy()
+        if 'Cohort' not in d.columns:
+            d['Cohort'] = label
+        if 'CA%' not in d.columns:
+            try:
+                d['CA%'] = float(label.split('%')[0].split()[-1])
+            except Exception:
+                d['CA%'] = np.nan
+        frames.append(d)
+    combined = pd.concat(frames, ignore_index=True)
+    if 'CA%' in combined.columns:
+        combined['CA%'] = pd.to_numeric(combined['CA%'], errors='coerce')
+    return combined
+
+
+def add_week_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Add a 0-based sequential Week column derived from sorted unique dates per animal."""
+    if 'Week' in df.columns:
+        return df
+    if 'Date' not in df.columns or 'ID' not in df.columns:
+        return df
+    df = df.copy()
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    df = df.sort_values(['ID', 'Date']).reset_index(drop=True)
+
+    def _assign(grp):
+        grp = grp.sort_values('Date')
+        uq = {d: i for i, d in enumerate(sorted(grp['Date'].dt.date.unique()))}
+        grp['Week'] = grp['Date'].dt.date.map(uq)
+        return grp
+
+    return df.groupby('ID', group_keys=False).apply(_assign)
+
+
+def _poly_fmt_p(p) -> str:
+    """Format a p-value for the PROC MIXED-style polynomial contrasts report."""
+    try:
+        if pd.isna(p):
+            return 'n/a'
+        p = float(p)
+        if p < 0.0001:
+            return f'{p:.2e}'
+        return f'{p:.4f}'
+    except (TypeError, ValueError):
+        return 'n/a'
+
+
+def _poly_sig_stars(p) -> str:
+    """Return significance stars (* ** ***) for a p-value."""
+    try:
+        if pd.isna(p):
+            return ''
+        p = float(p)
+        if p < 0.001: return '***'
+        if p < 0.01:  return '**'
+        if p < 0.05:  return '*'
+        if p < 0.10:  return '.'
+        return ''
+    except (TypeError, ValueError):
+        return ''
+
+
+def _holm_bonferroni(p_values: list) -> list:
+    """Return Holm-Bonferroni step-down corrected p-values (same order as input)."""
+    n = len(p_values)
+    if n == 0:
+        return []
+    indexed = sorted(enumerate(p_values), key=lambda x: x[1])
+    adjusted = [0.0] * n
+    running_max = 0.0
+    for rank, (orig_idx, p) in enumerate(indexed):
+        adj = min(1.0, float(p) * (n - rank))
+        adj = max(adj, running_max)   # enforce monotonicity
+        adjusted[orig_idx] = adj
+        running_max = adj
+    return adjusted
+
+
+def _bh_fdr(p_values: List[float]) -> List[float]:
+    """Benjamini-Hochberg FDR correction. Returns adjusted p-values in original order."""
+    n = len(p_values)
+    if n == 0:
+        return []
+    order = np.argsort(p_values)
+    ranked = np.empty(n)
+    ranked[order] = np.arange(1, n + 1)
+    adjusted = np.array(p_values) * n / ranked
+    # Enforce monotonicity from the right
+    for i in range(n - 2, -1, -1):
+        adjusted[order[i]] = min(adjusted[order[i]], adjusted[order[i + 1]])
+    return [float(min(v, 1.0)) for v in adjusted]
+
+
+def fig4_nparLD_lick_analysis(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    measures: Optional[List[str]] = None,
+    time_points: Optional[List[int]] = None,
+    save_path: Optional[Path] = None,
+) -> Dict:
+    """Nonparametric repeated-measures analysis via R package nparLD (F1-LD-F1 design).
+
+    Design: Cohort (between-subjects, 1 factor) × Week (within-subjects/longitudinal, 1 factor).
+    No sex factor. Three dependent variables analysed by default, with BH-FDR correction
+    applied across DVs separately for each effect (Cohort, Week, Cohort × Week).
+
+    The F1-LD-F1 model produces:
+        - ATS  — ANOVA-Type Statistic (F-approximation; recommended for small samples)
+        - WTS  — Wald-Type Statistic  (Chi-square; asymptotic, shown for reference)
+        - RTEs — Relative Treatment Effects per group × time cell (rank-based, 0–1 scale)
+
+    Missing data: nparLD requires balanced data. Subjects missing any time point are
+    automatically excluded and a count of dropped subjects is reported.
+
+    Requires: rpy2  +  R with  install.packages('nparLD')
+
+    Parameters
+    ----------
+    cohort_dfs  : dict
+        Loaded cohort DataFrames (from load_lick_cohorts).
+    measures    : list of str, optional
+        DVs to analyse.  Default: ['Total_Licks', 'Fecal_Count', 'First_5min_Lick_Pct'].
+    time_points : list of int, optional
+        Restrict to these Week indices (0-based).  None = all weeks.
+    save_path   : Path, optional
+        Write the full plain-text report here.
+
+    Returns
+    -------
+    dict
+        'measures'  : per-DV dicts with 'ats', 'wts', 'rte', 'r_text', 'report_section'
+        'fdr_pvals' : {effect: {measure: raw_p}}
+        'report'    : full formatted string
+    """
+    W = 80
+
+    print("\n" + "=" * W)
+    print("R-BASED nparLD: NONPARAMETRIC REPEATED MEASURES  (F1-LD-F1 DESIGN)")
+    print("=" * W)
+
+    if not HAS_RPY2:
+        print(
+            "[ERROR] rpy2 is not installed — cannot run R-based analysis.\n"
+            "  pip install rpy2\n"
+            "  Also requires R with:  install.packages('nparLD')"
+        )
+        return {'error': 'rpy2 not installed'}
+
+    _ensure_r_path()  # Windows: add R\bin\x64 to PATH before loading any DLLs
+
+    import rpy2.robjects as ro
+    from rpy2.robjects import pandas2ri
+    from rpy2.robjects.packages import importr
+    import tempfile, os
+
+    # ── rpy2 pandas converter ────────────────────────────────────────────
+    try:
+        from rpy2.robjects.conversion import localconverter
+        def _to_r(df):
+            with localconverter(ro.default_converter + pandas2ri.converter):
+                return ro.conversion.py2rpy(df)
+    except Exception:
+        pandas2ri.activate()
+        def _to_r(df):
+            return pandas2ri.py2rpy(df)
+
+    # ── default measures ─────────────────────────────────────────────────
+    _DEFAULT_MEASURES = ["Total_Licks", "Fecal_Count", "First_5min_Lick_Pct"]
+    if measures is None:
+        _comb_tmp = combine_lick_cohorts(cohort_dfs)
+        measures = [m for m in _DEFAULT_MEASURES if m in _comb_tmp.columns]
+        if not measures:
+            measures = ["Total_Licks"]
+
+    # ── prepare combined dataset ─────────────────────────────────────────
+    #print("\nStep 1: Preparing combined dataset...")
+    combined_df = combine_lick_cohorts(cohort_dfs)
+
+    if 'Week' not in combined_df.columns:
+        combined_df = add_week_column(combined_df)
+
+    if time_points is not None:
+        combined_df = combined_df[combined_df['Week'].isin(time_points)].copy()
+
+    combined_df = combined_df.copy()
+    # Use Cohort label when available — stable between-subjects ID.
+    # For Ramp cohorts CA% varies per week, so using CA% would scatter
+    # ramp animals across multiple spurious group levels.
+    if 'Cohort' in combined_df.columns:
+        combined_df['CA_group'] = combined_df['Cohort']
+    elif 'CA%' in combined_df.columns:
+        combined_df['CA_group'] = combined_df['CA%'].apply(
+            lambda x: f"{x:.0f}% CA" if pd.notna(x) else 'Unknown'
+        )
+    else:
+        combined_df['CA_group'] = 'Unknown'
+
+    weeks     = sorted(combined_df['Week'].dropna().unique())
+    ca_groups = sorted(combined_df['CA_group'].dropna().unique())
+    _n_animals_total = combined_df['ID'].nunique() if 'ID' in combined_df.columns else '?'
+
+    #print(f"  Weeks (0-based): {[int(w) for w in weeks]}")
+    #print(f"  CA groups      : {ca_groups}")
+    #print(f"  Total animals  : {_n_animals_total}")
+
+    # ── verify R nparLD ──────────────────────────────────────────────────
+    #print("\nStep 2: Verifying R package (nparLD)...")
+    try:
+        importr('nparLD')
+        #print("  [OK] nparLD is available.")
+    except Exception as _e:
+        print(f"[ERROR] nparLD not found: {_e}")
+        print("  Install in R:  install.packages('nparLD')")
+        return {'error': f'nparLD unavailable: {_e}'}
+
+    results_by_measure: Dict = {}
+    report_sections: List[str] = []
+    _ts = _fig4_datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _ats_pvals: Dict[str, Dict[str, float]] = {}   # {effect: {measure: raw_p}}
+    _box_pvals: Dict[str, Dict[str, float]] = {}   # Box-approx p-values for Cohort (between-subjects)
+
+    # ── report header ────────────────────────────────────────────────────
+    report_sections += [
+        "=" * W,
+        "  NONPARAMETRIC REPEATED MEASURES ANALYSIS  (R: nparLD)",
+        "  Design: F1-LD-F1  (1 between-subjects × 1 within-subjects factor)",
+        "=" * W,
+        f"  Generated          : {_ts}",
+        f"  Between factor     : Cohort  ({', '.join(ca_groups)})",
+        f"  Within factor      : Week    ({', '.join(str(int(w)) for w in weeks)})",
+        f"  N animals (total)  : {_n_animals_total}",
+        f"  Dependent variables: {', '.join(measures)}",
+        "",
+        "  Test statistics:",
+        "    ATS = ANOVA-Type Statistic (F-approximation, recommended for small n)",
+        "    WTS = Wald-Type Statistic  (Chi-sq, asymptotic, shown for reference)",
+        "    RTE = Relative Treatment Effect (rank-based mean, 0-1 scale)",
+        "",
+        "  Multiple comparison correction:",
+        "    BH-FDR across DVs per omnibus effect (Cohort, Week, Cohort:Week interaction)",
+        "    Holm-Bonferroni within $pair.comparison pairwise p-values (per test type)",
+        "=" * W,
+        "",
+        "  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10",
+        "",
+    ]
+
+    # ── per-measure loop ─────────────────────────────────────────────────
+    for measure in measures:
+        if measure not in combined_df.columns:
+            print(f"\n  [SKIP] '{measure}' not found in combined data.")
+            continue
+
+        #print(f"\nStep 3 [{measure}]: Running nparLD in R...")
+        measure_label = _OMNIBUS_MEASURE_LABELS.get(measure, measure.replace('_', ' '))
+
+        adf = combined_df[['ID', 'Week', 'CA_group', measure]].dropna().copy()
+        adf['Week'] = adf['Week'].astype(int)
+
+        # nparLD requires exactly 1 observation per (subject, time) cell.
+        # Warn and drop extra rows for any duplicated (ID, Week) pairs.
+        _n_dups = adf.duplicated(subset=['ID', 'Week']).sum()
+        if _n_dups > 0:
+            print(f"  [WARNING] Found {_n_dups} duplicate (ID, Week) rows for '{measure}' — "
+                  f"keeping first occurrence per cell (nparLD requires balanced unique cells).")
+            adf = adf.drop_duplicates(subset=['ID', 'Week'], keep='first').copy()
+
+        # nparLD requires balanced data: keep only subjects with all time points
+        _week_set = set(adf['Week'].unique())
+        _complete_ids = [
+            sid for sid, grp in adf.groupby('ID')
+            if set(grp['Week'].unique()) >= _week_set
+        ]
+        _n_dropped = adf['ID'].nunique() - len(_complete_ids)
+        # if _n_dropped > 0:
+        #     print(f"  [INFO] Dropped {_n_dropped} subject(s) with incomplete week data for '{measure}'.")
+        adf = adf[adf['ID'].isin(_complete_ids)].copy()
+
+        if adf['ID'].nunique() < 3:
+            print(f"  [WARNING] < 3 subjects with complete data for '{measure}' — skipping.")
+            continue
+
+        # ── nparLD input validation table ────────────────────────────────────
+        # Print the (animal, cohort, week, value) grid so you can verify that
+        # subjects and time points are correctly aligned before data enters R.
+        _val_weeks   = sorted(adf['Week'].unique())
+        _val_groups  = sorted(adf['CA_group'].unique())
+        _col_w = 9   # width per week column
+        # print(f"\n{'─'*72}")
+        # print(f"nparLD INPUT VALIDATION — {measure_label}  ({measure})")
+        # print(f"  Animals : {adf['ID'].nunique()}   Weeks : {[int(w) for w in _val_weeks]}   "
+        #       f"Groups : {_val_groups}")
+        # print(f"{'─'*72}")
+        # Header row: Animal | Group | Week0 | Week1 | ...
+        _hdr = f"  {'Animal':<12}  {'Group':<14}" + "".join(
+            f"  {'Wk'+str(int(w)):>{_col_w}}" for w in _val_weeks
+        )
+        #print(_hdr)
+        #print(f"  {'─'*12}  {'─'*14}" + ("  " + "─"*_col_w) * len(_val_weeks))
+        _adf_pivot = (
+            adf.set_index(['ID', 'CA_group', 'Week'])[measure]
+               .unstack('Week')
+               .reset_index()
+               .sort_values(['CA_group', 'ID'])
+        )
+        for _, _vrow in _adf_pivot.iterrows():
+            _vals_str = "".join(
+                f"  {_vrow.get(w, np.nan):>{_col_w}.1f}"
+                if not pd.isna(_vrow.get(w, np.nan)) else f"  {'NaN':>{_col_w}}"
+                for w in _val_weeks
+            )
+            #print(f"  {str(_vrow['ID']):<12}  {str(_vrow['CA_group']):<14}{_vals_str}")
+        #print(f"{'─'*72}")
+        # Cross-check: flag any animal appearing in multiple groups
+        _id_groups = adf.groupby('ID')['CA_group'].nunique()
+        _multi_grp = _id_groups[_id_groups > 1]
+        if not _multi_grp.empty:
+            print(f"  [WARNING] These animals appear in >1 CA_group — check cohort labelling:")
+            for _aid in _multi_grp.index:
+                _gs = adf[adf['ID'] == _aid]['CA_group'].unique().tolist()
+                print(f"    {_aid}: {_gs}")
+        else:
+            print(f"  [OK] Each animal appears in exactly one group.")
+        #print(f"{'─'*72}\n")
+        # ── end validation ───────────────────────────────────────────────────
+
+        n_subj = adf['ID'].nunique()
+        n_obs  = len(adf)
+
+        # Temp file paths
+        _tmpdir = tempfile.gettempdir().replace('\\', '/')
+        _uid    = str(id(adf))[-6:]
+        _ats_fp  = f"{_tmpdir}/nparLD_ats_{measure}_{_uid}.csv"
+        _wts_fp  = f"{_tmpdir}/nparLD_wts_{measure}_{_uid}.csv"
+        _rte_fp  = f"{_tmpdir}/nparLD_rte_{measure}_{_uid}.csv"
+        _txt_fp  = f"{_tmpdir}/nparLD_txt_{measure}_{_uid}.txt"
+        _meta_fp = f"{_tmpdir}/nparLD_meta_{measure}_{_uid}.csv"
+        _box_fp  = f"{_tmpdir}/nparLD_box_{measure}_{_uid}.csv"
+        # Determine permanent plot save path next to the report (or in cwd)
+        _plot_base = save_path.with_suffix('') if save_path else Path('.') / 'nparLD_plot'
+        _plot_fp   = Path(f"{_plot_base}_{measure}.png")
+        _plot_fp_r = str(_plot_fp).replace('\\', '/')
+
+        try:
+            ro.globalenv['r_df']       = _to_r(adf)
+            ro.globalenv['r_measure']  = measure
+            ro.globalenv['r_ats_fp']   = _ats_fp
+            ro.globalenv['r_wts_fp']   = _wts_fp
+            ro.globalenv['r_rte_fp']   = _rte_fp
+            ro.globalenv['r_txt_fp']   = _txt_fp
+            ro.globalenv['r_meta_fp']  = _meta_fp
+            ro.globalenv['r_box_fp']   = _box_fp
+            ro.globalenv['r_plot_fp']  = _plot_fp_r
+
+            ro.r("""
+                suppressPackageStartupMessages(library(nparLD))
+
+                df_r          <- r_df
+                df_r$ID       <- as.factor(df_r$ID)
+                df_r$CA_group <- as.factor(df_r$CA_group)
+                df_r$Week     <- as.integer(df_r$Week)
+
+                result <- f1.ld.f1(
+                    y          = df_r[[r_measure]],
+                    time       = df_r$Week,
+                    group      = df_r$CA_group,
+                    subject    = df_r$ID,
+                    time.name  = "Week",
+                    group.name = "Cohort",
+                    description = FALSE
+                )
+
+                # Save the nparLD RTE plot to a PNG file instead of showing it on screen
+                # Wrapped in tryCatch so a plot failure does not abort the analysis
+                tryCatch({
+                    png(r_plot_fp, width = 800, height = 600, res = 100)
+                    plot(result)
+                    dev.off()
+                }, error = function(e) {
+                    tryCatch(dev.off(), error = function(e2) NULL)
+                    warning(paste("nparLD plot() failed (plot not saved):", conditionMessage(e)))
+                })
+
+                # Full print output
+                full_txt <- capture.output(print(result))
+                writeLines(full_txt, r_txt_fp)
+
+                # ANOVA-type table (ATS)
+                if (!is.null(result$ANOVA.test)) {
+                    ats <- as.data.frame(result$ANOVA.test)
+                    ats$effect <- rownames(ats)
+                    write.csv(ats, r_ats_fp, row.names = FALSE)
+                } else {
+                    write.csv(data.frame(), r_ats_fp, row.names = FALSE)
+                }
+
+                # Wald-type table (WTS)
+                if (!is.null(result$Wald.test)) {
+                    wts <- as.data.frame(result$Wald.test)
+                    wts$effect <- rownames(wts)
+                    write.csv(wts, r_wts_fp, row.names = FALSE)
+                } else {
+                    write.csv(data.frame(), r_wts_fp, row.names = FALSE)
+                }
+
+                # Relative Treatment Effects
+                if (!is.null(result$RTE)) {
+                    rte <- as.data.frame(result$RTE)
+                    write.csv(rte, r_rte_fp, row.names = TRUE)
+                } else {
+                    write.csv(data.frame(), r_rte_fp, row.names = FALSE)
+                }
+
+                # Model metadata (name, design settings)
+                model_name  <- if (!is.null(result$model.name)) result$model.name else "F1-LD-F1"
+                setting     <- result$setting
+                n_groups    <- if (!is.null(setting$g)) setting$g else NA
+                n_timepts   <- if (!is.null(setting$t)) setting$t else NA
+                alpha_used  <- if (!is.null(setting$error.rate)) setting$error.rate else 0.05
+                n_per_grp   <- if (!is.null(setting$n)) paste(setting$n, collapse=",") else NA
+                meta_df <- data.frame(
+                    model_name = model_name,
+                    n_groups   = n_groups,
+                    n_timepts  = n_timepts,
+                    alpha      = alpha_used,
+                    n_per_grp  = n_per_grp
+                )
+                write.csv(meta_df, r_meta_fp, row.names = FALSE)
+
+                # Box approximation of ATS (between-subjects Cohort only)
+                if (!is.null(result$ANOVA.test.mod.Box)) {
+                    box <- as.data.frame(result$ANOVA.test.mod.Box)
+                    box$effect <- rownames(box)
+                    write.csv(box, r_box_fp, row.names = FALSE)
+                } else {
+                    write.csv(data.frame(), r_box_fp, row.names = FALSE)
+                }
+            """)
+
+            # Read results back
+            ats_df  = pd.read_csv(_ats_fp)  if os.path.exists(_ats_fp)  else pd.DataFrame()
+            wts_df  = pd.read_csv(_wts_fp)  if os.path.exists(_wts_fp)  else pd.DataFrame()
+            rte_df  = pd.read_csv(_rte_fp)  if os.path.exists(_rte_fp)  else pd.DataFrame()
+            r_text  = Path(_txt_fp).read_text(encoding='utf-8') if os.path.exists(_txt_fp) else ''
+            meta_df = pd.read_csv(_meta_fp) if os.path.exists(_meta_fp) else pd.DataFrame()
+            box_df  = pd.read_csv(_box_fp)  if os.path.exists(_box_fp)  else pd.DataFrame()
+            r_model_name = str(meta_df['model_name'].iloc[0]) if not meta_df.empty else 'F1-LD-F1'
+            r_alpha      = float(meta_df['alpha'].iloc[0])    if not meta_df.empty else 0.05
+            r_n_per_grp  = str(meta_df['n_per_grp'].iloc[0])  if not meta_df.empty else ''
+
+            for _fp in [_ats_fp, _wts_fp, _rte_fp, _txt_fp, _meta_fp, _box_fp]:
+                try:    os.unlink(_fp)
+                except Exception: pass
+
+            # Report plot save path
+            _plot_saved = _plot_fp.exists()
+
+            # Collect ATS p-values for cross-DV FDR
+            _eff_col = 'effect' if 'effect' in ats_df.columns else None
+            _p_col   = next((c for c in ['p-value', 'p.value', 'Pr(>F)', 'p_value']
+                             if c in ats_df.columns), None)
+            if _eff_col and _p_col and not ats_df.empty:
+                for _, row in ats_df.iterrows():
+                    eff = str(row[_eff_col]).strip()
+                    try:
+                        _ats_pvals.setdefault(eff, {})[measure] = float(row[_p_col])
+                    except (ValueError, TypeError):
+                        pass
+
+            # Collect Box approximation p-value for Cohort (used in BH-FDR instead of ATS)
+            _box_eff_col = 'effect' if 'effect' in box_df.columns else None
+            _box_p_col   = next((c for c in ['p-value', 'p.value', 'Pr(>F)', 'p_value']
+                                 if c in box_df.columns), None)
+            if _box_eff_col and _box_p_col and not box_df.empty:
+                for _, row in box_df.iterrows():
+                    eff = str(row[_box_eff_col]).strip()
+                    try:
+                        _box_pvals.setdefault(eff, {})[measure] = float(row[_box_p_col])
+                    except (ValueError, TypeError):
+                        pass
+
+            # ── format report section ────────────────────────────────────
+            sec: List[str] = []
+            _grp_sizes = ''
+            if r_n_per_grp:
+                _parts = r_n_per_grp.split(',')
+                _grp_sizes = '  |  '.join(
+                    f"{g}: n={s.strip()}" for g, s in zip(ca_groups, _parts)
+                ) if len(_parts) == len(ca_groups) else r_n_per_grp
+            sec += [
+                "",
+                "═" * W,
+                f"  DEPENDENT VARIABLE:  {measure_label}  ({measure})",
+                "═" * W,
+                "",
+                "  Model Information",
+                f"    {'Model (R)':<40} {r_model_name}",
+                f"    {'Method':<40} Nonparametric rank-based (nparLD)",
+                f"    {'Between-subjects factor':<40} Cohort  ({', '.join(ca_groups)})",
+                f"    {'Within-subjects factor':<40} Week    ({', '.join(str(int(w)) for w in weeks)})",
+                f"    {'N subjects (complete data)':<40} {n_subj}",
+                f"    {'N observations used':<40} {n_obs}",
+                f"    {'N subjects dropped (incomplete data)':<40} {_n_dropped}",
+                f"    {'N per group (from R)':<40} {_grp_sizes if _grp_sizes else '—'}",
+                f"    {'Significance level (alpha)':<40} {r_alpha:.2f}",
+                f"    {'RTE plot saved':<40} {_plot_fp.name if _plot_saved else '[not saved]'}",
+                "",
+                "  Note: nparLD uses rank transformation; no parametric model is fit.",
+                "  Residuals, R², AIC/BIC are not applicable. Inference is based on",
+                "  Relative Treatment Effects (RTEs) which are bounded in [0, 1].",
+                "",
+            ]
+
+            # ATS table
+            if not ats_df.empty:
+                _s_col  = next((c for c in ['Statistic', 'ATS', 'F']
+                                if c in ats_df.columns), None)
+                _d1_col = next((c for c in ['df1', 'df', 'Df'] if c in ats_df.columns), None)
+                _d2_col = next((c for c in ['df2'] if c in ats_df.columns), None)
+                sec += [
+                    "  ANOVA-Type Statistics (ATS)  —  F-approximation, recommended for small n",
+                    f"  {'Effect':<30}  {'ATS':>10}  {'df1':>8}  {'df2':>8}  {'p-value':>10}  Sig",
+                    "  " + "─" * 74,
+                ]
+                for _, row in ats_df.iterrows():
+                    eff  = str(row.get('effect', '')).strip()
+                    stat = float(row[_s_col])  if _s_col  and _s_col  in row.index else np.nan
+                    df1  = float(row[_d1_col]) if _d1_col and _d1_col in row.index else np.nan
+                    df2  = float(row[_d2_col]) if _d2_col and _d2_col in row.index else np.nan
+                    pv   = float(row[_p_col])  if _p_col  and _p_col  in row.index else np.nan
+                    df2_str = f"{df2:>8.2f}" if not np.isnan(df2) else f"{'—':>8}"
+                    sec.append(
+                        f"  {eff:<30}  {stat:>10.4f}  {df1:>8.2f}  {df2_str}  "
+                        f"{_poly_fmt_p(pv):>10}  {_poly_sig_stars(pv)}"
+                    )
+                sec.append("")
+            else:
+                sec += ["  [INFO] ATS table not returned by nparLD.", ""]
+
+            # Box approximation table (Cohort only)
+            if not box_df.empty:
+                _bs_col  = next((c for c in ['Statistic', 'ATS', 'F']
+                                 if c in box_df.columns), None)
+                _bd1_col = next((c for c in ['df1', 'df', 'Df'] if c in box_df.columns), None)
+                _bd2_col = next((c for c in ['df2'] if c in box_df.columns), None)
+                _bp_col  = next((c for c in ['p-value', 'p.value', 'Pr(>F)', 'p_value']
+                                 if c in box_df.columns), None)
+                sec += [
+                    "  ATS with Box approximation  —  preferred for small between-subjects N",
+                    f"  {'Effect':<30}  {'Statistic':>10}  {'df1':>8}  {'df2':>8}  {'p-value':>10}  Sig",
+                    "  " + "─" * 74,
+                ]
+                for _, row in box_df.iterrows():
+                    eff   = str(row.get('effect', '')).strip()
+                    stat  = float(row[_bs_col])  if _bs_col  and _bs_col  in row.index else np.nan
+                    df1_  = float(row[_bd1_col]) if _bd1_col and _bd1_col in row.index else np.nan
+                    df2_  = float(row[_bd2_col]) if _bd2_col and _bd2_col in row.index else np.nan
+                    pv_   = float(row[_bp_col])  if _bp_col  and _bp_col  in row.index else np.nan
+                    df2_s = f"{df2_:>8.4f}" if not np.isnan(df2_) else f"{'—':>8}"
+                    sec.append(
+                        f"  {eff:<30}  {stat:>10.4f}  {df1_:>8.4f}  {df2_s}  "
+                        f"{_poly_fmt_p(pv_):>10}  {_poly_sig_stars(pv_)}"
+                    )
+                sec.append("")
+            else:
+                sec += ["  [INFO] Box approximation not returned by nparLD.", ""]
+
+            # WTS table
+            if not wts_df.empty:
+                _ws_col  = next((c for c in ['Statistic', 'WTS', 'Chisq']
+                                 if c in wts_df.columns), None)
+                _wd_col  = next((c for c in ['df', 'Df'] if c in wts_df.columns), None)
+                _wp_col  = next((c for c in ['p-value', 'p.value', 'Pr(>Chisq)']
+                                 if c in wts_df.columns), None)
+                sec += [
+                    "  Wald-Type Statistics (WTS)  —  Chi-square, asymptotic (shown for reference)",
+                    f"  {'Effect':<30}  {'WTS (chi-sq)':>12}  {'df':>6}  {'p-value':>10}  Sig",
+                    "  " + "─" * 66,
+                ]
+                for _, row in wts_df.iterrows():
+                    eff  = str(row.get('effect', '')).strip()
+                    stat = float(row[_ws_col]) if _ws_col and _ws_col in row.index else np.nan
+                    df_  = float(row[_wd_col]) if _wd_col and _wd_col in row.index else np.nan
+                    pv   = float(row[_wp_col]) if _wp_col and _wp_col in row.index else np.nan
+                    sec.append(
+                        f"  {eff:<30}  {stat:>12.4f}  {df_:>6.2f}  "
+                        f"{_poly_fmt_p(pv):>10}  {_poly_sig_stars(pv)}"
+                    )
+                sec.append("")
+            else:
+                sec += ["  [INFO] WTS table not returned by nparLD.", ""]
+
+            # RTE table — nparLD marginal RTEs have no SE/CI, so only show RTE column
+            if not rte_df.empty:
+                if 'Unnamed: 0' in rte_df.columns:
+                    rte_df = rte_df.rename(columns={'Unnamed: 0': 'label'})
+                _lbl_col = 'label' if 'label' in rte_df.columns else rte_df.columns[0]
+                _est_col = next((c for c in ['RTE', 'Estimate', 'rte']
+                                 if c in rte_df.columns), None)
+                _nobs_col = next((c for c in ['Nobs', 'nobs', 'N'] if c in rte_df.columns), None)
+                sec += [
+                    "  Relative Treatment Effects (RTEs)  —  rank-based effect sizes (0-1 scale)",
+                    "  Interpretation: RTE near 0.5 = no effect; >0.5 = higher ranks in this cell",
+                    "",
+                ]
+                # Split into marginal rows (Cohort-only, Week-only) and cell rows (Cohort:Week)
+                all_rows = list(rte_df.iterrows())
+                cohort_rows = [(lbl, row) for _, row in all_rows
+                               if ':' not in str(lbl := str(row.get(_lbl_col, '')))
+                               and 'Week' not in lbl.replace('CohortRamp', '').replace('Cohort0%', '').replace('Cohort2%', '')]
+                week_rows   = [(lbl, row) for _, row in all_rows
+                               if ':' not in str(lbl := str(row.get(_lbl_col, '')))
+                               and lbl.startswith('Week')]
+                cell_rows   = [(lbl, row) for _, row in all_rows
+                               if ':' in str(lbl := str(row.get(_lbl_col, '')))]
+                # Re-derive correctly (the list comp above shadows lbl badly)
+                cohort_rows, week_rows, cell_rows = [], [], []
+                for _, row in all_rows:
+                    lbl = str(row.get(_lbl_col, '')).strip()
+                    if ':' in lbl:
+                        cell_rows.append((lbl, row))
+                    elif lbl.startswith('Week'):
+                        week_rows.append((lbl, row))
+                    else:
+                        cohort_rows.append((lbl, row))
+
+                def _rte_line(lbl, row, indent=4):
+                    est  = float(row[_est_col])  if _est_col  and _est_col  in row.index else np.nan
+                    nobs = int(row[_nobs_col])    if _nobs_col and _nobs_col in row.index else None
+                    nobs_str = f"  n={nobs}" if nobs is not None else ''
+                    return f"  {' '*indent}{lbl:<36}  {est:>6.4f}{nobs_str}"
+
+                if cohort_rows:
+                    sec.append("  Between-subjects (Cohort marginal):")
+                    for lbl, row in cohort_rows:
+                        sec.append(_rte_line(lbl, row))
+                    sec.append("")
+                if week_rows:
+                    sec.append("  Within-subjects (Week marginal):")
+                    for lbl, row in week_rows:
+                        sec.append(_rte_line(lbl, row))
+                    sec.append("")
+                if cell_rows:
+                    sec.append("  Cell RTEs (Cohort × Week):")
+                    for lbl, row in cell_rows:
+                        sec.append(_rte_line(lbl, row))
+                    sec.append("")
+            else:
+                sec += ["  [INFO] RTE table not returned by nparLD.", ""]
+
+            # Pairwise group comparisons from $pair.comparison
+            # Parse from the verbatim R text
+            _pair_lines = []
+            _atime_lines = []
+            if r_text.strip():
+                import re as _re
+                lines_rt = r_text.splitlines()
+                # Find $pair.comparison block
+                in_pair, in_atime = False, False
+                for ln in lines_rt:
+                    stripped = ln.strip()
+                    if stripped == '$pair.comparison':
+                        in_pair, in_atime = True, False
+                        continue
+                    if stripped == '$ANOVA.test.time':
+                        in_atime, in_pair = True, False
+                        continue
+                    if stripped.startswith('$'):
+                        in_pair, in_atime = False, False
+                        continue
+                    if in_pair and stripped:
+                        _pair_lines.append(stripped)
+                    if in_atime and stripped:
+                        _atime_lines.append(stripped)
+
+            if _pair_lines:
+                # Parse all pairwise rows first, then apply Holm-Bonferroni per test type
+                # Header: "Pairs  Test  Statistic  df  p-value"
+                # Data:   "1 Cohort0% CA:Cohort2% CA  Cohort  39.575280  1.000000  3.156537e-10"
+                _parsed_pairs = []
+                for ln in _pair_lines:
+                    if ln.lstrip().startswith('Pairs'):
+                        continue
+                    m = _re.match(
+                        r'^\d+\s+(.+?)\s+(Cohort|Week|Cohort:Week)\s+([\d.e+\-]+)\s+([\d.e+\-]+)\s+([\d.e+\-]+)\s*$',
+                        ln
+                    )
+                    if m:
+                        _parsed_pairs.append({
+                            'pair'  : m.group(1).strip().replace('Cohort', '').replace(':', ' vs '),
+                            'test'  : m.group(2),
+                            'stat'  : float(m.group(3)),
+                            'df'    : float(m.group(4)),
+                            'p_raw' : float(m.group(5)),
+                        })
+                    else:
+                        _parsed_pairs.append({'raw_line': ln})
+
+                # Apply Holm-Bonferroni separately within each test type
+                _test_type_indices: Dict[str, list] = {}
+                for _pi, _pr in enumerate(_parsed_pairs):
+                    if 'test' in _pr:
+                        _test_type_indices.setdefault(_pr['test'], []).append(_pi)
+                for _ttype, _tidxs in _test_type_indices.items():
+                    _raw_ps  = [_parsed_pairs[i]['p_raw'] for i in _tidxs]
+                    _adj_ps  = _holm_bonferroni(_raw_ps)
+                    for _ti, _ap in zip(_tidxs, _adj_ps):
+                        _parsed_pairs[_ti]['p_adj'] = _ap
+
+                # Build marginal cohort RTE lookup for |ΔRTE| effect size (Cohort tests only)
+                _cohort_rte_map: Dict[str, float] = {}
+                if not rte_df.empty:
+                    _cr_lbl = 'label' if 'label' in rte_df.columns else rte_df.columns[0]
+                    _cr_est = next((c for c in ['RTE', 'Estimate', 'rte'] if c in rte_df.columns), None)
+                    if _cr_est:
+                        for _, _crrow in rte_df.iterrows():
+                            _crlbl = str(_crrow.get(_cr_lbl, '')).strip()
+                            if ':' not in _crlbl and not _crlbl.startswith('Week'):
+                                _crgrp = _crlbl.replace('Cohort', '', 1).strip()
+                                try:
+                                    _cohort_rte_map[_crgrp] = float(_crrow[_cr_est])
+                                except (ValueError, TypeError):
+                                    pass
+
+                sec += [
+                    "  Pairwise Group Comparisons  (from nparLD $pair.comparison)",
+                    "  Holm-Bonferroni correction applied within each test type (Cohort / Week / Cohort:Week)",
+                    "  Effect size: |\u0394RTE| = absolute difference in marginal Relative Treatment Effects (Cohort tests only)",
+                    f"  {'Pair':<28}  {'Test':<12}  {'ATS':>11}  {'df':>6}  {'p (raw)':>10}  {'p (Holm)':>10}  {'|\u0394RTE|':>8}  Sig",
+                    "  " + "─" * 102,
+                ]
+                for _pr in _parsed_pairs:
+                    if 'raw_line' in _pr:
+                        sec.append("  " + _pr['raw_line'])
+                    else:
+                        _p_adj = _pr.get('p_adj', _pr['p_raw'])
+                        if _pr['test'] == 'Cohort' and _cohort_rte_map:
+                            _pparts = _pr['pair'].split(' vs ')
+                            if len(_pparts) == 2:
+                                _rte1 = _cohort_rte_map.get(_pparts[0].strip(), float('nan'))
+                                _rte2 = _cohort_rte_map.get(_pparts[1].strip(), float('nan'))
+                                _drte_v = abs(_rte1 - _rte2) if not (np.isnan(_rte1) or np.isnan(_rte2)) else float('nan')
+                                _drte_s = f"{_drte_v:.3f}" if not np.isnan(_drte_v) else 'N/A'
+                            else:
+                                _drte_s = 'N/A'
+                        else:
+                            _drte_s = '\u2014'
+                        sec.append(
+                            f"  {_pr['pair']:<28}  {_pr['test']:<12}  ATS={_pr['stat']:>9.4f}  "
+                            f"df={_pr['df']:>6.2f}  {_poly_fmt_p(_pr['p_raw']):>10}  "
+                            f"{_poly_fmt_p(_p_adj):>10}  {_drte_s:>8}  {_poly_sig_stars(_p_adj)}"
+                        )
+                sec.append("")
+
+            if _atime_lines:
+                sec += [
+                    "  Within-Group Time Effects  (ATS per cohort, from nparLD $ANOVA.test.time)",
+                    "  ─" + "─" * 77,
+                    f"  {'Cohort':<14}  {'ATS':>10}  {'df':>8}  {'p-value':>12}  Sig",
+                    "  " + "─" * 56,
+                ]
+                # Header row from R output: "Statistic  df  p-value"
+                for ln in _atime_lines:
+                    if _re.match(r'^\s*Statistic', ln):
+                        continue
+                    m = _re.match(r'^(\S.+?)\s+([\d.e+\-]+)\s+([\d.e+\-]+)\s+([\d.e+\-]+)\s*$', ln)
+                    if m:
+                        grp   = m.group(1).strip()
+                        stat  = float(m.group(2))
+                        df_   = float(m.group(3))
+                        pv    = float(m.group(4))
+                        sec.append(
+                            f"  {grp:<14}  {stat:>10.4f}  {df_:>8.4f}  "
+                            f"{_poly_fmt_p(pv):>12}  {_poly_sig_stars(pv)}"
+                        )
+                    else:
+                        sec.append("  " + ln)
+                sec.append("")
+
+            # ── per-week between-cohort MWU post-hoc ────────────────────────────────
+            _week_groups = sorted(adf['CA_group'].dropna().unique())
+            sec += [
+                "  Between-Cohort Comparisons at Each Week  (Mann-Whitney U, Holm corrected within each week)",
+                "  Effect size: r_rb = rank-biserial correlation = 1 \u2212 2U/(n\u2081\u00b7n\u2082); range [\u22121, 1], positive = group1 > group2",
+                "  HL = Hodges-Lehmann estimator of location shift (x \u2212 y); 95% CI via wilcox.test",
+                "  " + "─" * 88,
+            ]
+            for _wk in sorted(adf['Week'].dropna().unique()):
+                _week_sub   = adf[adf['Week'] == _wk]
+                _wpairs_raw = []
+                _wpairs_info = []
+                for _wi in range(len(_week_groups)):
+                    for _wj in range(_wi + 1, len(_week_groups)):
+                        _g1, _g2 = _week_groups[_wi], _week_groups[_wj]
+                        _v1 = _week_sub[_week_sub['CA_group'] == _g1][measure].dropna().values
+                        _v2 = _week_sub[_week_sub['CA_group'] == _g2][measure].dropna().values
+                        if len(_v1) > 0 and len(_v2) > 0:
+                            try:
+                                ro.r.assign('lk_ph_x', ro.FloatVector(_v1.tolist()))
+                                ro.r.assign('lk_ph_y', ro.FloatVector(_v2.tolist()))
+                                ro.r('lk_wt_r <- wilcox.test(lk_ph_x, lk_ph_y, exact=FALSE, conf.int=TRUE)')
+                                _U_w     = float(ro.r('as.numeric(lk_wt_r$statistic)')[0])
+                                _p       = float(ro.r('lk_wt_r$p.value')[0])
+                                _hl_w    = float(ro.r('as.numeric(lk_wt_r$estimate)')[0])
+                                _ci_lo_w = float(ro.r('lk_wt_r$conf.int[1]')[0])
+                                _ci_hi_w = float(ro.r('lk_wt_r$conf.int[2]')[0])
+                            except Exception:
+                                _U_w, _p = stats.mannwhitneyu(_v1, _v2, alternative='two-sided')
+                                _U_w = float(_U_w)
+                                _hl_w    = float(np.median(np.subtract.outer(_v1, _v2).ravel()))
+                                _ci_lo_w = float('nan')
+                                _ci_hi_w = float('nan')
+                            _rrb_w = 1.0 - 2.0 * _U_w / (len(_v1) * len(_v2))
+                        else:
+                            _p = 1.0; _U_w = float('nan')
+                            _rrb_w = float('nan'); _hl_w = float('nan')
+                            _ci_lo_w = float('nan'); _ci_hi_w = float('nan')
+                        _wpairs_raw.append(_p)
+                        _wpairs_info.append((_g1, len(_v1), _g2, len(_v2), _U_w, _p, _rrb_w, _hl_w, _ci_lo_w, _ci_hi_w))
+                _wadj = _holm_bonferroni(_wpairs_raw)
+                sec.append(f"  Week: {int(_wk)}")
+                for (_g1, _n1, _g2, _n2, _U_w, _pr, _rrb, _hl, _ci_lo, _ci_hi), _pa in zip(_wpairs_info, _wadj):
+                    _rrb_s = f"{_rrb:+.3f}" if not np.isnan(_rrb) else 'N/A'
+                    _u_s   = f"{_U_w:.0f}"  if not np.isnan(_U_w) else 'N/A'
+                    _hl_s  = f"{_hl:+.4f}"  if not np.isnan(_hl)  else 'N/A'
+                    _ci_s  = (f"[{_ci_lo:+.4f}, {_ci_hi:+.4f}]"
+                              if not (np.isnan(_ci_lo) or np.isnan(_ci_hi)) else '[N/A]')
+                    sec.append(
+                        f"    {_g1} (n={_n1}) vs {_g2} (n={_n2}) :  "
+                        f"U={_u_s}  p_raw={_poly_fmt_p(_pr)}  p_holm={_poly_fmt_p(_pa)}  "
+                        f"r_rb={_rrb_s}  {_poly_sig_stars(_pa)}"
+                    )
+                    sec.append(f"      HL={_hl_s}  95%CI {_ci_s}")
+                sec.append("")
+
+            sec += ["  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10", ""]
+            report_sections.extend(sec)
+
+            results_by_measure[measure] = {
+                'ats'           : ats_df,
+                'wts'           : wts_df,
+                'rte'           : rte_df,
+                'r_text'        : r_text,
+                'n_subj'        : n_subj,
+                'n_obs'         : n_obs,
+                'n_dropped'     : _n_dropped,
+                'report_section': '\n'.join(sec),
+            }
+
+        except Exception as _exc:
+            import traceback
+            print(f"  [ERROR] nparLD analysis failed for '{measure}': {_exc}")
+            traceback.print_exc()
+            report_sections.append(
+                f"\n  [ERROR] nparLD analysis failed for '{measure}': {_exc}\n"
+            )
+
+    # ── BH-FDR summary across DVs ────────────────────────────────────────
+    if _ats_pvals and len([m for m in measures if m in results_by_measure]) > 1:
+        _fdr_sec: List[str] = [
+            "",
+            "═" * W,
+            "  BH-FDR CORRECTION ACROSS DEPENDENT VARIABLES",
+            "═" * W,
+            "  Cohort: Box-approximation p-values (preferred for small N), BH-FDR corrected.",
+            "  Week, Cohort:Week: ATS p-values, BH-FDR corrected.",
+            "  Correction applied separately per effect row.",
+            "",
+        ]
+        for eff, pv_by_m in sorted(_ats_pvals.items()):
+            # For Cohort use Box p-values when available; fall back to ATS
+            if eff == 'Cohort' and _box_pvals.get('Cohort'):
+                _src_pvals = _box_pvals['Cohort']
+            else:
+                _src_pvals = pv_by_m
+            _ms_with_p = [m for m in measures if m in _src_pvals]
+            if not _ms_with_p:
+                continue
+            _raw_ps = [_src_pvals[m] for m in _ms_with_p]
+            _adj_ps = _bh_fdr(_raw_ps)
+            _fdr_sec += [
+                f"  Effect: {eff}",
+                f"  {'DV':<30}  {'p (raw)':>10}  {'p (BH-adj)':>12}  Sig (adj)",
+                "  " + "─" * 62,
+            ]
+            for m, pr, pa in zip(_ms_with_p, _raw_ps, _adj_ps):
+                ml = _OMNIBUS_MEASURE_LABELS.get(m, m.replace('_', ' '))
+                _fdr_sec.append(
+                    f"  {ml:<30}  {_poly_fmt_p(pr):>10}  {_poly_fmt_p(pa):>12}  "
+                    f"{_poly_sig_stars(pa)}"
+                )
+            _fdr_sec.append("")
+        report_sections.extend(_fdr_sec)
+
+    # ── footer ───────────────────────────────────────────────────────────
+    report_sections += [
+        "=" * W,
+        "  End of nparLD Nonparametric Repeated Measures Report",
+        "=" * W,
+    ]
+
+    full_report = "\n".join(report_sections)
+    #print("\n" + full_report)
+
+    if save_path is not None:
+        Path(save_path).write_text(full_report, encoding='utf-8')
+        #print(f"\n[OK] Report saved -> {save_path}")
+
+    return {
+        'measures'  : results_by_measure,
+        'fdr_pvals' : _ats_pvals,
+        'report'    : full_report,
+    }
+
+
 def _fig4_process_cohort_cap_files(
     master_csv: Path,
     capacitive_files: List[Path],
@@ -4499,6 +5457,11 @@ def figure_4() -> None:
       fig4c_total_licks                — Total Licks per animal, 3 cohorts × week
       fig4e_first5min_lick_pct         — % Licks in First 5 min, 3 cohorts × week
       fig4g_fecal_count                — Fecal Count, 3 cohorts × week
+      fig4d/f/h_rmcorr_*              — rmcorr licks vs weight, one per cohort
+
+    TXT reports saved in OUT_FIG4:
+      fig4_nparLD_cohort_x_week.txt   — nparLD F1-LD-F1 (Cohort × Week) for
+                                        Total_Licks, First_5min_Lick_Pct, Fecal_Count
 
     Cohorts for 4C/4E/4G: 0% CA, 2% CA (6 animals), 5-Week Ramp.
     Processing is the exact pipeline from across_cohort_lick.py _run_lick_all3_menu.
@@ -4543,6 +5506,13 @@ def figure_4() -> None:
         # ── Generate descriptive statistics report ──────────────────────
         print(f"\n[4 Stats] Generating descriptive statistics report ...")
         _fig4_generate_lick_descriptive_stats_report(_cohort_dfs, save_report=True)
+
+        # ── nparLD: Cohort × Week nonparametric RM analysis ──────────────
+        print(f"\n[4 nparLD] Running nparLD analysis (Cohort x Week) ...")
+        fig4_nparLD_lick_analysis(
+            _cohort_dfs,
+            save_path=OUT_FIG4 / "fig4_nparLD_cohort_x_week",
+        )
 
         # ── 4d / 4f / 4h: rmcorr licks vs weight for each cohort ────────────
         print(f"\n[4d/4f/4h] Generating rmcorr plots (licks vs weight) ...")
