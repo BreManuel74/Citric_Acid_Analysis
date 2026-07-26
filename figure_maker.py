@@ -5608,7 +5608,7 @@ def extended_data_2_1() -> None:
 
     slow_ramp_df = _load_master_csv(MASTER_RAMP)
     print("\n[Ext 2-1A] Slow-ramp total-change model comparison ...")
-    _ext_data_2_1_total_change_r_fit(
+    _ext_data_2_1A_total_change_r_fit(
         slow_ramp_df,
         by_day=True,
         save_path=OUT_EXT_2_1 / "ext2_1a_total_change_by_day",
@@ -5616,8 +5616,16 @@ def extended_data_2_1() -> None:
         save_svg=True,
     )
 
+    print("\n[Ext 2-1B] Slow-ramp daily weight change comparison ...")
+    _ext_data_2_1B_friedman_transition_days_r(
+        slow_ramp_df,
+        days = [8, 15, 22, 29],
+        save_path=OUT_EXT_2_1 / "ext2_1b_daily_change_comparison",
+        save_report=True,
+    )
 
-def _ext_data_2_1_total_change_r_fit(
+
+def _ext_data_2_1A_total_change_r_fit(
 	df: pd.DataFrame,
     *,
     by_day: bool = True,
@@ -6049,6 +6057,447 @@ if (m_exp_ok) {{
 
 	#print(f'[R fit] Plot saved: {save_path}')
 	return {'report': report, 'r_stats': r_stats, 'svg_path': svg_out, 'report_path': rpt_path}
+
+
+def _ext_data_2_1B_friedman_transition_days_r(
+    df: pd.DataFrame,
+    *,
+    days: Optional[list] = None,
+    save_path: Optional[Path] = None,
+    save_report: bool = True,
+) -> dict:
+    """Run a Friedman test in R on Daily Weight Change at milestone days.
+
+    Uses R's built-in ``friedman.test()`` for the omnibus test.  All
+    pairwise post-hoc comparisons are computed in Python via the
+    Conover-Iman test, which uses the same within-block Friedman rank
+    matrix as the omnibus (t-distribution, df = (N−1)(k−1)), with
+    Holm-Bonferroni correction.  Wilcoxon W is computed separately as
+    input for the rank-biserial effect size only and does not determine
+    p-values.
+
+    Only mice with complete data at *all* specified days are included.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Master DataFrame.
+    days : list[int], optional
+        Milestone days to test.  Default: [8, 15, 22, 29].
+    save_report : bool
+        Write a .txt report to the current working directory.
+
+    Returns
+    -------
+    dict
+        Keys: r_output, chi_sq, df, p_omnibus, desc_stats, pair_results,
+        report_path, complete_ids, n_subjects
+    """
+    import subprocess
+    import tempfile
+    import re as _re
+    from itertools import combinations
+    from datetime import datetime
+
+    W_RPT = 135   # report line width (matches KW report)
+
+    _days = list(days) if days is not None else [8, 15, 22, 29]
+
+    cdf = df.copy()
+    cdf = _add_day_col(cdf, "ramp")
+
+    if 'Day' not in cdf.columns or 'Daily Change' not in cdf.columns:
+        print("ERROR: 'Day' or 'Daily Change' column not found after processing.")
+        return {}
+
+    # Build long-format table: ID, Day, DailyChange
+    records = []
+    for d in _days:
+        sub = cdf[cdf['Day'] == d][['ID', 'Daily Change']].dropna(subset=['Daily Change'])
+        for _, row in sub.iterrows():
+            records.append({
+                'ID': str(row['ID']),
+                'Day': d,
+                'DailyChange': float(row['Daily Change']),
+            })
+
+    if not records:
+        print("ERROR: No data found for the specified days.")
+        return {}
+
+    long_df = pd.DataFrame(records)
+
+    # Keep only IDs present at ALL days (complete cases required for Friedman)
+    id_counts = long_df.groupby('ID')['Day'].nunique()
+    complete_ids = sorted(id_counts[id_counts == len(_days)].index.tolist())
+    if len(complete_ids) < 3:
+        print(
+            f"ERROR: Only {len(complete_ids)} subject(s) have complete data at "
+            f"all {len(_days)} days. Friedman test requires ≥ 3."
+        )
+        return {}
+
+    long_df = long_df[long_df['ID'].isin(complete_ids)].copy()
+
+    # CRITICAL: sort by Day then by ID so that within each Day level the
+    # subjects appear in the same alphabetical order.  Paired Wilcoxon tests
+    # compare observation[i] of group A with observation[i] of group B — if
+    # the subject order differs between days the wrong animals get paired.
+    long_df = long_df.sort_values(['Day', 'ID']).reset_index(drop=True)
+
+    # Verify alignment: same subject sequence in every Day slice
+    _id_per_day = {d: long_df[long_df['Day'] == d]['ID'].tolist() for d in _days}
+    _ref_order  = _id_per_day[_days[0]]
+    _align_ok   = all(_id_per_day[d] == _ref_order for d in _days[1:])
+
+    # print(f"\nFriedman test: {len(complete_ids)} subjects × {len(_days)} days")
+    # print(f"  Subjects : {', '.join(complete_ids)}")
+    # print(f"  Days     : {_days}")
+
+    # ── Input verification table ─────────────────────────────────────────────
+    # Pivot to wide format: rows = Animal ID, columns = Day
+    # Shows exactly which DailyChange value each animal contributes at each day,
+    # and confirms that the row order (animal sequence) is identical across days.
+    _pivot = (
+        long_df.pivot(index='ID', columns='Day', values='DailyChange')
+        .reindex(index=sorted(long_df['ID'].unique()))
+        .reindex(columns=_days)
+    )
+    _col_w   = 10
+    _id_w    = max(len(str(i)) for i in _pivot.index) + 2
+    _hdr     = f"  {'Animal ID':<{_id_w}}" + "".join(f"  {'Day ' + str(d):>{_col_w}}" for d in _days)
+    _sep     = "  " + "─" * (_id_w + (_col_w + 2) * len(_days))
+    # print(f"\n  Input data fed to Friedman / Conover-Iman post-hoc (DailyChange %/day):")
+    # print(_hdr)
+    # print(_sep)
+    for _aid in _pivot.index:
+        _row_str = f"  {str(_aid):<{_id_w}}"
+        for d in _days:
+            _val = _pivot.loc[_aid, d]
+            _row_str += f"  {_val:>{_col_w}.4f}" if pd.notna(_val) else f"  {'MISSING':>{_col_w}}"
+    #     print(_row_str)
+    # print(_sep)
+
+    # Report whether subject order is consistent (required for valid pairing)
+    # if _align_ok:
+    #     print("  [OK] Subject order is identical across all days — pairing is valid.")
+    # else:
+    #     print("  [WARNING] Subject order is NOT consistent across days — pairing may be invalid!")
+    #     for d in _days:
+    #         print(f"    Day {d}: {_id_per_day[d]}")
+    # print()
+
+    # ── R: omnibus Friedman test only ────────────────────────────────────────
+    tmp_csv = Path(tempfile.mktemp(suffix='.csv'))
+    long_df.to_csv(str(tmp_csv), index=False)
+
+    _csv_r      = str(tmp_csv).replace('\\', '/')
+    _day_levels = ', '.join(str(d) for d in _days)
+    r_script = (
+        'options(warn=1)\n'
+        f'data <- read.csv("{_csv_r}")\n'
+        # Sort within R as well (belt-and-suspenders)
+        'data <- data[order(data$Day, data$ID),]\n'
+        f'data$Day <- factor(data$Day, levels = c({_day_levels}))\n'
+        'data$ID  <- factor(data$ID)\n'
+        '\n'
+        'cat("\\n========================================\\n")\n'
+        'cat("FRIEDMAN TEST - DAILY WEIGHT CHANGE\\n")\n'
+        'cat("========================================\\n")\n'
+        f'cat("Days tested : {_days}\\n")\n'
+        'cat("N subjects  :", nlevels(data$ID), "(complete cases)\\n\\n")\n'
+        '\n'
+        'fr <- friedman.test(DailyChange ~ Day | ID, data = data)\n'
+        'print(fr)\n'
+        '\n'
+        'cat("\\n========================================\\n")\n'
+        'cat("END\\n")\n'
+    )
+
+    tmp_r = Path(tempfile.mktemp(suffix='.R'))
+    tmp_r.write_text(r_script, encoding='utf-8')
+
+    r_output = ''
+    chi_sq   = float('nan')
+    df_fr    = float('nan')
+    p_omni   = float('nan')
+    try:
+        result = subprocess.run(
+            ['Rscript', '--vanilla', str(tmp_r)],
+            capture_output=True, text=True, timeout=120,
+        )
+        r_output = result.stdout
+        r_stderr = result.stderr.strip()
+        if result.returncode != 0:
+            print(f"R exited with code {result.returncode}.")
+        if r_stderr:
+            non_trivial = [
+                ln for ln in r_stderr.splitlines()
+                if not ln.startswith('Loading') and ln.strip()
+            ]
+            if non_trivial:
+                print("R messages:\n" + '\n'.join(non_trivial))
+        # Parse chi-sq, df, p from R output
+        _m = _re.search(
+            r'Friedman chi-squared\s*=\s*([\d.e+\-]+),\s*df\s*=\s*([\d.e+\-]+),'
+            r'\s*p-value\s*[=<]\s*([\d.e+\-]+)',
+            r_output,
+        )
+        if _m:
+            chi_sq = float(_m.group(1))
+            df_fr  = float(_m.group(2))
+            p_omni = float(_m.group(3))
+    except FileNotFoundError:
+        print("ERROR: 'Rscript' not found.  Install R and add Rscript to PATH.")
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+        return {}
+    except subprocess.TimeoutExpired:
+        print("ERROR: R script timed out after 120 s.")
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+        return {}
+    finally:
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+
+    # ── Python: descriptive statistics per day ───────────────────────────────
+    desc_stats: dict = {}
+    for d in _days:
+        vals  = long_df[long_df['Day'] == d].sort_values('ID')['DailyChange'].values
+        n     = len(vals)
+        _mean = float(np.mean(vals))
+        _sem  = float(np.std(vals, ddof=1) / np.sqrt(n)) if n > 1 else float('nan')
+        _ci   = stats.t.interval(0.95, df=n - 1, loc=_mean, scale=_sem) if n > 1 else (float('nan'), float('nan'))
+        desc_stats[d] = {
+            'n': n, 'mean': _mean, 'sem': _sem,
+            'ci_lo': float(_ci[0]), 'ci_hi': float(_ci[1]),
+        }
+
+    # ── Python: Conover-Iman post-hoc (Friedman ranks) + HL + bootstrap CI ──
+    # p-values come from the Conover-Iman t-test, which uses the same within-block
+    # rank matrix as the Friedman omnibus (consistent, analogous to Dunn's after KW).
+    # Wilcoxon W is computed separately as input for rank-biserial r_rb only.
+
+    def _conover_iman_posthoc_fn(data_mat):
+        """
+        Conover-Iman post-hoc for Friedman.
+        data_mat : N × k array (rows = subjects, cols = conditions, original values).
+        Returns   : list of dicts {j, l, t_stat, p_raw} for each pair.
+        t-distribution df = (N-1)*(k-1).
+        """
+        _dm    = np.asarray(data_mat, dtype=float)
+        _N, _k = _dm.shape
+        # Rank within each row (subject) — same ranks as Friedman omnibus
+        _ranks = np.apply_along_axis(stats.rankdata, 1, _dm)
+        _R_bar = _ranks.mean(axis=0)                          # k column means
+        # Residual SS = SS_total − SS_treatments (SS_blocks = 0 for Friedman ranks)
+        _SS_res = float(np.sum((_ranks - _R_bar[np.newaxis, :]) ** 2))
+        _df_res = (_N - 1) * (_k - 1)
+        _S2     = _SS_res / _df_res if _df_res > 0 else float('nan')
+        _out    = []
+        for _jj, _ll in combinations(range(_k), 2):
+            if _S2 > 0 and not np.isnan(_S2):
+                _t = (_R_bar[_jj] - _R_bar[_ll]) / np.sqrt(2.0 * _S2 / _N)
+            else:
+                _t = float('nan')
+            _p_ci = (float(2.0 * stats.t.sf(abs(_t), df=_df_res))
+                     if not np.isnan(_t) else float('nan'))
+            _out.append({'j': _jj, 'l': _ll, 't_stat': float(_t), 'p_raw': _p_ci})
+        return _out
+
+    def _fmt_p(p) -> str:
+        if p != p: return 'N/A'      # nan check
+        if p < 0.001: return f'{p:.2e}'
+        return f'{p:.4f}'
+
+    def _sig(p) -> str:
+        if p != p: return '   '
+        if p < 0.001: return '***'
+        if p < 0.01:  return '** '
+        if p < 0.05:  return '*  '
+        if p < 0.1:   return '.  '
+        return 'ns '
+
+    def _holm(pvals: list) -> list:
+        """Holm-Bonferroni step-down correction."""
+        n = len(pvals)
+        if n == 0:
+            return []
+        order    = sorted(range(n), key=lambda i: pvals[i])
+        adj      = [0.0] * n
+        prev_adj = 0.0
+        for step, idx in enumerate(order):
+            adj_p       = min(1.0, max(prev_adj, pvals[idx] * (n - step)))
+            adj[idx]    = adj_p
+            prev_adj    = adj_p
+        return adj
+
+    # Build N×k data matrix (subjects × days) — _pivot already available above
+    _data_matrix_ci = _pivot.values    # rows = complete_ids (sorted), cols = _days
+    _ci_tests = _conover_iman_posthoc_fn(_data_matrix_ci)
+    _ci_map   = {(_days[r['j']], _days[r['l']]): r for r in _ci_tests}
+
+    pair_results = []
+    _raw_ps      = []
+    _rng         = np.random.default_rng(0)
+    N_BOOT       = 2000
+
+    for d1, d2 in combinations(_days, 2):
+        x1    = long_df[long_df['Day'] == d1].sort_values('ID')['DailyChange'].values
+        x2    = long_df[long_df['Day'] == d2].sort_values('ID')['DailyChange'].values
+        diffs = x1 - x2
+        n_pr  = len(diffs)
+
+        # Conover-Iman t-stat and p-value (uses pooled Friedman ranks)
+        _ci_res = _ci_map.get((d1, d2), {})
+        _t_stat = _ci_res.get('t_stat', float('nan'))
+        _p_raw  = _ci_res.get('p_raw',  float('nan'))
+
+        # Hodges-Lehmann estimator for paired data = median of within-subject diffs
+        _hl = float(np.median(diffs))
+
+        # Bootstrapped 95 % CI on the HL estimate
+        _boot    = [float(np.median(_rng.choice(diffs, size=n_pr, replace=True)))
+                    for _ in range(N_BOOT)]
+        _ci_lo, _ci_hi = float(np.percentile(_boot, 2.5)), float(np.percentile(_boot, 97.5))
+
+        # r_rb from Conover-Iman t-statistic: r = t / sqrt(t² + df)
+        # df = (N_subjects − 1) × (k_days − 1), consistent with Conover-Iman p-values
+        _ci_df_rb = (len(complete_ids) - 1) * (len(_days) - 1)
+        _r_rb     = (float(_t_stat / np.sqrt(_t_stat ** 2 + _ci_df_rb))
+                     if (not np.isnan(_t_stat) and _ci_df_rb > 0) else float('nan'))
+
+        pair_results.append({
+            'd1': d1, 'd2': d2, 'n': n_pr,
+            't_stat': _t_stat, 'p_raw': _p_raw,
+            'hl_est': _hl, 'ci_lo': _ci_lo, 'ci_hi': _ci_hi,
+            'r_rb': _r_rb,
+        })
+        _raw_ps.append(_p_raw if _p_raw == _p_raw else 1.0)
+
+    _adj_ps = _holm(_raw_ps)
+    for i, p_adj in enumerate(_adj_ps):
+        pair_results[i]['p_adj'] = p_adj
+
+    # ── Format report ────────────────────────────────────────────────────────
+    def _fmt_omni_p(p) -> str:
+        if p != p: return 'N/A'
+        return f'{p:.4e}'
+
+    def _sig_omni(p) -> str:
+        if p != p: return ''
+        if p < 0.001: return '***'
+        if p < 0.01:  return '**'
+        if p < 0.05:  return '*'
+        if p < 0.1:   return '.'
+        return 'ns'
+
+    # Kendall's W: omnibus effect size for Friedman = chi^2 / (N * (k-1))
+    _n_subs  = len(complete_ids)
+    _n_conds = len(_days)
+    _kendall_w = (chi_sq / (_n_subs * (_n_conds - 1))
+                  if (chi_sq == chi_sq and _n_subs > 0 and _n_conds > 1)
+                  else float('nan'))
+    _kw_str  = f'{_kendall_w:.3f}' if _kendall_w == _kendall_w else 'N/A'
+
+    _ts_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    _chi_str = f'{chi_sq:.4f}' if chi_sq == chi_sq else 'N/A'
+    _df_str  = str(int(df_fr)) if df_fr == df_fr else '?'
+
+    _lines = [
+        '=' * W_RPT,
+        'FRIEDMAN TEST — DAILY WEIGHT CHANGE AT MILESTONE DAYS',
+        '=' * W_RPT,
+        f"Generated  : {_ts_str}",
+        f"Mode       : Ramp Mode",
+        f"Days       : {_days}",
+        f"N subjects : {len(complete_ids)} (complete cases only)",
+        f"Subjects   : {', '.join(complete_ids)}",
+        '',
+        'Test        : Friedman rank-sum test (non-parametric repeated measures)',
+        'Factor      : Day (time, categorical within-subjects)',
+        'Block       : Animal ID (repeated measures)',
+        'Post-hoc    : Conover-Iman test (Friedman rank matrix; t-distribution, df=(N-1)(k-1))',
+        'Correction  : Holm-Bonferroni (Python)',
+        'HL estimate : Hodges-Lehmann = median(x_day1 − x_day2) per subject pair',
+        '95% CI      : Bootstrap (2 000 resamples, seed = 0) on HL estimate',
+        'Effect size : Omnibus: Kendall\'s W = χ²/(N·(k−1)); range [0,1]; ≥0.10 small, ≥0.30 medium, ≥0.50 large',
+        '              Pairwise: r_rb = t(CI)/√(t(CI)²+df); consistent with Conover-Iman t-test',
+        '',
+        'Omnibus Friedman result:',
+        f"  χ²({_df_str}) = {_chi_str},  p = {_fmt_omni_p(p_omni)}  {_sig_omni(p_omni)}",
+        f"  Kendall's W = {_kw_str}  (0 = no concordance, 1 = perfect concordance)",
+        '',
+        'R OUTPUT (omnibus Friedman only)',
+        '-' * W_RPT,
+        r_output.strip(),
+        '-' * W_RPT,
+        '',
+        'Descriptive statistics  (95% CI = t-based, two-tailed):',
+        f"  {'Day':>5}    {'n':>4}   {'Mean (%/day)':>13}       {'SEM':>8}  {'95% CI':>25}",
+        f"  {'─'*5}  {'─'*4}   {'─'*13}  {'─'*8}  {'─'*25}",
+    ]
+    for d in _days:
+        ds = desc_stats[d]
+        _ci_str = (
+            f"[{ds['ci_lo']:>9.4f}, {ds['ci_hi']:>9.4f}]"
+            if ds['ci_lo'] == ds['ci_lo'] else '   [N/A]'
+        )
+        _lines.append(
+            f"  {d:>5}    {ds['n']:>4}   {ds['mean']:>13.4f}    {ds['sem']:>8.4f}  {_ci_str}"
+        )
+
+    _lines += [
+        '',
+        f"  {'Pair':<20}  {'n':>4}  {'t(CI)':>10}  {'p_raw':>10}  {'p_adj (Holm)':>13}  "
+        f"{'sig':<4}  {'r_rb':>6}  {'HL_est':>8}  {'95% CI (HL)':>22}",
+        '  ' + '─' * (W_RPT - 2),
+    ]
+    for pr in pair_results:
+        _lbl     = f"Day {pr['d1']}  vs  Day {pr['d2']}"
+        _ci_str  = f"[{pr['ci_lo']:>8.4f}, {pr['ci_hi']:>8.4f}]"
+        _t_str   = f"{pr['t_stat']:.3f}" if pr['t_stat'] == pr['t_stat'] else 'N/A'
+        _rrb_str = f"{pr['r_rb']:>6.3f}" if pr['r_rb'] == pr['r_rb'] else '   N/A'
+        _lines.append(
+            f"  {_lbl:<20}  {pr['n']:>4}  {_t_str:>10}  "
+            f"{_fmt_p(pr['p_raw']):>10}  {_fmt_p(pr['p_adj']):>13}  "
+            f"{_sig(pr['p_adj']):<4}  {_rrb_str}  {pr['hl_est']:>8.4f}  {_ci_str:>22}"
+        )
+
+    _lines += [
+        '',
+        '  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10  ns p≥.10',
+        '  Effect size : r_rb = t(CI)/√(t(CI)²+df); consistent with Conover-Iman t-statistic;'
+        ' range [−1, 1]; |r_rb|: ≥0.10 small, ≥0.30 medium, ≥0.50 large',
+        '  Post-hoc p  : Conover-Iman t-statistic (pooled Friedman ranks, df=(N−1)(k−1))',
+        f"  Omnibus ES  : Kendall's W = {_kw_str}  (χ²/(N·(k−1)) = {_chi_str}/({_n_subs}·{_n_conds-1}))",
+        '=' * W_RPT,
+        'END OF REPORT',
+        '=' * W_RPT,
+    ]
+
+    full_report = '\n'.join(_lines)
+    #print('\n' + full_report)
+
+    _report_path: Optional[Path] = None
+    if save_report:
+        _ts_fn = datetime.now().strftime('%Y%m%d_%H%M%S')
+        _report_path = save_path
+        _report_path.write_text(full_report, encoding='utf-8')
+        #print(f"Report saved -> {_report_path}")
+
+    return {
+        'r_output'    : r_output,
+        'chi_sq'      : chi_sq,
+        'df'          : df_fr,
+        'p_omnibus'   : p_omni,
+        'desc_stats'  : desc_stats,
+        'pair_results': pair_results,
+        'report_path' : _report_path,
+        'complete_ids': complete_ids,
+        'n_subjects'  : len(complete_ids),
+    }
 
 
 # =============================================================================
