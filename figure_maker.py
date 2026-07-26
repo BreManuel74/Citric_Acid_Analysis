@@ -130,14 +130,14 @@ OUT_FIG6          = _ROOT / "Figure_6"
 OUT_FIG7          = _ROOT / "Figure_7"
 OUT_FIG8          = _ROOT / "Figure_8"
 OUT_FIG9          = _ROOT / "Figure_9"
-OUT_EXT1          = _ROOT / "Ex_data_1"
+OUT_EXT_2_1          = _ROOT / "Ext_data_2_1"
 OUT_EXT2_3        = _ROOT / "Ext_data_2-3"
 OUT_EXT4_5        = _ROOT / "Ext_data_4-5"
 
 # ── Convenience: create all output directories if they don't exist ────────────
 for _out in [OUT_FIG2, OUT_FIG3, OUT_FIG4, OUT_FIG5,
              OUT_FIG6, OUT_FIG7, OUT_FIG8, OUT_FIG9,
-             OUT_EXT1, OUT_EXT2_3, OUT_EXT4_5]:
+             OUT_EXT_2_1, OUT_EXT2_3, OUT_EXT4_5]:
     _out.mkdir(parents=True, exist_ok=True)
 
 
@@ -5584,12 +5584,471 @@ def figure_9() -> None:
 
 
 # =============================================================================
-# EXTENDED DATA 1 — (add description when porting)
+# EXTENDED DATA 2-1 — Characterization cohorts additional weight metrics
+#
+# Panels:
+#   A — Slow ramp cohort total weight change model comparison (linear vs exp. decay)
+#   B — Slow ramp cohort daily weight change comparison of CA transition days
+#   C — 0%, 2%, SR cohorts daily weight change after weekly water access
+#   D — Slow ramp cohort repeated measure correlation of lick count vs total weight change
+#       color coded by CA%
+#   
 # =============================================================================
 
-def extended_data_1() -> None:
-    """Placeholder — port the Extended Data 1 panels here."""
-    pass
+def extended_data_2_1() -> None:
+    """Generate Extended Data 2-1 panels for the slow-ramp cohort."""
+
+    print("\n" + "=" * 60)
+    print("Extended Data 2-1 — Characterization cohorts additional weight metrics")
+    print("=" * 60)
+
+    if not MASTER_RAMP.exists():
+        print(f"[Ext 2-1A] SKIPPED — not found: {MASTER_RAMP}")
+        return
+
+    slow_ramp_df = _load_master_csv(MASTER_RAMP)
+    print("\n[Ext 2-1A] Slow-ramp total-change model comparison ...")
+    _ext_data_2_1_total_change_r_fit(
+        slow_ramp_df,
+        by_day=True,
+        save_path=OUT_EXT_2_1 / "ext2_1a_total_change_by_day",
+        show=SHOW_PLOTS,
+        save_svg=True,
+    )
+
+
+def _ext_data_2_1_total_change_r_fit(
+	df: pd.DataFrame,
+    *,
+    by_day: bool = True,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> dict:
+	"""
+	Scatterplot of Total Change values vs the within-subjects factor (Week/CA%) or
+	vs Day number, with per-animal trajectories and linear / exp decay fit lines.
+
+	The plot is drawn in matplotlib (matching all other plots' rcParams style).
+	R is called only for model statistics (F-test, AIC, BIC, adj. R²), which are
+	printed to console and returned.
+
+	Parameters
+	----------
+	by_day : bool
+		If True, use Day number on the x-axis (day granularity).
+		If False (default), use the within-subjects factor (Week or CA%).
+
+	Requires R installed with Rscript on PATH (or a standard Windows location).
+	"""
+	import subprocess
+	import shutil
+	import tempfile
+	from datetime import datetime
+
+	cdf = df.copy()
+	if by_day:
+		cdf = _add_day_col(cdf, "ramp")
+		x_col = "Day"
+		x_label = "Day"
+	else:
+		x_col = "CA (%)"
+		x_label = "CA (%)"
+	cdf_scatter = cdf.copy()
+
+	needed = ['ID', x_col, 'Total Change']
+	missing_cols = [c for c in needed if c not in cdf.columns]
+	if missing_cols:
+		print(f'[R fit] Missing columns {missing_cols}.')
+		return {}
+
+	plot_df = (
+		cdf[['ID', x_col, 'Total Change']]
+		.dropna()
+		.rename(columns={x_col: 'x_factor', 'Total Change': 'total_change'})
+	)
+	if by_day:
+		plot_df = plot_df[plot_df['x_factor'] > 1].copy()
+	if plot_df.empty:
+		print('[R fit] No data after filtering.')
+		return {}
+
+	plot_df['x_factor'] = pd.to_numeric(plot_df['x_factor'], errors='coerce')
+	plot_df = plot_df.dropna(subset=['x_factor'])
+
+	# scatter_df: includes ramp Day 1 so that point appears on the plot
+	scatter_df = (
+		cdf_scatter[['ID', x_col, 'Total Change']]
+		.dropna()
+		.rename(columns={x_col: 'x_factor', 'Total Change': 'total_change'})
+	)
+	scatter_df['x_factor'] = pd.to_numeric(scatter_df['x_factor'], errors='coerce')
+	scatter_df = scatter_df.dropna(subset=['x_factor'])
+
+	# ── Input data validation ────────────────────────────────────────────────
+	_n_pts  = len(plot_df)
+	_n_ids  = plot_df['ID'].nunique()
+	_x_min  = plot_df['x_factor'].min()
+	_x_max  = plot_df['x_factor'].max()
+	_y_min  = plot_df['total_change'].min()
+	_y_max  = plot_df['total_change'].max()
+	_per_id = plot_df.groupby('ID').size().sort_index()
+	_balanced = _per_id.nunique() == 1
+	# print(f"\n[R fit] Input data for model fits ({x_label} axis):")
+	# print(f"  Animals     : {_n_ids}")
+	# print(f"  Data points : {_n_pts}  ({'balanced' if _balanced else 'UNBALANCED'})")
+	# print(f"  x range     : [{int(_x_min)}, {int(_x_max)}]")
+	# print(f"  y range     : [{_y_min:.4f}, {_y_max:.4f}]  (Total Change %)")
+	# print(f"  Per-animal n: {', '.join(f'{k}={v}' for k, v in _per_id.items())}")
+	if not _balanced:
+		print("  [WARNING] Unequal observations per animal — check for missing data.")
+
+	# ── Locate Rscript ────────────────────────────────────────────────────────
+	rscript = shutil.which('Rscript') or shutil.which('Rscript.exe')
+	if rscript is None:
+		import glob as _glob
+		for _pat in [
+			r'C:\Program Files\R\R-*\bin\Rscript.exe',
+			r'C:\Program Files\R\R-*\bin\x64\Rscript.exe',
+		]:
+			_m = sorted(_glob.glob(_pat), reverse=True)
+			if _m:
+				rscript = _m[0]
+				break
+
+	# ── R statistics ──────────────────────────────────────────────────────────
+	report = ''
+	r_stats: dict = {}
+	if rscript is None:
+		print('[R fit] Rscript not found — skipping model comparison. Install R or add to PATH.')
+	else:
+		with tempfile.TemporaryDirectory() as _tmpdir:
+			_tmp     = Path(_tmpdir)
+			data_csv = _tmp / 'tc_data.csv'
+			res_txt  = _tmp / 'tc_results.txt'
+			r_scr    = _tmp / 'tc_fit.R'
+
+			plot_df.to_csv(data_csv, index=False)
+			dat_r = str(data_csv).replace('\\', '/')
+			res_r = str(res_txt).replace('\\', '/')
+
+			r_code = f"""\
+df <- read.csv("{dat_r}", stringsAsFactors=FALSE)
+df <- df[!is.na(df$x_factor) & !is.na(df$total_change), ]
+df$x_factor <- as.numeric(df$x_factor)
+df$ID <- as.factor(df$ID)
+
+# Linear mixed model with random intercept per animal
+library(lme4)
+library(lmerTest)
+m_lin  <- lmer(total_change ~ x_factor + (1 | ID), data=df, REML=FALSE)
+s_lin  <- summary(m_lin)
+aic_l  <- AIC(m_lin)
+bic_l  <- BIC(m_lin)
+# Marginal R² (fixed effects only) — Nakagawa & Schielzeth 2013
+var_f   <- var(as.vector(model.matrix(m_lin) %*% fixef(m_lin)))
+var_r   <- as.numeric(VarCorr(m_lin)$ID)
+var_e   <- sigma(m_lin)^2
+r2_marg <- var_f / (var_f + var_r + var_e)
+r2_cond <- (var_f + var_r) / (var_f + var_r + var_e)
+
+# Exponential decay mixed model: y = A + B * exp(-k * x), random intercept on A
+library(nlme)
+y_r <- range(df$total_change)
+A0  <- y_r[1]
+B0  <- y_r[2] - y_r[1]
+m_exp_ok  <- FALSE
+m_exp     <- NULL
+s_exp     <- NULL
+aic_exp   <- NA_real_
+bic_exp   <- NA_real_
+r2_exp    <- NA_real_
+for (k0 in c(0.05, 0.1, 0.2, 0.5)) {{
+  if (m_exp_ok) break
+  tryCatch({{
+    m_exp <- nlme(total_change ~ A + B * exp(-k * x_factor),
+                  data=df,
+                  fixed  = A + B + k ~ 1,
+                  random = A ~ 1 | ID,
+                  start  = c(A=A0, B=B0, k=k0),
+                  control=nlmeControl(maxIter=500, msMaxIter=500))
+    s_exp    <- summary(m_exp)
+    aic_exp  <- AIC(m_exp)
+    bic_exp  <- BIC(m_exp)
+    tss      <- sum((df$total_change - mean(df$total_change))^2)
+    rss      <- sum(residuals(m_exp)^2)
+    r2_exp   <- 1 - rss / tss
+    m_exp_ok <- TRUE
+  }}, error=function(e) {{}})
+}}
+
+sink("{res_r}")
+cat("========================================\\n")
+cat("LINEAR MIXED MODEL  (total_change ~ {x_label} + (1|ID))\\n")
+cat("========================================\\n")
+print(s_lin)
+cat(sprintf("Marginal R2 (fixed effects only): %.4f\\n", r2_marg))
+cat(sprintf("Conditional R2 (fixed + random):  %.4f\\n", r2_cond))
+cat("\\n========================================\\n")
+cat("EXPONENTIAL DECAY MIXED MODEL  (total_change ~ A + B*exp(-k*{x_label}), random = A ~ 1|ID)\\n")
+cat("========================================\\n")
+if (m_exp_ok) {{
+  print(s_exp)
+  cat(sprintf("Pseudo R2: %.4f\\n", r2_exp))
+}} else {{
+  cat("Exponential fit did not converge.\\n")
+}}
+cat("\\n========================================\\n")
+cat("MODEL COMPARISON (AIC/BIC: Linear vs Exponential)\\n")
+cat("========================================\\n")
+cat(sprintf("AIC  -- Linear: %.3f  |  Exponential: %s\\n",
+            aic_l, ifelse(m_exp_ok, sprintf("%.3f", aic_exp), "N/A")))
+cat(sprintf("BIC  -- Linear: %.3f  |  Exponential: %s\\n",
+            bic_l, ifelse(m_exp_ok, sprintf("%.3f", bic_exp), "N/A")))
+cat(sprintf("Marginal R2 -- Linear: %.4f  |  Exp pseudo-R2: %s\\n",
+            r2_marg,
+            ifelse(m_exp_ok, sprintf("%.4f", r2_exp), "N/A")))
+sink()
+# machine-readable summary for Python
+cat(sprintf("__STATS__:%.4f:%.4f:%s:%s\\n",
+            r2_marg, aic_l,
+            ifelse(m_exp_ok, sprintf("%.4f", aic_exp), "NA"),
+            ifelse(m_exp_ok, sprintf("%.4f", r2_exp),  "NA")))
+if (m_exp_ok) {{
+  cf <- fixef(m_exp)
+  cat(sprintf("__EXP_COEF__:%.6f:%.6f:%.6f\\n", cf["A"], cf["B"], cf["k"]))
+}}
+"""
+			r_scr.write_text(r_code, encoding='utf-8')
+			proc = subprocess.run(
+				[rscript, '--vanilla', str(r_scr)],
+				capture_output=True, text=True, timeout=120,
+			)
+			if proc.returncode != 0:
+				print(f'[R fit] Rscript failed (exit {proc.returncode}):\n{proc.stderr.strip()}')
+			else:
+				if res_txt.exists():
+					report = res_txt.read_text(encoding='utf-8')
+					# print('\n' + '='*60)
+					# print('R MODEL COMPARISON RESULTS')
+					# print('='*60)
+					# print(report)
+				for line in proc.stdout.splitlines():
+					if line.startswith('__STATS__:'):
+						parts = line[len('__STATS__:'):].split(':')
+						try:
+							r_stats = {
+								'adj_r2_lin': float(parts[0]),
+								'aic_lin':    float(parts[1]),
+								'aic_exp':    float(parts[2]) if len(parts) > 2 and parts[2] not in ('NA', 'NaN') else float('nan'),
+								'r2_exp':     float(parts[3]) if len(parts) > 3 and parts[3] not in ('NA', 'NaN') else float('nan'),
+							}
+						except (ValueError, IndexError):
+							pass
+					elif line.startswith('__EXP_COEF__:'):
+						parts = line[len('__EXP_COEF__:'):].split(':')
+						try:
+							r_stats['exp_A'] = float(parts[0])
+							r_stats['exp_B'] = float(parts[1])
+							r_stats['exp_k'] = float(parts[2])
+						except (ValueError, IndexError):
+							pass
+
+	# ── Matplotlib plot (matches rcParams style) ──────────────────────────────
+	ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+	tag = 'day' if by_day else x_label.lower().replace(' ', '_').replace('%', 'pct')
+	save_path = Path(save_path)
+	save_path.parent.mkdir(parents=True, exist_ok=True)
+
+	svg_out: Optional[Path] = None
+	if save_svg:
+		svg_out = (save_path.parent / svg_filename) if svg_filename else save_path.with_suffix('.svg')
+
+	ids   = scatter_df['ID'].unique()
+
+	x_vals = plot_df['x_factor'].values
+	y_vals = plot_df['total_change'].values
+	# x_seq spans the full scatter range (including ramp Day 1) so fit lines reach both ends
+	x_seq  = np.linspace(scatter_df['x_factor'].min(), scatter_df['x_factor'].max(), 300)
+
+	# fit curves in numpy / scipy for the plot
+	_c_lin = np.polyfit(x_vals, y_vals, 1)
+	y_lin  = np.polyval(_c_lin, x_seq)
+
+	# ── Linear fit validation ────────────────────────────────────────────────
+	_y_hat_lin = np.polyval(_c_lin, x_vals)
+	_ss_res_l  = float(np.sum((y_vals - _y_hat_lin) ** 2))
+	_ss_tot    = float(np.sum((y_vals - np.mean(y_vals)) ** 2))
+	_r2_lin_py = 1.0 - _ss_res_l / _ss_tot if _ss_tot > 0 else float('nan')
+	_spot_xs   = [int(_x_min), int(round((_x_min + _x_max) / 2)), int(_x_max)]
+	# print(f"\n[R fit] Linear fit (Python numpy.polyfit, for validation):")
+	# print(f"  slope     : {_c_lin[0]:.4f}")
+	# print(f"  intercept : {_c_lin[1]:.4f}")
+	# print(f"  R²        : {_r2_lin_py:.4f}")
+	# print("  Predicted at spot-check x values:")
+	# for _sx in _spot_xs:
+	# 	print(f"    x={_sx:>4}: {np.polyval(_c_lin, _sx):.4f}%")
+	# Cross-check against R's marginal R² if available
+	if r_stats.get('adj_r2_lin') is not None:
+		_r2_r = r_stats['adj_r2_lin']
+
+	# exponential decay: use R coefficients if available, else scipy fallback
+	y_exp: Optional[np.ndarray] = None
+	exp_label = 'Exp decay fit'
+	_popt_scipy: Optional[tuple] = None
+	if r_stats.get('exp_A') is not None:
+		_A, _B, _k = r_stats['exp_A'], r_stats['exp_B'], r_stats['exp_k']
+		y_exp = _A + _B * np.exp(-_k * x_seq)
+	else:
+		try:
+			from scipy.optimize import curve_fit as _cfit
+			def _exp_model(x, A, B, k): return A + B * np.exp(-k * x)
+			_y0 = y_vals.min()
+			_p0 = [_y0, y_vals.max() - _y0, 0.1]
+			_popt_scipy, _ = _cfit(_exp_model, x_vals, y_vals, p0=_p0, maxfev=5000)
+			y_exp = _exp_model(x_seq, *_popt_scipy)
+		except Exception:
+			exp_label = 'Exp decay (no fit)'
+
+	# ── Exponential fit validation ─────────────────────────────────────────────
+	#print(f"\n[R fit] Exponential decay fit  (y = A + B*exp(-k*x)):")
+	if r_stats.get('exp_A') is not None:
+		_A_r, _B_r, _k_r = r_stats['exp_A'], r_stats['exp_B'], r_stats['exp_k']
+		#print(f"  R NLS    : A={_A_r:.4f},  B={_B_r:.4f},  k={_k_r:.4f}")
+		# if r_stats.get('r2_exp') is not None and r_stats['r2_exp'] == r_stats['r2_exp']:
+		# 	print(f"  R pseudo-R\u00b2: {r_stats['r2_exp']:.4f}")
+		_y_hat_exp_r = _A_r + _B_r * np.exp(-_k_r * x_vals)
+		_ss_res_er   = float(np.sum((y_vals - _y_hat_exp_r) ** 2))
+		_r2_exp_py   = 1.0 - _ss_res_er / _ss_tot if _ss_tot > 0 else float('nan')
+		# print(f"  Python R\u00b2 (using R coefficients on fit data): {_r2_exp_py:.4f}")
+		# print("  Predicted at spot-check x values (R NLS):")
+		# for _sx in _spot_xs:
+		# 	print(f"    x={_sx:>4}: {_A_r + _B_r * np.exp(-_k_r * _sx):.4f}%")
+		# Cross-check R NLS against scipy
+		try:
+			from scipy.optimize import curve_fit as _cfit_v
+			def _exp_model_v(x, A, B, k): return A + B * np.exp(-k * x)
+			_popt_v, _ = _cfit_v(_exp_model_v, x_vals, y_vals,
+			                     p0=[y_vals.min(), y_vals.max() - y_vals.min(), 0.1],
+			                     maxfev=5000)
+			_A_sc, _B_sc, _k_sc = _popt_v
+			#print(f"  scipy    : A={_A_sc:.4f},  B={_B_sc:.4f},  k={_k_sc:.4f}  (cross-check)")
+			_discrepancies = []
+			for _pname, _pR, _pSc in [('A', _A_r, _A_sc), ('B', _B_r, _B_sc), ('k', _k_r, _k_sc)]:
+				_rel = abs(_pR - _pSc) / (abs(_pR) + 1e-12)
+				if _rel > 0.05:
+					_discrepancies.append(f"{_pname}: R={_pR:.4f} vs scipy={_pSc:.4f} (rel \u0394={_rel:.1%})")
+			if _discrepancies:
+				print("  [WARNING] R NLS vs scipy differ by >5% on: " + "; ".join(_discrepancies))
+			# else:
+			# 	print("  [OK] R NLS and scipy coefficients agree within 5%.")
+		except Exception as _e_xc:
+			print(f"  [INFO] scipy cross-check skipped: {_e_xc}")
+	elif _popt_scipy is not None:
+		_A_sc, _B_sc, _k_sc = _popt_scipy
+		#print(f"  scipy    : A={_A_sc:.4f},  B={_B_sc:.4f},  k={_k_sc:.4f}  (R unavailable; scipy used)")
+		_y_hat_exp_sc = _A_sc + _B_sc * np.exp(-_k_sc * x_vals)
+		_ss_res_esc   = float(np.sum((y_vals - _y_hat_exp_sc) ** 2))
+		_r2_exp_sc    = 1.0 - _ss_res_esc / _ss_tot if _ss_tot > 0 else float('nan')
+		# print(f"  R\u00b2 (scipy fit on data): {_r2_exp_sc:.4f}")
+		# print("  Predicted at spot-check x values (scipy):")
+		# for _sx in _spot_xs:
+		# 	print(f"    x={_sx:>4}: {_A_sc + _B_sc * np.exp(-_k_sc * _sx):.4f}%")
+	else:
+		print("  [WARNING] Exponential fit did not converge (neither R NLS nor scipy).")
+	#print()
+
+	title_str = f"Total Change (%) by {x_label} \u2014 Linear / Exp Decay"
+
+	fig, ax = plt.subplots()
+	ax.set_title(title_str)
+	ax.set_xlabel(x_label)
+	ax.set_ylabel('Total Change (%)')
+
+	# per-animal trajectories (scatter_df includes ramp Day 1)
+	for iid, grp in scatter_df.groupby('ID'):
+		grp_s = grp.sort_values('x_factor')
+		ax.plot(grp_s['x_factor'], grp_s['total_change'],
+                color=COLOR_RAMP, alpha=0.25, linewidth=plt.rcParams['lines.linewidth'])
+		ax.scatter(grp_s['x_factor'], grp_s['total_change'],
+                   color=COLOR_RAMP, alpha=0.55, s=plt.rcParams['lines.markersize']**2,
+		           zorder=3)
+
+	# fit lines
+	ax.plot(x_seq, y_lin, color='royalblue', linewidth=1.2, linestyle='-',
+	        label='Linear fit', zorder=4)
+	if y_exp is not None:
+		ax.plot(x_seq, y_exp, color='#2ca02c', linewidth=1.2, linestyle=':',
+		        label=exp_label, zorder=4)
+
+	ax.legend(fontsize=plt.rcParams['legend.fontsize'], frameon=False)
+	ax.spines['top'].set_visible(False)
+	ax.spines['right'].set_visible(False)
+	ax.set_ylim(bottom=-20, top= 10)
+	ax.set_xlim(1, 36)
+	ax.set_xticks(range(4, 37, 4))
+	ax.tick_params(direction='in')
+	ax.axhline(0, color='0.3', linewidth=0.8, linestyle=':', alpha=0.7)
+	fig.tight_layout()
+
+	if svg_out:
+		fig.savefig(str(svg_out), format='svg')
+		#print(f'[R fit] SVG saved: {svg_out}')
+	else:
+		fig.savefig(str(save_path.with_suffix('.png')), format='png')
+
+	# ── Save stats report ─────────────────────────────────────────────────────
+	rpt_path = save_path.with_suffix('.txt')
+	rpt_lines = [
+		'=' * 60,
+		f'R MODEL COMPARISON — {title_str}',
+		f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+		'=' * 60,
+		'',
+	]
+	if report:
+		rpt_lines.append(report)
+	else:
+		rpt_lines.append('(R was not available; statistics not computed)')
+		rpt_lines.append('')
+
+	# Python-side coefficient summary (always available)
+	rpt_lines += [
+		'-' * 60,
+		'FITTED COEFFICIENTS (Python numpy / scipy)',
+		'-' * 60,
+		f'  Linear:    slope={_c_lin[0]:.4f},  intercept={_c_lin[1]:.4f}',
+	]
+	if r_stats.get('exp_A') is not None:
+		rpt_lines.append(
+			f'  Exp decay: A={r_stats["exp_A"]:.4f},  B={r_stats["exp_B"]:.4f},  k={r_stats["exp_k"]:.4f}'
+		)
+	else:
+		rpt_lines.append('  Exp decay: coefficients not available (fit did not converge or R unavailable)')
+
+	if r_stats:
+		rpt_lines += [
+			'',
+			'-' * 60,
+			'MODEL FIT SUMMARY (from R)',
+			'-' * 60,
+			f'  Marginal R² — Linear:  {r_stats.get("adj_r2_lin", float("nan")):.4f}  (fixed effects only; excludes random intercept variance)',
+			f'  Pseudo R²  — Exp decay: {r_stats.get("r2_exp",   float("nan")):.4f}',
+			f'  AIC        — Linear:    {r_stats.get("aic_lin",  float("nan")):.3f}',
+			f'  AIC        — Exp decay: {r_stats.get("aic_exp",  float("nan")):.3f}',
+		]
+
+	rpt_path.write_text('\n'.join(rpt_lines), encoding='utf-8')
+	#print(f'[R fit] Stats report saved: {rpt_path}')
+
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+
+	#print(f'[R fit] Plot saved: {save_path}')
+	return {'report': report, 'r_stats': r_stats, 'svg_path': svg_out, 'report_path': rpt_path}
 
 
 # =============================================================================
@@ -5622,7 +6081,7 @@ if __name__ == "__main__":
     figure_7()
     figure_8()
     figure_9()
-    extended_data_1()
+    extended_data_2_1()
     extended_data_2_3()
     extended_data_4_5()
 
