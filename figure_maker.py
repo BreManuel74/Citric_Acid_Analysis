@@ -5030,11 +5030,17 @@ def _fig4_process_cohort_cap_files(
             sex = str(arow.get("sex", "Unknown")).strip().upper() if has_sex else "Unknown"
             sex = sex if sex.startswith(("M", "F")) else "Unknown"
 
+            # Ramp lick masters contain the actual CA% for each recording date;
+            # fixed-CA cohorts use the cohort-level fallback value.
+            ca_value = pd.to_numeric(arow.get("ca_%", ca_percent), errors="coerce")
+            if pd.isna(ca_value):
+                ca_value = ca_percent
+
             all_records.append({
                 "ID":                  animal_id,
                 "Date":                date_str,
                 "Sex":                 sex,
-                "CA%":                 ca_percent,
+                "CA%":                 ca_value,
                 "Cohort":              cohort_label,
                 "Sensor":              sensor_num,
                 "Total_Licks":         n_licks,
@@ -5654,7 +5660,7 @@ def figure_4() -> None:
         
         for cohort_label, color, save_path in _rmcorr_specs:
             if cohort_label in _cohort_dfs:
-                print(f"  [{cohort_label}] rmcorr ...")
+                #print(f"  [{cohort_label}] rmcorr ...")
                 rmcorr_data = _fig4_prepare_rmcorr_data_for_cohort(
                     cohort_label, _cohort_dfs[cohort_label], color
                 )
@@ -5781,6 +5787,23 @@ def extended_data_2_1() -> None:
         save_path=OUT_EXT_2_1 / "ext2_1c_daily_change_water_access_plot",
         show=SHOW_PLOTS,
     )
+
+    print("\n[Ext 2-1D] Slow-ramp rmcorr lick count vs total weight change ...")
+    _lick_specs: List[Tuple[str, Path, List[Path], float]] = [
+        ("5-Week Ramp",       LICK_MASTER_RAMP,  CAP_LOGS_RAMP,  0.0),
+    ]
+    _cohort_dfs = _fig4_load_lick_cohorts(_lick_specs)
+    _rmcorr_specs = [
+        ("5-Week Ramp",       COLOR_RAMP,   OUT_EXT_2_1 / "ext_data_2_1D_rmcorr_ramp"),
+    ]
+    for cohort_label, color, save_path in _rmcorr_specs:
+        if cohort_label in _cohort_dfs:
+            #print(f"  [{cohort_label}] rmcorr ...")
+            rmcorr_data = _fig4_prepare_rmcorr_data_for_cohort(
+                cohort_label, _cohort_dfs[cohort_label], color
+            )
+            if rmcorr_data is not None:
+                _ext_data_2_1D_plot_rmcorr_licks_vs_weight_SR(rmcorr_data, save_path=save_path)
 
 
 def _ext_data_2_1A_total_change_r_fit(
@@ -8046,79 +8069,64 @@ def _ext_data_2_1C_water_access_plot(
 
 
 def _ext_data_2_1D_plot_rmcorr_licks_vs_weight_SR(
-    weekly_averages: Dict,
+    rmcorr_data: Dict,
     save_path: Optional[Path] = None,
-    show: bool = True,
+    show: bool = False,
 ) -> Optional[plt.Figure]:
-    import os as _os
-
-    # ── build flat per-animal-per-week data ──────────────────────────────
-    if EXPERIMENT_MODE == 'ramp':
-        sorted_dates = sorted(weekly_averages.keys(),
-                              key=lambda d: weekly_averages[d]['ca_percent'])
-    else:
-        sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
-
+    """Plot rmcorr for a single cohort.
+    
+    Parameters
+    ----------
+    rmcorr_data : Dict
+        Dictionary with 'name', 'weekly_data', 'color' from _fig4_prepare_rmcorr_data_for_cohort
+    save_path : Path, optional
+        Path for saving the figure
+    
+    Returns
+    -------
+    plt.Figure or None
+    """
+    if rmcorr_data is None:
+        return None
+    
+    cohort_name = rmcorr_data["name"]
+    weekly_data = rmcorr_data["weekly_data"]
+    cohort_color_hex = rmcorr_data["color"]
+    
+    # Convert to the format expected by the rmcorr plotting function
+    weekly_averages = {}
+    for week_idx, data in weekly_data.items():
+        weekly_averages[week_idx] = data
+    
+    # Build flat per-animal-per-week data
     records = []
-    for week_idx, date in enumerate(sorted_dates):
-        data = weekly_averages[date]
+    for week_idx, data in weekly_data.items():
         lick_arr = np.asarray(data['avg_licks_per_animal'], dtype=float)
         wt_arr   = np.asarray(data['avg_total_weight_per_animal'], dtype=float)
-        ids      = data.get('animal_ids',
-                            [f"Animal_{j+1}" for j in range(len(lick_arr))])
+        ids      = data.get('animal_ids', [f"Animal_{j+1}" for j in range(len(lick_arr))])
         ca_pct_val = data.get('ca_percent', np.nan)
         for aid, lk, wt in zip(ids, lick_arr, wt_arr):
             records.append({'mouse_id': str(aid), 'licks': lk, 'weight_pct': wt,
                              'ca_percent': ca_pct_val})
-
+    
     if not records:
-        print("ERROR: No per-animal data for rmcorr.")
         return None
-
+    
     _df = pd.DataFrame(records).dropna(subset=['licks', 'weight_pct'])
     if _df.shape[0] < 5 or _df['mouse_id'].nunique() < 3:
-        print("Not enough data for rmcorr (need ≥3 mice, ≥5 observations).")
+        print(f"    Not enough data for rmcorr (need ≥3 mice, ≥5 observations)")
         return None
-
+    
     unique_animals = list(_df['mouse_id'].unique())
     n_animals      = len(unique_animals)
-    design_label   = _MLB['plot_suffix']
-
-    # ── print data pairs for validation ─────────────────────────────────
-    _factor_col = 'ca_percent' if EXPERIMENT_MODE == 'ramp' else 'ca_percent'
-    _factor_lbl = 'CA%' if EXPERIMENT_MODE == 'ramp' else 'Week'
-    _df_sorted = _df.sort_values(['mouse_id', 'ca_percent']).reset_index(drop=True)
-    # Add a 1-based week index per animal for nonramp display
-    _df_sorted['_week_idx'] = (
-        _df_sorted.groupby('mouse_id').cumcount() + 1
-    )
-    print("\n" + "=" * 72)
-    print("RMCORR INPUT — lick / weight pairs (sorted by animal, then week)")
-    print(f"{'Animal':<12}  {_factor_lbl:>6}  {'Week#':>5}  {'Licks':>8}  {'Weight (%BW chg)':>17}")
-    print("-" * 72)
-    for _, _row in _df_sorted.iterrows():
-        print(
-            f"  {_row['mouse_id']:<10}  {_row['ca_percent']:>6.1f}  "
-            f"{int(_row['_week_idx']):>5}  {_row['licks']:>8.0f}  "
-            f"{_row['weight_pct']:>17.4f}"
-        )
-    print("-" * 72)
-    print(f"  Total rows: {len(_df_sorted)}  |  Animals: {n_animals}  |  "
-          f"Rows/animal: "
-          + ", ".join(f"{a}={(_df_sorted['mouse_id']==a).sum()}"
-                      for a in sorted(unique_animals)))
-    print("=" * 72 + "\n")
-    # ────────────────────────────────────────────────────────────────────
-
+    
     # ── attempt rmcorr via rpy2 ──────────────────────────────────────────
     _r_rm  = np.nan
     _p_rm  = np.nan
     _ci_lo = np.nan
     _ci_hi = np.nan
     _slope = np.nan
-    _per_subject_intercepts: dict = {}
     _rmcorr_ok = False
-    _rmcorr_report = ""
 
     try:
         import os as _osi
@@ -8183,7 +8191,7 @@ def _ext_data_2_1D_plot_rmcorr_licks_vs_weight_SR(
 
         _res_df = pd.read_csv(_out)
         for _fp in [_csv, _out]:
-            try:    _os.unlink(_fp)
+            try:    _osi.unlink(_fp)
             except Exception: pass
 
         _r_rm  = float(_res_df['r_rm'].iloc[0])
@@ -8192,37 +8200,23 @@ def _ext_data_2_1D_plot_rmcorr_licks_vs_weight_SR(
         _ci_hi = float(_res_df['ci_hi'].iloc[0])
         _df_rm = float(_res_df['df_rm'].iloc[0])
         _slope = float(_res_df['slope'].iloc[0])
-        _per_subject_intercepts = dict(
-            zip(_res_df['mouse_id'].astype(str), _res_df['intercept'].astype(float))
-        )
-        print(f"  [debug] slope={_slope:.4f}  n_intercepts={len(_per_subject_intercepts)}"
-              f"  intercept_keys={list(_per_subject_intercepts.keys())[:3]}")
-        # If R returned NaN for slope, compute it in Python from the rmcorr r value
-        # using the pooled within-subject regression: slope = r_rm * SD(y)/SD(x)
+        
         if np.isnan(_slope) and not np.isnan(_r_rm):
             _sx = _df.groupby('mouse_id')['weight_pct'].apply(lambda v: v - v.mean()).std()
             _sy = _df.groupby('mouse_id')['licks'].apply(lambda v: v - v.mean()).std()
             if _sx > 0:
                 _slope = _r_rm * float(_sy) / float(_sx)
-                print(f"  [debug] slope recomputed from r_rm: {_slope:.4f}")
-            # recompute intercepts with new slope
-            _per_subject_intercepts = {
-                str(aid): (float(_df.loc[_df['mouse_id'] == aid, 'licks'].mean())
-                           - _slope * float(_df.loc[_df['mouse_id'] == aid, 'weight_pct'].mean()))
-                for aid in _df['mouse_id'].unique()
-            }
+        
         _rmcorr_ok = True
-        print(f"\nrmcorr: r_rm = {_r_rm:.4f},  p = {_p_rm:.4f},  "
-              f"95% CI [{_ci_lo:.4f}, {_ci_hi:.4f}],  df = {_df_rm:.0f}")
+        #print(f"    rmcorr: r_rm = {_r_rm:.4f},  p = {_p_rm:.4f},  "
+        #      f"95% CI [{_ci_lo:.4f}, {_ci_hi:.4f}]")
 
     except Exception as _rmc_exc:
-        print(f"NOTE: rmcorr via rpy2 failed ({type(_rmc_exc).__name__}: {_rmc_exc})")
-        print("      Falling back to Spearman scatter (install R package 'rmcorr' for full output).")
-
+        print(f"    rmcorr not available ({type(_rmc_exc).__name__})")
+    
     # ── matplotlib figure ─────────────────────────────────────────────────
     _ms = plt.rcParams.get('lines.markersize', 6)
-
-    # ── pre-compute annotation text and line data ─────────────────────────
+    
     if _rmcorr_ok:
         _p_str = f"p = {_p_rm:.4f}" if _p_rm >= 0.0001 else f"p = {_p_rm:.4e}"
         _ann = (f"$r_{{rm}}$ = {_r_rm:.3f}\n"
@@ -8244,82 +8238,14 @@ def _ext_data_2_1D_plot_rmcorr_licks_vs_weight_SR(
             _line_xs = np.linspace(-50, 50, 500)
             _line_ys = _sl * _line_xs + _ic
             _p_str = f"p = {_pv:.4f}" if _pv >= 0.0001 else f"p = {_pv:.4e}"
-            _ann = (f"Spearman \u03c1 = {_rho:.3f}\n{_p_str}\nn = {n_animals} mice\n"
-                    f"(rmcorr unavailable)")
+            _ann = (f"Spearman \u03c1 = {_rho:.3f}\n{_p_str}\nn = {n_animals} mice")
         else:
             _line_xs = _line_ys = None
-            _ann = f"n = {n_animals} mice\n(rmcorr unavailable)"
+            _ann = f"n = {n_animals} mice"
         _line_kw = dict(color='dimgray', linestyle='--', zorder=2)
 
-    def _draw_scatter_and_line(_axx):
-        for _, _row in _df.iterrows():
-            _axx.scatter(_row['weight_pct'], _row['licks'],
-                         color=COHORT_COLOR, marker='o',
-                         s=_ms ** 2, edgecolors='black', linewidths=0.5,
-                         alpha=0.8, zorder=4)
-        if _line_xs is not None:
-            _axx.plot(_line_xs, _line_ys, **_line_kw)
-
-    # ── single axis ────────────────────────────────────────────────────────
-    fig, ax = plt.subplots()
-    _draw_scatter_and_line(ax)
-    ax.set_ylim(bottom=0, top=5000)
-    ax.set_yticks(range(0, 5001, 1000))
-    ax.set_xlim(-20, 5)
-    ax.set_xticks(range(-20, 6, 5))
-    ax.text(0.03, 0.97, _ann,
-            transform=ax.transAxes, va='top', ha='left', fontsize=7.5,
-            bbox=dict(boxstyle='round', facecolor='white', alpha=0.75, edgecolor='gray'))
-    ax.set_xlabel('Total Weight Change (%)')
-    ax.set_ylabel('Lick Count')
-    ax.set_title(
-        f'Repeated-Measures Correlation: Licks ~ Weight Change\n({design_label})',
-        weight='bold')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.tick_params(direction='in', which='both', length=5)
-    plt.tight_layout()
-
-    # ── save ──────────────────────────────────────────────────────────────
-    if save_path is not None:
-        _rmc_svg = save_path.parent / (save_path.stem + '_rmcorr.svg')
-        fig.savefig(_rmc_svg, format='svg', dpi=200, bbox_inches='tight')
-        print(f"rmcorr figure saved -> {_rmc_svg}")
-
-        _rmc_txt = save_path.parent / (save_path.stem + '_rmcorr.txt')
-        if _rmcorr_ok:
-            _p_str_txt = f"p = {_p_rm:.4f}" if _p_rm >= 0.0001 else f"p = {_p_rm:.4e}"
-            _rmc_txt.write_text("\n".join([
-                "=" * 70,
-                "REPEATED-MEASURES CORRELATION  (Bakdash & Marusich 2017)",
-                "  rmcorr(participant=mouse_id, measure1=weight_pct, measure2=licks)",
-                "  Package: R::rmcorr",
-                "=" * 70,
-                "",
-                f"  r_rm  = {_r_rm:.4f}",
-                f"  {_p_str_txt}",
-                f"  95% CI  [{_ci_lo:.4f}, {_ci_hi:.4f}]",
-                f"  df    = {_df_rm:.0f}",
-                f"  n mice  = {n_animals}",
-                f"  n obs   = {_df.shape[0]}",
-                "",
-                "  Interpretation: r_rm is the within-individual Pearson correlation",
-                "  after removing between-subject variance (ANCOVA with participant",
-                "  as factor). Parallel lines in the plot share one common slope.",
-                "=" * 70,
-            ]), encoding='utf-8')
-        else:
-            _rmc_txt.write_text("rmcorr not available — install R package 'rmcorr' and rpy2.\n",
-                                encoding='utf-8')
-        print(f"rmcorr report saved  -> {_rmc_txt}")
-
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
-
     # ── Ramp-only variant: colour each dot by CA% (blue → red) ────────────
-    if EXPERIMENT_MODE == 'ramp' and 'ca_percent' in _df.columns:
+    if cohort_name == '5-Week Ramp':
         # Discrete colour lookup: blue → yellow → orange → red-orange → dark red
         def _ca_to_color(ca):
             if ca == 0:       return 'dodgerblue'
@@ -8354,7 +8280,7 @@ def _ext_data_2_1D_plot_rmcorr_licks_vs_weight_SR(
         ax_ca.set_xlabel('Total Weight Change (%)')
         ax_ca.set_ylabel('Lick Count')
         ax_ca.set_title(
-            f'Repeated-Measures Correlation: Licks ~ Weight Change\n({design_label})',
+            f'Repeated-Measures Correlation: Licks ~ Weight Change)',
             weight='bold')
         ax_ca.spines['top'].set_visible(False)
         ax_ca.spines['right'].set_visible(False)
@@ -8374,16 +8300,14 @@ def _ext_data_2_1D_plot_rmcorr_licks_vs_weight_SR(
         plt.tight_layout()
 
         if save_path is not None:
-            _ca_svg = save_path.parent / (save_path.stem + '_rmcorr_by_ca.svg')
-            fig_ca.savefig(_ca_svg, format='svg', dpi=200, bbox_inches='tight')
-            print(f"CA%-coloured rmcorr figure saved -> {_ca_svg}")
+            save_fig(fig_ca, save_path)
 
         if show:
             plt.show()
         else:
             plt.close(fig_ca)
 
-    return fig
+    return fig_ca
 
 
 # =============================================================================
