@@ -4221,8 +4221,8 @@ def fig4_nparLD_lick_analysis(
             for _aid in _multi_grp.index:
                 _gs = adf[adf['ID'] == _aid]['CA_group'].unique().tolist()
                 print(f"    {_aid}: {_gs}")
-        else:
-            print(f"  [OK] Each animal appears in exactly one group.")
+        # else:
+        #     print(f"  [OK] Each animal appears in exactly one group.")
         #print(f"{'─'*72}\n")
         # ── end validation ───────────────────────────────────────────────────
 
@@ -4238,10 +4238,6 @@ def fig4_nparLD_lick_analysis(
         _txt_fp  = f"{_tmpdir}/nparLD_txt_{measure}_{_uid}.txt"
         _meta_fp = f"{_tmpdir}/nparLD_meta_{measure}_{_uid}.csv"
         _box_fp  = f"{_tmpdir}/nparLD_box_{measure}_{_uid}.csv"
-        # Determine permanent plot save path next to the report (or in cwd)
-        _plot_base = save_path.with_suffix('') if save_path else Path('.') / 'nparLD_plot'
-        _plot_fp   = Path(f"{_plot_base}_{measure}.png")
-        _plot_fp_r = str(_plot_fp).replace('\\', '/')
 
         try:
             ro.globalenv['r_df']       = _to_r(adf)
@@ -4252,7 +4248,6 @@ def fig4_nparLD_lick_analysis(
             ro.globalenv['r_txt_fp']   = _txt_fp
             ro.globalenv['r_meta_fp']  = _meta_fp
             ro.globalenv['r_box_fp']   = _box_fp
-            ro.globalenv['r_plot_fp']  = _plot_fp_r
 
             ro.r("""
                 suppressPackageStartupMessages(library(nparLD))
@@ -4271,17 +4266,6 @@ def fig4_nparLD_lick_analysis(
                     group.name = "Cohort",
                     description = FALSE
                 )
-
-                # Save the nparLD RTE plot to a PNG file instead of showing it on screen
-                # Wrapped in tryCatch so a plot failure does not abort the analysis
-                tryCatch({
-                    png(r_plot_fp, width = 800, height = 600, res = 100)
-                    plot(result)
-                    dev.off()
-                }, error = function(e) {
-                    tryCatch(dev.off(), error = function(e2) NULL)
-                    warning(paste("nparLD plot() failed (plot not saved):", conditionMessage(e)))
-                })
 
                 # Full print output
                 full_txt <- capture.output(print(result))
@@ -4354,9 +4338,6 @@ def fig4_nparLD_lick_analysis(
                 try:    os.unlink(_fp)
                 except Exception: pass
 
-            # Report plot save path
-            _plot_saved = _plot_fp.exists()
-
             # Collect ATS p-values for cross-DV FDR
             _eff_col = 'effect' if 'effect' in ats_df.columns else None
             _p_col   = next((c for c in ['p-value', 'p.value', 'Pr(>F)', 'p_value']
@@ -4405,7 +4386,6 @@ def fig4_nparLD_lick_analysis(
                 f"    {'N subjects dropped (incomplete data)':<40} {_n_dropped}",
                 f"    {'N per group (from R)':<40} {_grp_sizes if _grp_sizes else '—'}",
                 f"    {'Significance level (alpha)':<40} {r_alpha:.2f}",
-                f"    {'RTE plot saved':<40} {_plot_fp.name if _plot_saved else '[not saved]'}",
                 "",
                 "  Note: nparLD uses rank transformation; no parametric model is fit.",
                 "  Residuals, R², AIC/BIC are not applicable. Inference is based on",
@@ -5623,6 +5603,12 @@ def extended_data_2_1() -> None:
         save_path=OUT_EXT_2_1 / "ext2_1b_daily_change_comparison",
         save_report=True,
     )
+    _ext_data_2_1B_plot_transition_days(
+        slow_ramp_df,
+        days=[8, 15, 22, 29],
+        save_path=OUT_EXT_2_1 / "ext2_1b_daily_change_comparison_plot",
+        show=SHOW_PLOTS,
+    )
 
 
 def _ext_data_2_1A_total_change_r_fit(
@@ -6498,6 +6484,265 @@ def _ext_data_2_1B_friedman_transition_days_r(
         'complete_ids': complete_ids,
         'n_subjects'  : len(complete_ids),
     }
+
+
+def _ext_data_2_1B_plot_transition_days(
+    df: pd.DataFrame,
+    *,
+    days: Optional[list] = None,
+    title: Optional[str] = None,
+    save_path: Optional[Path] = None,
+    show: bool = True,
+    svg_filename: Optional[str] = None,
+) -> dict:
+    """Bar plot of Daily Weight Change at milestone days (default: 8, 15, 22, 29).
+
+    Displays mean bars with SEM error bars and overlaid individual-animal data
+    points. Saves the figure as SVG and a plain-text descriptive statistics
+    report alongside it.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Master DataFrame.
+    days : list[int], optional
+        Day numbers to plot.  Default: [8, 15, 22, 29].
+    title : str, optional
+        Custom figure title.
+    save_path : Path, optional
+        If provided the SVG figure is saved here; a ``.txt`` report is saved
+        next to it with the same stem.
+    show : bool
+        Call ``plt.show()`` after drawing.
+    save_svg : bool
+        Save SVG to the current working directory (ignored when *save_path* is
+        given).
+    svg_filename : str, optional
+        Custom filename for the CWD SVG.
+
+    Returns
+    -------
+    dict
+        ``{'figure': fig, 'data': data_by_day, 'report_path': Path | None}``
+    """
+    import re as _re
+    from datetime import datetime
+
+    _days = list(days) if days is not None else [8, 15, 22, 29]
+
+    cdf = df.copy()
+    cdf = _add_day_col(cdf, "ramp")
+
+    if 'Day' not in cdf.columns or 'Daily Change' not in cdf.columns:
+        print("ERROR: 'Day' or 'Daily Change' column not found after processing.")
+        return {}
+
+    # ── per-day statistics ────────────────────────────────────────────────────
+    data_by_day: dict = {}
+    for d in _days:
+        sub  = cdf[cdf['Day'] == d][['ID', 'Daily Change']].dropna(subset=['Daily Change'])
+        vals = sub['Daily Change'].values.astype(float)
+        ids  = sub['ID'].astype(str).tolist()
+        n    = len(vals)
+        mean = float(np.mean(vals))   if n > 0 else np.nan
+        sem  = float(np.std(vals, ddof=1) / np.sqrt(n)) if n > 1 else 0.0
+        sd   = float(np.std(vals, ddof=1)) if n > 1 else np.nan
+        data_by_day[d] = {
+            'vals': vals, 'ids': ids, 'n': n,
+            'mean': mean, 'sem': sem, 'sd': sd,
+        }
+
+    # ── pairwise Mann-Whitney U with Holm-Bonferroni correction ──────────────
+    from itertools import combinations as _combinations
+
+    _pairs = list(_combinations(_days, 2))
+    _pw_results: list[dict] = []
+    for _d1, _d2 in _pairs:
+        _v1 = data_by_day[_d1]['vals']
+        _v2 = data_by_day[_d2]['vals']
+        if len(_v1) < 2 or len(_v2) < 2:
+            _pw_results.append({
+                'pair': (_d1, _d2), 'U': np.nan, 'p_raw': np.nan,
+                'p_adj': np.nan, 'n1': len(_v1), 'n2': len(_v2),
+            })
+            continue
+        _mw = stats.mannwhitneyu(_v1, _v2, alternative='two-sided')
+        _pw_results.append({
+            'pair': (_d1, _d2), 'U': float(_mw.statistic),
+            'p_raw': float(_mw.pvalue),
+            'n1': len(_v1), 'n2': len(_v2),
+        })
+
+    # Holm-Bonferroni step-down correction on valid (non-NaN) p-values
+    _valid_pw = [r for r in _pw_results if not np.isnan(r['p_raw'])]
+    _n_comp = len(_valid_pw)
+    if _n_comp > 0:
+        _sorted_pw = sorted(range(len(_valid_pw)),
+                            key=lambda i: _valid_pw[i]['p_raw'])
+        _adj_ps = [
+            min(_valid_pw[idx]['p_raw'] * (_n_comp - rank), 1.0)
+            for rank, idx in enumerate(_sorted_pw)
+        ]
+        # enforce monotonicity
+        for _i in range(1, len(_adj_ps)):
+            _adj_ps[_i] = max(_adj_ps[_i], _adj_ps[_i - 1])
+        for rank, orig_idx in enumerate(_sorted_pw):
+            _valid_pw[orig_idx]['p_adj'] = _adj_ps[rank]
+    # ensure every entry has p_adj key
+    for _r in _pw_results:
+        _r.setdefault('p_adj', np.nan)
+
+    # ── figure ────────────────────────────────────────────────────────────────
+    n_bars = len(_days)
+    x_pos  = np.arange(n_bars)
+    bar_w  = 0.55
+    rng    = np.random.default_rng(42)
+
+    fig, ax = plt.subplots()
+
+    means = [data_by_day[d]['mean'] for d in _days]
+    sems  = [data_by_day[d]['sem']  for d in _days]
+
+    _lw = plt.rcParams['lines.linewidth']
+    _ms = plt.rcParams.get('lines.markersize', 4)
+
+    ax.bar(x_pos, means, bar_w,
+           color=COLOR_RAMP, alpha=0.75,
+           edgecolor='black', linewidth=_lw, zorder=2)
+    ax.errorbar(x_pos, means, yerr=sems,
+                fmt='none', ecolor='black',
+                elinewidth=_lw, capsize=_ms * 1.5, capthick=_lw, zorder=3)
+
+    # individual animal points with jitter
+    for i, d in enumerate(_days):
+        vals   = data_by_day[d]['vals']
+        jitter = rng.uniform(-bar_w * 0.25, bar_w * 0.25, size=len(vals))
+        ax.scatter(i + jitter, vals,
+                   s=_ms ** 2, color=COLOR_RAMP, edgecolors='black',
+                   linewidths=_lw, alpha=0.6, zorder=4)
+
+    ax.axhline(0, color='black', linewidth=_lw, linestyle='-', alpha=0.8)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels([f"Day {d}" for d in _days])
+    ax.set_xlim(-bar_w, n_bars - 1 + bar_w)
+    ax.set_xlabel('Day', weight='bold')
+    ax.set_ylabel('Daily Weight Change (%)', weight='bold')
+    ax.set_title(
+        title or 'Daily Weight Change at Milestone Days\n(Mean \u00b1 SEM, individual animals)',
+        weight='bold')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(direction='in')
+
+    # y-axis ticks
+    all_vals = np.concatenate([data_by_day[d]['vals']
+                                for d in _days if data_by_day[d]['n'] > 0])
+    if len(all_vals):
+        _dmin = float(np.nanmin(all_vals))
+        _dmax = float(np.nanmax(all_vals))
+        _step = _auto_integer_step(_dmin, _dmax, target_ticks=6)
+        _ymin = int(np.floor(_dmin / _step)) * _step
+        _ymax = int(np.ceil(_dmax  / _step)) * _step
+        ax.set_ylim(_ymin, _ymax)
+        ax.set_yticks(np.arange(_ymin, _ymax + _step, _step))
+        ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.0f'))
+
+    plt.tight_layout()
+
+    # ── save figure ───────────────────────────────────────────────────────────
+    _fig_path: Optional[Path] = None
+    if save_path is not None:
+        _fig_path = Path(save_path)
+        if _fig_path.suffix.lower() != '.svg':
+            _fig_path = _fig_path.with_suffix('.svg')
+        _fig_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(str(_fig_path), format='svg', dpi=200, bbox_inches='tight')
+        print(f"Figure saved -> {_fig_path}")
+    # elif save_svg:
+    #     base = svg_filename or "daily_change_milestone_days"
+    #     safe = _re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+    #     if not safe.lower().endswith(".svg"):
+    #         safe += ".svg"
+    #     _fig_path = Path.cwd() / safe
+    #     fig.savefig(str(_fig_path), format='svg', dpi=200, bbox_inches='tight')
+    #     #print(f"Figure saved -> {_fig_path}")
+
+    # ── text report ───────────────────────────────────────────────────────────
+    _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # if save_path is not None:
+    #     _report_path: Optional[Path] = save_path.parent / (save_path.stem + "_report.txt")
+    # else:
+    #     _report_path = Path.cwd() / f"daily_change_milestone_days_report_{_ts}.txt"
+
+    _lines = [
+        "=" * 72,
+        "DAILY WEIGHT CHANGE — MILESTONE DAYS REPORT",
+        "=" * 72,
+        f"Generated : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Mode      : RAMP",
+        f"Days      : {_days}",
+        "",
+        "DESCRIPTIVE STATISTICS",
+        "-" * 72,
+        f"{'Day':<10} {'N':>4} {'Mean (%)':>10} {'SD':>10} {'SEM':>10} {'Min':>10} {'Max':>10}",
+        "-" * 72,
+    ]
+    for d in _days:
+        rec  = data_by_day[d]
+        vals = rec['vals']
+        _mn  = float(np.nanmin(vals)) if rec['n'] > 0 else float('nan')
+        _mx  = float(np.nanmax(vals)) if rec['n'] > 0 else float('nan')
+        _sd  = rec['sd'] if not np.isnan(rec['sd']) else float('nan')
+        _lines.append(
+            f"{'Day ' + str(d):<10} {rec['n']:>4} {rec['mean']:>10.3f} "
+            f"{_sd:>10.3f} {rec['sem']:>10.3f} {_mn:>10.3f} {_mx:>10.3f}"
+        )
+
+    _lines += ["", "INDIVIDUAL ANIMAL VALUES", "-" * 72]
+    for d in _days:
+        rec = data_by_day[d]
+        _lines.append(f"\nDay {d}  (n = {rec['n']}):")
+        for aid, v in zip(rec['ids'], rec['vals']):
+            _lines.append(f"  {str(aid):<14}  {v:.3f} %")
+
+    _lines += ["", "PAIRWISE MANN-WHITNEY U TESTS (HOLM-BONFERRONI CORRECTION)", "-" * 72]
+    _lines.append(f"  Total comparisons : {_n_comp}")
+    _lines.append(f"  Method            : Holm-Bonferroni step-down")
+    _lines.append(f"  Significance level: α = 0.05")
+    _lines.append("")
+    _lines.append(
+        f"  {'Comparison':<20} {'n1':>4} {'n2':>4}"
+        f" {'U':>10} {'p (raw)':>12} {'p (adj)':>12}  Sig"
+    )
+    _lines.append("  " + "-" * 68)
+    for _r in _pw_results:
+        _d1, _d2 = _r['pair']
+        _p_raw = _r['p_raw']
+        _p_adj = _r['p_adj']
+        _U     = _r['U']
+        _sig   = '*' if (not np.isnan(_p_adj) and _p_adj < 0.05) else 'ns'
+        if np.isnan(_p_raw):
+            _lines.append(f"  Day {_d1} vs Day {_d2}   {_r['n1']:>4} {_r['n2']:>4}  {'n/a':>10}  {'n/a':>12}  {'n/a':>12}  n/a")
+        else:
+            _lines.append(
+                f"  Day {_d1} vs Day {_d2}   {_r['n1']:>4} {_r['n2']:>4}"
+                f"  {_U:>10.1f}  {_p_raw:>12.4f}  {_p_adj:>12.4f}  {_sig}"
+            )
+    _lines.append("")
+    _lines.append("  * p (adj) < 0.05 after Holm-Bonferroni correction")
+
+    _lines += ["", "=" * 72, "END OF REPORT", "=" * 72]
+    report_text = "\n".join(_lines)
+    #print(report_text)
+    # _report_path.write_text(report_text, encoding='utf-8')
+    #print(f"Report saved -> {_report_path}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return {'figure': fig, 'data': data_by_day}
 
 
 # =============================================================================
