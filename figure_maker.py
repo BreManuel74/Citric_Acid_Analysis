@@ -440,6 +440,16 @@ def _get_sex_map_from_df(df: pd.DataFrame) -> Dict[str, Optional[str]]:
     return result
 
 
+def _get_id_cohort_map(df: pd.DataFrame) -> dict:
+    """
+    Build a mapping from ID -> Cohort label using the first non-null value per ID.
+    """
+    if "ID" not in df.columns or "Cohort" not in df.columns:
+        return {}
+    cohort_map = df.groupby("ID")["Cohort"].first().to_dict()
+    return {str(k): v for k, v in cohort_map.items()}
+
+
 def _build_total_change_series(
     df: pd.DataFrame,
     mode: str,
@@ -465,6 +475,28 @@ def _build_total_change_series(
         ser.name = str(gid)
         result[str(gid)] = ser
     return result
+
+
+def build_daily_change_series_by_id(df: pd.DataFrame) -> dict:
+    """
+    For each ID, return a pandas Series of 'Daily Change' indexed by Day number.
+    """
+    required = {"ID", "Day", "Daily Change"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    series_by_id: dict = {}
+    
+    for gid, g in df.groupby("ID", dropna=True):
+        subset = g[["Day", "Daily Change"]].dropna()
+        if subset.empty:
+            continue
+        subset = subset.sort_values("Day")
+        series = subset.set_index("Day")["Daily Change"]
+        series_by_id[str(gid)] = series
+
+    return series_by_id
 
 
 def _build_ca_series_by_day(df: pd.DataFrame) -> pd.Series:
@@ -5739,6 +5771,16 @@ def extended_data_2_1() -> None:
         save_report = True,
         save_path   = OUT_EXT_2_1 / "ext2_1c_daily_change_water_access",
     )
+    _ext_data_2_1C_water_access_plot(
+        cohorts={
+            "0%": _load_master_csv(MASTER_0PCT),
+            "2%": _load_master_csv(MASTER_2PCT),
+            "ramp": slow_ramp_df,
+        },
+        target_days=[5, 12, 19, 26, 33],
+        save_path=OUT_EXT_2_1 / "ext2_1c_daily_change_water_access_plot",
+        show=SHOW_PLOTS,
+    )
 
 
 def _ext_data_2_1A_total_change_r_fit(
@@ -6787,7 +6829,7 @@ def _ext_data_2_1B_plot_transition_days(
             _fig_path = _fig_path.with_suffix('.svg')
         _fig_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(str(_fig_path), format='svg', dpi=200, bbox_inches='tight')
-        print(f"Figure saved -> {_fig_path}")
+        #print(f"Figure saved -> {_fig_path}")
     # elif save_svg:
     #     base = svg_filename or "daily_change_milestone_days"
     #     safe = _re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
@@ -7887,9 +7929,9 @@ def _ext_data_2_1C_water_access_plot(
     scatter points.  Uses the same day-alignment logic as
     plot_daily_change_by_cohort (drop_ramp_baseline=False, Day >= 1).
     """
-    if not HAS_MATPLOTLIB:
-        print("[ERROR] matplotlib is required for plotting")
-        return None
+    # if not HAS_MATPLOTLIB:
+    #     print("[ERROR] matplotlib is required for plotting")
+    #     return None
 
     if target_days is None:
         target_days = [5, 12, 19, 26, 33]
@@ -7900,7 +7942,6 @@ def _ext_data_2_1C_water_access_plot(
     # Build aligned combined frame (same logic as option 5)
     # ------------------------------------------------------------------
     combined = combine_cohorts_for_analysis(cohorts)
-    combined = clean_cohort(combined)
     if 'Day' not in combined.columns:
         combined = add_day_column_across_cohorts(combined, drop_ramp_baseline=False)
     combined = combined[combined['Day'] >= 1].copy()
@@ -7916,7 +7957,7 @@ def _ext_data_2_1C_water_access_plot(
             1 if '2%' in lbl.lower() and 'ramp' not in lbl.lower() else 2
         ),
     )
-    color_map = {lbl: _cohort_label_to_color(lbl) for lbl in all_labels}
+    color_map = {lbl: cohort_color(lbl) for lbl in all_labels}
 
     # ------------------------------------------------------------------
     # Extract per-(day, cohort) animal values
@@ -7994,8 +8035,7 @@ def _ext_data_2_1C_water_access_plot(
     ax.set_yticks([-5, 0, 5, 10])
 
     if save_path is not None:
-        fig.savefig(save_path, format='svg')
-        print(f"[OK] Bar chart saved -> {save_path}")
+        save_fig(fig, Path(save_path))
 
     if show:
         plt.show()
