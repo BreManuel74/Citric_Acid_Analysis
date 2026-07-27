@@ -130,14 +130,14 @@ OUT_FIG6          = _ROOT / "Figure_6"
 OUT_FIG7          = _ROOT / "Figure_7"
 OUT_FIG8          = _ROOT / "Figure_8"
 OUT_FIG9          = _ROOT / "Figure_9"
-OUT_EXT_2_1          = _ROOT / "Ext_data_2_1"
-OUT_EXT2_3        = _ROOT / "Ext_data_2-3"
+OUT_EXT_2_1       = _ROOT / "Ext_data_2_1"
+OUT_EXT_5_1       = _ROOT / "Ext_data_5-1"
 OUT_EXT4_5        = _ROOT / "Ext_data_4-5"
 
 # ── Convenience: create all output directories if they don't exist ────────────
 for _out in [OUT_FIG2, OUT_FIG3, OUT_FIG4, OUT_FIG5,
              OUT_FIG6, OUT_FIG7, OUT_FIG8, OUT_FIG9,
-             OUT_EXT_2_1, OUT_EXT2_3, OUT_EXT4_5]:
+             OUT_EXT_2_1, OUT_EXT_5_1, OUT_EXT4_5]:
     _out.mkdir(parents=True, exist_ok=True)
 
 
@@ -558,6 +558,124 @@ def _draw_block_labels(
             transform=trans, ha="center", va="top",
             fontsize=fontsize, color=color, zorder=5,
         )
+
+
+def combine_cohorts_for_analysis(cohort_dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """
+    Combine multiple cohort dataframes into a single dataframe for cross-cohort analysis.
+    
+    Each cohort is assigned a CA% label based on the cohort name.
+    Adds 'CA (%)' and 'Cohort' columns to identify the source cohort.
+    
+    Parameters:
+        cohort_dfs: Dictionary mapping cohort labels to DataFrames
+        
+    Returns:
+        Combined DataFrame with all cohorts, including 'CA (%)' and 'Cohort' columns
+    """
+    import re as re 
+
+    combined_dfs = []
+    
+    for label, df in cohort_dfs.items():
+        df_copy = df.copy()
+        
+        # Add cohort identifier
+        df_copy['Cohort'] = label
+        
+        # Extract CA% from cohort label if not already present
+        if 'CA (%)' not in df_copy.columns:
+            # Try to extract percentage from label (e.g., "0%", "2%", "0% CA", "2% (6 animals)")
+            match = re.search(r'(\d+(?:\.\d+)?)\s*%', label)
+            if match:
+                ca_percent = float(match.group(1))
+                df_copy['CA (%)'] = ca_percent
+            else:
+                print(f"[WARNING] Could not extract CA% from cohort label: {label}")
+                df_copy['CA (%)'] = None
+        
+        combined_dfs.append(df_copy)
+    
+    combined = pd.concat(combined_dfs, ignore_index=True)
+    
+    # Ensure CA% is numeric (convert any strings to float)
+    if 'CA (%)' in combined.columns:
+        combined['CA (%)'] = pd.to_numeric(combined['CA (%)'], errors='coerce')
+    
+    # print(f"\n[OK] Combined {len(cohort_dfs)} cohorts into single dataframe")
+    # print(f"  Total rows: {len(combined)}")
+    # print(f"  CA% levels: {sorted(combined['CA (%)'].dropna().unique())}")
+    
+    return combined
+
+
+def add_day_column_across_cohorts(combined_df: pd.DataFrame, drop_ramp_baseline: bool = True) -> pd.DataFrame:
+    """
+    Add a cohort-aligned 'Day' column to combined data.
+    
+    Parameters:
+        combined_df: Combined DataFrame with ID and Date columns
+        drop_ramp_baseline: If True (default), drop ramp cohort Day 1 rows (baseline
+            with Total Change = 0). Set False when preparing data for plotting so that
+            the first ramp data point is visible.
+        
+    Returns:
+        DataFrame with added 'Day' column
+    """
+    if 'Day' in combined_df.columns:
+        print("[INFO] 'Day' column already exists")
+        return combined_df
+    
+    if not {'ID', 'Date'}.issubset(combined_df.columns):
+        raise ValueError("DataFrame must have 'ID' and 'Date' columns")
+    
+    df = combined_df.copy()
+    
+    # Ensure Date is datetime
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    
+    # Sort by ID and Date
+    df = df.sort_values(['ID', 'Date']).reset_index(drop=True)
+    
+    # Compute 1-indexed Day per ID:
+    #   nonramp: first date = Day 0 (baseline, excluded from plots); Day 1+ plotted
+    #   ramp:    first date = Day 1 (no baseline day skipped)
+    first_dates = df.groupby('ID')['Date'].transform('min')
+    if 'Cohort' in df.columns:
+        # Apply per-cohort offset based on whether the cohort label contains 'ramp'
+        is_ramp = df['Cohort'].str.lower().str.contains('ramp', na=False)
+        df['Day'] = (df['Date'] - first_dates).dt.days + is_ramp.astype(int)
+    else:
+        # Default to nonramp logic (Day 0 = baseline)
+        df['Day'] = (df['Date'] - first_dates).dt.days
+
+    #print(f"[OK] Added 'Day' column (range: {df['Day'].min()} to {df['Day'].max()})")
+    
+    # Drop baseline rows:
+    #   nonramp: Day 0 = baseline → keep Day >= 1
+    #   ramp:    Day 1 = baseline (Total Change = 0) → only drop for analyses
+    df = df[df['Day'] >= 1].copy()
+    if drop_ramp_baseline and 'Cohort' in df.columns:
+        is_ramp = df['Cohort'].str.lower().str.contains('ramp', na=False)
+        df = df[~(is_ramp & (df['Day'] == 1))].copy()
+        print(f"[OK] Excluded ramp cohort baseline (Day 1) rows")
+    #print(f"[OK] Filtered baseline rows (range: {df['Day'].min()} to {df['Day'].max()})")
+
+    return df
+
+
+def _add_week_column_across_cohorts(combined_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add a 'Week' column (1-indexed) derived from 'Day'.
+    Week 1 = Days 1-7, Week 2 = Days 8-14, etc.
+    Requires 'Day' column (calls add_day_column_across_cohorts if absent).
+    """
+    df = combined_df.copy()
+    if 'Day' not in df.columns:
+        df = add_day_column_across_cohorts(df)
+    df['Week'] = (df['Day'] - 1) // 7 + 1
+    return df
+
 
 # =============================================================================
 # FIGURE 2 — Total Weight Change Over Time, Per Cohort
@@ -5610,6 +5728,18 @@ def extended_data_2_1() -> None:
         show=SHOW_PLOTS,
     )
 
+    print ("\n[Ext 2-1C] Daily weight change after weekly water access ...")
+    _ext_data_2_1C_prepare_nparld_water_access(
+        cohort_dfs={
+            "0%": _load_master_csv(MASTER_0PCT),
+            "2%": _load_master_csv(MASTER_2PCT),
+            "ramp": slow_ramp_df,
+        },
+        target_days = [5, 12, 19, 26, 33],
+        save_report = True,
+        save_path   = OUT_EXT_2_1 / "ext2_1c_daily_change_water_access",
+    )
+
 
 def _ext_data_2_1A_total_change_r_fit(
 	df: pd.DataFrame,
@@ -6745,12 +6875,1483 @@ def _ext_data_2_1B_plot_transition_days(
     return {'figure': fig, 'data': data_by_day}
 
 
+def _ext_data_2_1C_map_water_access_days(
+    cohorts: Dict[str, pd.DataFrame],
+    target_days: Optional[List[int]] = None,
+    measure: str = "Daily Change",
+) -> Dict[str, pd.DataFrame]:
+    """
+    Map the 'weight change on the day following water access' metric to a
+    cohort_dfs-compatible dict for use with run_nparld_cohort_week_r.
+
+    Days 5, 12, 19, 26, 33 are the first post-access measurement day of each
+    7-day block and fall in Weeks 1-5 respectively under the rule
+    ``Week = (Day - 1) // 7 + 1`` used throughout this module.  Filtering
+    each cohort to exactly these days means run_nparld_cohort_week_r will have
+    one observation per animal per week, so the per-animal per-week mean it
+    computes equals the single target-day value directly.
+
+    Day alignment is performed at the *combined* level (same logic as
+    plot_daily_change_bar_by_day_all3 and option 5 of _run_all3_menu) so that
+    ramp-cohort baseline days are excluded consistently.
+
+    Parameters
+    ----------
+    cohorts     : dict label -> master DataFrame (output of load_cohorts)
+    target_days : days to extract; default [5, 12, 19, 26, 33]
+    measure     : weight column to retain alongside the index columns;
+                  default ``"Daily Change"``
+
+    Returns
+    -------
+    dict[str, pd.DataFrame]
+        Keys are the original cohort labels.  Each value is a subset of the
+        aligned combined frame filtered to target_days, with columns including
+        at minimum ``ID``, ``Day``, ``Week``, and ``measure``.  Because ``Day``
+        is already present, run_nparld_cohort_week_r will skip its internal
+        day-alignment step and proceed directly to week assignment and grouping.
+    """
+    from datetime import datetime
+
+    if target_days is None:
+        target_days = [5, 12, 19, 26, 33]
+
+    # ------------------------------------------------------------------
+    # 1. Align days at the combined level (mirrors plot_daily_change_bar_by_day_all3)
+    # ------------------------------------------------------------------
+    combined = combine_cohorts_for_analysis(cohorts)
+    if 'Day' not in combined.columns:
+        combined = add_day_column_across_cohorts(combined, drop_ramp_baseline=False)
+    combined = combined[combined['Day'] >= 1].copy()
+
+    # Pre-compute Week so we can report the mapping
+    combined['Week'] = (combined['Day'] - 1) // 7 + 1
+
+    # ------------------------------------------------------------------
+    # 2. Filter to target days only
+    # ------------------------------------------------------------------
+    filtered = combined[combined['Day'].isin(target_days)].copy()
+
+    if filtered.empty:
+        print(f"  [WARNING] build_water_access_day_cohorts: "
+              f"no rows found for target days {target_days}")
+        return {}
+
+    # Warn about and de-duplicate any (ID, Day) collisions
+    dup_mask = filtered.duplicated(subset=['ID', 'Day'], keep='first')
+    if dup_mask.any():
+        print(f"  [WARNING] {dup_mask.sum()} duplicate (ID, Day) row(s) found — "
+              f"keeping first occurrence per animal per day")
+        filtered = filtered[~dup_mask].copy()
+
+    # ------------------------------------------------------------------
+    # 3. Verify measure column is present
+    # ------------------------------------------------------------------
+    if measure not in filtered.columns:
+        available = [c for c in filtered.columns if 'change' in c.lower()]
+        print(f"  [ERROR] Column '{measure}' not found. "
+              f"Available weight columns: {available}")
+        return {}
+
+    # ── Collect water-access diagnostic lines (written to file below) ───────
+    _wa_diag: List[str] = [
+        f"WATER-ACCESS DAY DIAGNOSTIC: {measure}",
+        f"Generated  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Target days: {target_days}",
+        "=" * 72,
+        "",
+        f"SECTION 1: Per-animal '{measure}' at each target day",
+        "  Day -> Week: " + ", ".join(f"{d}->{(d - 1) // 7 + 1}" for d in sorted(target_days)),
+        "-" * 72,
+    ]
+    for _coh_lbl in sorted(filtered['Cohort'].unique()):
+        _sub = filtered[filtered['Cohort'] == _coh_lbl].sort_values(['ID', 'Day'])
+        _wa_diag.append(f"  Cohort: {_coh_lbl}")
+        for _, _r in _sub.iterrows():
+            _val = _r.get(measure, float('nan'))
+            _val_str = f"{_val:.4f}" if isinstance(_val, (int, float)) and _val == _val else "NaN"
+            _wa_diag.append(f"    {str(_r['ID']):>14}  Day {int(_r['Day']):>2} -> Week {int(_r['Week'])}: {_val_str}")
+    _wa_diag.append("")
+
+    _wa_diag += [
+        f"SECTION 2: Per-cohort per-week descriptive stats ('{measure}', water-access days)",
+        "  (each animal contributes one value per week; cohort mean shown for reference)",
+        "-" * 72,
+    ]
+    _diag_wa = (
+        filtered
+        .groupby(['Cohort', 'Week'])[measure]
+        .agg(n='count', mean='mean', sd='std')
+        .reset_index()
+    )
+    for _coh_lbl, _grp in _diag_wa.groupby('Cohort'):
+        _wa_diag.append(f"  Cohort: {_coh_lbl}")
+        for _, _r in _grp.iterrows():
+            _wa_diag.append(f"    Week {int(_r['Week'])}: n={int(_r['n'])}, mean={_r['mean']:.4f}, SD={_r['sd']:.4f}")
+    _wa_diag.append("")
+
+    # _wa_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # _wa_diag_path = Path.cwd() / f"water_access_diag_{_wa_ts}.txt"
+    # _wa_diag_path.write_text('\n'.join(_wa_diag), encoding='utf-8')
+    #print(f"  [DIAG] Water-access diagnostic → {_wa_diag_path.name}")
+
+    # ------------------------------------------------------------------
+    # 4. Split back into per-cohort dfs keyed by original label
+    # ------------------------------------------------------------------
+    # 'Cohort' column is added by combine_cohorts_for_analysis
+    out: Dict[str, pd.DataFrame] = {}
+    for label in cohorts:
+        # Exact match first; fall back to case-insensitive containment
+        mask = filtered['Cohort'] == label
+        if not mask.any():
+            mask = filtered['Cohort'].str.lower() == label.lower()
+        if not mask.any():
+            mask = filtered['Cohort'].apply(lambda c: label.lower() in str(c).lower())
+        sub = filtered[mask].copy()
+        if sub.empty:
+            print(f"  [WARNING] No target-day rows found for cohort '{label}' — skipping")
+            continue
+        out[label] = sub
+
+    # ------------------------------------------------------------------
+    # 5. Diagnostic summary
+    # ------------------------------------------------------------------
+    day_week = {d: (d - 1) // 7 + 1 for d in sorted(target_days)}
+    #print(f"\n  [OK] build_water_access_day_cohorts")
+    #print(f"       Day → Week mapping : {day_week}")
+    for label, sub in out.items():
+        ids = sub['ID'].nunique()
+        weeks_present = sorted(sub['Week'].unique())
+        #print(f"       {label!r:30s} : {ids} animal(s), weeks {weeks_present}")
+    missing_cohorts = [lbl for lbl in cohorts if lbl not in out]
+    if missing_cohorts:
+        print(f"       [WARNING] Cohorts with no data: {missing_cohorts}")
+
+    return out
+
+
+def _ext_data_2_1C_prepare_nparld_water_access(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    target_days: Optional[List[int]] = None,
+    save_report: bool = True,
+    save_path: Optional[Path] = None,
+) -> dict:
+    """
+    Run nparLD (F1-LD-F1) separately for two DVs and apply BH-FDR correction
+    across the resulting ATS omnibus p-values so that both DVs contribute to
+    the same multiple-comparisons correction envelope.
+
+    Daily Change at water-access days
+        Single Daily Change observation per animal at Days 5, 12, 19, 26, 33
+        (the day immediately following each water-access event), mapped to
+        Weeks 1–5 via build_water_access_day_cohorts.
+
+    Parameters
+    ----------
+    cohort_dfs  : dict label → master DataFrame (output of load_cohorts)
+    target_days : water-access days for DV2; default [5, 12, 19, 26, 33]
+    save_report : write combined omnibus report to disk
+
+    Returns
+    -------
+    dict with keys:
+        'tc_result'      – raw run_nparld_cohort_week_r result for Total Change
+        'dc_result'      – raw run_nparld_cohort_week_r result for Daily Change
+        'omnibus_table'  – pd.DataFrame of all 6 effects with raw+BH-FDR p-values
+        'report_path'    – Path to saved report (or None)
+    """
+    from datetime import datetime
+
+    if target_days is None:
+        target_days = [5, 12, 19, 26, 33]
+
+    # ── DV 2: Daily Change at water-access days ───────────────────────────
+    # print("\n" + "─" * 72)
+    # print(f"nparLD omnibus — DV 2: Daily Change at days {target_days}")
+    # print("─" * 72)
+    wa_cohorts = _ext_data_2_1C_map_water_access_days(cohort_dfs, target_days, measure="Daily Change")
+    dc_result: dict = {}
+    if wa_cohorts:
+        dc_result = _ext_data_2_1C_run_nparld_water_access(
+            wa_cohorts,
+            measure="Daily Change",
+            save_report=save_report,
+            save_path=save_path,
+            # prefix=prefix,
+        )
+    else:
+        print("  [WARNING] No water-access data")
+
+    return dc_result
+
+
+def _ext_data_2_1C_run_nparld_water_access(
+    cohort_dfs: Dict[str, pd.DataFrame],
+    measure: str = "Daily Change",
+    weeks: Optional[List[int]] = None,
+    save_report: bool = True,
+    save_path: Optional[Path] = None,
+) -> dict:
+    """
+    Nonparametric equivalent of a two-way repeated-measures ANOVA via R nparLD.
+
+    Design  : F1-LD-F1 (one between-subjects factor x one within-subjects factor)
+    Between : Cohort  (CA% schedule label)
+    Within  : Week    (1-indexed chronological week)
+    Response: per-animal per-week mean of ``measure``
+
+    Requires R with the nparLD package installed.
+
+    Returns
+    -------
+    dict with keys: 'r_output', 'report_path', 'n_subjects', 'cohorts', 'weeks'
+    """
+    from datetime import datetime
+
+    # ── Build combined weekly-mean dataset ────────────────────────────────────
+    frames = []
+    for label, df in cohort_dfs.items():
+        d = df.copy()
+        if 'Day' not in d.columns:
+            d['Cohort'] = label  # ensure ramp day-numbering and Day 1 exclusion are applied correctly
+            d = add_day_column_across_cohorts(d)
+        d = d[d['Day'] >= 1].copy()
+        d = _add_week_column_across_cohorts(d)
+        if measure not in d.columns:
+            print(f"  [WARNING] '{measure}' not found in cohort '{label}' — skipping")
+            continue
+        d['_Cohort'] = label
+        sub = d[['ID', '_Cohort', 'Week', measure]].dropna(subset=[measure])
+        frames.append(sub)
+
+    if not frames:
+        print(f"  [ERROR] No data available for measure '{measure}'.")
+        return {}
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.rename(columns={measure: 'DailyChange', '_Cohort': 'Cohort'})
+
+    # ── Collect diagnostic lines (written to file before R runs) ────────────
+    _diag_lines: List[str] = [
+        f"nparLD WEEKLY-AVERAGE DIAGNOSTIC: {measure}",
+        f"Generated  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "=" * 72,
+        "",
+        "SECTION 1: Day-level observation counts per animal per week",
+        f"  (number of days from each animal/week feeding into the weekly mean for '{measure}')",
+        "-" * 72,
+    ]
+    _raw_obs = (
+        combined
+        .groupby(['Cohort', 'ID', 'Week'])['DailyChange']
+        .agg(n_days='count')
+        .reset_index()
+    )
+    for _coh, _cgrp in _raw_obs.groupby('Cohort'):
+        _diag_lines.append(f"  Cohort: {_coh}")
+        for _, _r in _cgrp.sort_values(['ID', 'Week']).iterrows():
+            _diag_lines.append(f"    {str(_r['ID']):>14}  Week {int(_r['Week'])}: {int(_r['n_days'])} day(s)")
+    _diag_lines.append("")
+
+    # Per-animal per-week mean
+    weekly = (
+        combined
+        .groupby(['ID', 'Cohort', 'Week'], as_index=False)['DailyChange']
+        .mean()
+    )
+
+    if weeks is not None:
+        weekly = weekly[weekly['Week'].isin(weeks)].copy()
+
+    # ── Diagnostic sections 2 & 3: cohort/week means and per-animal listing ─
+    _diag_lines += [
+        f"SECTION 2: Per-cohort per-week mean '{measure}' (BEFORE complete-case filter)",
+        "-" * 72,
+    ]
+    diag = (
+        weekly
+        .groupby(['Cohort', 'Week'])['DailyChange']
+        .agg(n='count', mean='mean', sd='std')
+        .reset_index()
+    )
+    for cohort, grp in diag.groupby('Cohort'):
+        _diag_lines.append(f"  Cohort: {cohort}")
+        for _, row in grp.iterrows():
+            _diag_lines.append(f"    Week {int(row['Week'])}: n={int(row['n'])}, mean={row['mean']:.4f}, SD={row['sd']:.4f}")
+    _diag_lines.append("")
+
+    _diag_lines += [
+        f"SECTION 3: Per-animal per-week mean '{measure}' (BEFORE complete-case filter)",
+        "-" * 72,
+    ]
+    for cohort, cgrp in weekly.groupby('Cohort'):
+        _diag_lines.append(f"  Cohort: {cohort}")
+        for _, row in cgrp.sort_values(['ID', 'Week']).iterrows():
+            _diag_lines.append(f"    {str(row['ID']):>14}  Week {int(row['Week'])}: {row['DailyChange']:.4f}")
+    _diag_lines.append("")
+
+    # Complete-case filter: keep only animals present in every Week
+    week_counts = weekly.groupby('ID')['Week'].nunique()
+    all_weeks_n = weekly['Week'].nunique()
+    complete_ids = week_counts[week_counts == all_weeks_n].index
+    n_dropped = weekly['ID'].nunique() - len(complete_ids)
+    _diag_lines += [
+        "SECTION 4: Complete-case filter",
+        "-" * 72,
+    ]
+    if n_dropped:
+        _dropped_ids = week_counts[week_counts < all_weeks_n].index.tolist()
+        _cohort_map = weekly.drop_duplicates('ID').set_index('ID')['Cohort']
+        print(f"  [NOTE] Dropped {n_dropped} animal(s) with incomplete weekly records "
+              f"({len(complete_ids)} retained) — see diagnostic report for details.")
+        _diag_lines.append(f"  Dropped {n_dropped} animal(s) ({len(complete_ids)} retained):")
+        for _did in sorted(_dropped_ids):
+            _coh = _cohort_map.get(_did, '?')
+            _present = sorted(weekly[weekly['ID'] == _did]['Week'].unique())
+            _missing = [w for w in range(1, all_weeks_n + 1) if w not in _present]
+            _diag_lines.append(f"    {str(_did):>14} ({_coh}): present weeks {_present}, missing weeks {_missing}")
+    else:
+        #print("  [NOTE] All animals have complete weekly records — no subjects dropped.")
+        _diag_lines.append("  All animals have complete weekly records — no subjects dropped.")
+    _diag_lines.append("")
+    weekly = weekly[weekly['ID'].isin(complete_ids)].copy()
+
+    _diag_lines += [
+        f"SECTION 5: Per-cohort per-week mean '{measure}' (AFTER complete-case filter)",
+        "  (these are the exact per-animal weekly means passed to R/nparLD)",
+        "-" * 72,
+    ]
+    _diag_post = (
+        weekly
+        .groupby(['Cohort', 'Week'])['DailyChange']
+        .agg(n='count', mean='mean', sd='std')
+        .reset_index()
+    )
+    for cohort, grp in _diag_post.groupby('Cohort'):
+        _diag_lines.append(f"  Cohort: {cohort}")
+        for _, row in grp.iterrows():
+            _diag_lines.append(f"    Week {int(row['Week'])}: n={int(row['n'])}, mean={row['mean']:.4f}, SD={row['sd']:.4f}")
+    _diag_lines.append("")
+
+    # ── Write diagnostic report (before R runs, so it's available even if R fails) ─
+    # _diag_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # _safe_measure = measure.replace(' ', '_').lower()
+    # _diag_path = Path.cwd() / f"nparld_diag_{_safe_measure}_{_diag_ts}.txt"
+    # _diag_path.write_text('\n'.join(_diag_lines), encoding='utf-8')
+    # print(f"  [DIAG] Weekly-average diagnostic → {_diag_path.name}")
+
+    if weekly.empty or len(complete_ids) < 3:
+        print(f"  [ERROR] Insufficient complete-case animals ({len(complete_ids)}) for nparLD.")
+        return {}
+
+    week_levels = sorted(weekly['Week'].unique())
+    cohort_levels = sorted(weekly['Cohort'].unique())
+    n_subjects = int(weekly['ID'].nunique())
+
+    # print(f"\nnparLD: {n_subjects} subjects x {len(week_levels)} weeks x {len(cohort_levels)} cohorts")
+    # print(f"  Cohorts : {cohort_levels}")
+    # print(f"  Weeks   : {week_levels}")
+
+    # ── Write temp CSV ──────────────────────────────────────────────────────
+    tmp_csv = Path(tempfile.mktemp(suffix='.csv'))
+    weekly[['ID', 'Cohort', 'Week', 'DailyChange']].to_csv(str(tmp_csv), index=False)
+
+    import os as _os
+    _csv_r     = str(tmp_csv).replace('\\', '/')
+    _wk_levels = ', '.join(str(w) for w in week_levels)
+    _co_levels = ', '.join(f'"{c}"' for c in cohort_levels)
+
+    _td  = tempfile.gettempdir().replace('\\', '/')
+    _uid = str(id(weekly))[-6:]
+    _ats_csv   = f"{_td}/nwt_ats_{_uid}.csv"
+    _box_csv   = f"{_td}/nwt_box_{_uid}.csv"
+    _wts_csv   = f"{_td}/nwt_wts_{_uid}.csv"
+    _rte_csv   = f"{_td}/nwt_rte_{_uid}.csv"
+    _pair_csv  = f"{_td}/nwt_pair_{_uid}.csv"
+    _time_csv  = f"{_td}/nwt_time_{_uid}.csv"
+    _wkmwu_csv = f"{_td}/nwt_wkmwu_{_uid}.csv"
+
+    r_script = (
+        'options(warn=1, scipen=999)\n'
+        'set.seed(42)\n'
+        'if (!require("nparLD", quietly=TRUE, warn.conflicts=FALSE)) {\n'
+        '  install.packages("nparLD", repos="https://cran.r-project.org", quiet=TRUE)\n'
+        '  library(nparLD)\n'
+        '}\n'
+        f'data <- read.csv("{_csv_r}")\n'
+        f'data$Week   <- factor(data$Week,   levels=c({_wk_levels}))\n'
+        f'data$Cohort <- factor(data$Cohort, levels=c({_co_levels}))\n'
+        'data$ID <- factor(data$ID)\n'
+        'result <- f1.ld.f1(\n'
+        '  y=data$DailyChange, time=data$Week, group=data$Cohort, subject=data$ID,\n'
+        '  time.name="Week", group.name="Cohort", description=FALSE\n'
+        ')\n'
+        # ATS
+        f'ats <- as.data.frame(result$ANOVA.test); ats$effect <- rownames(ats)\n'
+        f'write.csv(ats, "{_ats_csv}", row.names=FALSE)\n'
+        # Box
+        f'if (!is.null(result$ANOVA.test.mod.Box)) {{\n'
+        f'  box <- as.data.frame(result$ANOVA.test.mod.Box); box$effect <- rownames(box)\n'
+        f'  write.csv(box, "{_box_csv}", row.names=FALSE)\n'
+        f'}} else write.csv(data.frame(), "{_box_csv}", row.names=FALSE)\n'
+        # WTS
+        f'wts <- as.data.frame(result$Wald.test); wts$effect <- rownames(wts)\n'
+        f'write.csv(wts, "{_wts_csv}", row.names=FALSE)\n'
+        # RTE
+        f'write.csv(as.data.frame(result$RTE), "{_rte_csv}", row.names=TRUE)\n'
+        # pair.comparison
+        f'if (!is.null(result$pair.comparison)) {{\n'
+        f'  write.csv(result$pair.comparison, "{_pair_csv}", row.names=FALSE)\n'
+        f'}} else write.csv(data.frame(), "{_pair_csv}", row.names=FALSE)\n'
+        # ANOVA.test.time
+        f'if (!is.null(result$ANOVA.test.time)) {{\n'
+        f'  att <- as.data.frame(result$ANOVA.test.time); att$cohort <- rownames(att)\n'
+        f'  write.csv(att, "{_time_csv}", row.names=FALSE)\n'
+        f'}} else write.csv(data.frame(), "{_time_csv}", row.names=FALSE)\n'
+        # Per-week MWU with HL and CI
+        'wk_rows <- list(); k_row <- 1\n'
+        'for (wk in levels(data$Week)) {\n'
+        '  sub <- data[data$Week == wk, ]\n'
+        '  cohs <- as.character(levels(droplevels(sub$Cohort)))\n'
+        '  if (length(cohs) < 2) next\n'
+        '  pm <- combn(length(cohs), 2)\n'
+        '  for (k in seq_len(ncol(pm))) {\n'
+        '    g1 <- cohs[pm[1,k]]; g2 <- cohs[pm[2,k]]\n'
+        '    x  <- sub$DailyChange[sub$Cohort == g1]\n'
+        '    y  <- sub$DailyChange[sub$Cohort == g2]\n'
+        '    x  <- x[!is.na(x)]; y <- y[!is.na(y)]\n'
+        '    if (length(x)<1 || length(y)<1) next\n'
+        '    tryCatch({\n'
+        '      wt <- wilcox.test(x, y, exact=FALSE, conf.int=TRUE)\n'
+        '      wk_rows[[k_row]] <- data.frame(\n'
+        '        week=as.integer(wk), g1=g1, n1=length(x), g2=g2, n2=length(y),\n'
+        '        U=as.numeric(wt$statistic), p_raw=wt$p.value,\n'
+        '        hl=as.numeric(wt$estimate), ci_lo=wt$conf.int[1], ci_hi=wt$conf.int[2],\n'
+        '        stringsAsFactors=FALSE)\n'
+        '      k_row <- k_row + 1\n'
+        '    }, error=function(e) {\n'
+        '      tryCatch({\n'
+        '        wt2 <- wilcox.test(x, y, exact=FALSE, conf.int=FALSE)\n'
+        '        wk_rows[[k_row]] <<- data.frame(\n'
+        '          week=as.integer(wk), g1=g1, n1=length(x), g2=g2, n2=length(y),\n'
+        '          U=as.numeric(wt2$statistic), p_raw=wt2$p.value,\n'
+        '          hl=NA_real_, ci_lo=NA_real_, ci_hi=NA_real_,\n'
+        '          stringsAsFactors=FALSE)\n'
+        '        k_row <<- k_row + 1\n'
+        '      }, error=function(e2) NULL)\n'
+        '    })\n'
+        '  }\n'
+        '}\n'
+        f'if (length(wk_rows)>0) {{\n'
+        f'  write.csv(do.call(rbind,wk_rows),"{_wkmwu_csv}",row.names=FALSE)\n'
+        f'}} else {{\n'
+        f'  write.csv(data.frame(),"{_wkmwu_csv}",row.names=FALSE)\n'
+        f'}}\n'
+        'cat("NPARLD_WT_DONE\\n")\n'
+    )
+
+    tmp_r = Path(tempfile.mktemp(suffix='.R'))
+    tmp_r.write_text(r_script, encoding='utf-8')
+
+    # ── Locate Rscript ─────────────────────────────────────────────────────
+    import glob as _glob
+    rscript = shutil.which('Rscript') or shutil.which('Rscript.exe')
+    if rscript is None:
+        for _pat in (
+            r'C:\Program Files\R\R-*\bin\Rscript.exe',
+            r'C:\Program Files\R\R-*\bin\x64\Rscript.exe',
+        ):
+            _m = sorted(_glob.glob(_pat))
+            if _m:
+                rscript = _m[-1]
+                break
+
+    if rscript is None:
+        print("ERROR: 'Rscript' not found. Install R and add to PATH.")
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+        return {}
+
+    r_output = ''
+    try:
+        proc = subprocess.run(
+            [rscript, '--vanilla', str(tmp_r)],
+            capture_output=True, text=True, timeout=300,
+        )
+        r_output = proc.stdout
+        r_stderr = proc.stderr.strip()
+        if proc.returncode != 0:
+            print(f"R exited with code {proc.returncode}.")
+        if r_stderr:
+            non_trivial = [
+                ln for ln in r_stderr.splitlines()
+                if not ln.startswith('Loading') and ln.strip()
+            ]
+            if non_trivial:
+                print("R messages:\n" + '\n'.join(non_trivial))
+    except FileNotFoundError:
+        print("ERROR: 'Rscript' not found. Install R and add to the system PATH.")
+        return {}
+    except subprocess.TimeoutExpired:
+        print("ERROR: R script timed out after 300 s.")
+        return {}
+    finally:
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+
+    # ── Read back result CSVs ───────────────────────────────────────────────
+    def _safe_read_csv(fp):
+        try:    return pd.read_csv(fp) if _os.path.exists(fp) else pd.DataFrame()
+        except Exception: return pd.DataFrame()
+
+    ats_df   = _safe_read_csv(_ats_csv)
+    box_df   = _safe_read_csv(_box_csv)
+    wts_df   = _safe_read_csv(_wts_csv)
+    rte_df   = _safe_read_csv(_rte_csv)
+    pair_df  = _safe_read_csv(_pair_csv)
+    time_df  = _safe_read_csv(_time_csv)
+    wkmwu_df = _safe_read_csv(_wkmwu_csv)
+
+    for _fp in [_ats_csv, _box_csv, _wts_csv, _rte_csv, _pair_csv, _time_csv, _wkmwu_csv]:
+        try:    _os.unlink(_fp)
+        except Exception: pass
+
+    # ── Re-derive zero p-values using scipy (R underflows for extreme statistics) ──
+    # When nparLD's pf()/pchisq() returns exactly 0, write.csv writes 0 to the CSV.
+    # Recompute from the test statistic + df using scipy, which handles sub-1e-30 values.
+    def _fix_zero_pvals_df(df, stat_cols, df1_cols, p_col, mode='ats', df2_col=None):
+        if df.empty or p_col not in df.columns:
+            return df
+        s_col  = next((c for c in stat_cols if c in df.columns), None)
+        d1_col = next((c for c in df1_cols  if c in df.columns), None)
+        if s_col is None or d1_col is None:
+            return df
+        df = df.copy()
+        for idx in df.index:
+            try:
+                pv = float(df.at[idx, p_col])
+            except (TypeError, ValueError):
+                continue
+            if np.isnan(pv) or pv != 0.0:
+                continue
+            try:
+                st = float(df.at[idx, s_col])
+                d1 = float(df.at[idx, d1_col])
+                if mode == 'ats' and d1 > 0:
+                    df.at[idx, p_col] = float(stats.chi2.sf(st * d1, d1))
+                elif mode == 'wts' and d1 > 0:
+                    df.at[idx, p_col] = float(stats.chi2.sf(st, d1))
+                elif mode == 'box' and df2_col and df2_col in df.columns:
+                    d2 = float(df.at[idx, df2_col])
+                    if d2 > 0:
+                        df.at[idx, p_col] = float(stats.f.sf(st, d1, d2))
+            except Exception:
+                pass
+        return df
+
+    _ats_pcol  = next((c for c in ['p-value', 'p.value', 'Pr(>F)']       if c in ats_df.columns),  None)
+    _wts_pcol  = next((c for c in ['p-value', 'p.value', 'Pr(>Chisq)']   if c in wts_df.columns),  None)
+    _box_pcol  = next((c for c in ['p-value', 'p.value']                  if c in box_df.columns),  None)
+    _pair_pcol = next((c for c in ['p-value', 'p.value']                  if c in pair_df.columns), None)
+    _time_pcol = next((c for c in ['p-value', 'p.value']                  if c in time_df.columns), None)
+    if _ats_pcol:
+        ats_df  = _fix_zero_pvals_df(ats_df,  ['Statistic','ATS','F'],  ['df','df1','Df'], _ats_pcol,  'ats')
+    if _wts_pcol:
+        wts_df  = _fix_zero_pvals_df(wts_df,  ['Statistic','WTS','Chisq'], ['df','Df'],   _wts_pcol,  'wts')
+    if _box_pcol:
+        box_df  = _fix_zero_pvals_df(box_df,  ['Statistic','ATS','F'],  ['df1','df','Df'], _box_pcol, 'box', df2_col='df2')
+    if _pair_pcol:
+        pair_df = _fix_zero_pvals_df(pair_df, ['Statistic','ATS'],      ['df','df1'],     _pair_pcol, 'ats')
+    if _time_pcol:
+        time_df = _fix_zero_pvals_df(time_df, ['Statistic','ATS'],      ['df','df1'],     _time_pcol, 'ats')
+
+    # ── ATS p_values (backward compatibility) ──────────────────────────────
+    p_values: Optional[pd.DataFrame] = None
+    if not ats_df.empty:
+        _p_col_ats  = next((c for c in ['p-value', 'p.value', 'Pr(>F)'] if c in ats_df.columns), None)
+        _s_col_ats  = next((c for c in ['Statistic', 'ATS', 'F'] if c in ats_df.columns), None)
+        _d1_col_ats = next((c for c in ['df1', 'df', 'Df'] if c in ats_df.columns), None)
+        if _p_col_ats and 'effect' in ats_df.columns:
+            _pv_cols   = ['effect', _p_col_ats]
+            _pv_rename = {'effect': 'Effect', _p_col_ats: 'p_value'}
+            if _s_col_ats:
+                _pv_cols.append(_s_col_ats)
+                _pv_rename[_s_col_ats] = 'Statistic'
+            if _d1_col_ats:
+                _pv_cols.append(_d1_col_ats)
+                _pv_rename[_d1_col_ats] = 'df'
+            p_values = ats_df[_pv_cols].rename(columns=_pv_rename)
+
+    # ── Local formatting helpers ────────────────────────────────────────────
+    def _fmt_p_nw(p: float) -> str:
+        try:
+            if np.isnan(p): return 'n/a'
+        except (TypeError, ValueError):
+            return 'n/a'
+        p = float(p)
+        if p < 0.001:  return f'{p:.2e}'
+        return f'{p:.4f}'
+
+    def _sig_nw(p: float) -> str:
+        if np.isnan(p): return ''
+        if p < 0.001: return '***'
+        if p < 0.01:  return '**'
+        if p < 0.05:  return '*'
+        if p < 0.10:  return '.'
+        return ''
+
+    def _holm_nw(p_list):
+        n = len(p_list)
+        if n == 0: return []
+        order = sorted(range(n), key=lambda i: p_list[i])
+        adj = [0.0] * n
+        running_min = 1.0
+        for rank, idx in enumerate(reversed(order)):
+            k = n - rank
+            adj[idx] = min(running_min, p_list[idx] * k)
+            running_min = adj[idx]
+        return adj
+
+    # ── Build formatted report ──────────────────────────────────────────────
+    W = 80
+    _ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    lines: List[str] = [
+        '=' * W,
+        '  NONPARAMETRIC REPEATED MEASURES ANALYSIS  (R: nparLD)',
+        '  Design: F1-LD-F1  (1 between-subjects \u00d7 1 within-subjects factor)',
+        '=' * W,
+        f'  Generated         : {_ts}',
+        f'  Measure           : {measure}',
+        f'  Between factor    : Cohort  ({", ".join(cohort_levels)})',
+        f'  Within factor     : Week    ({", ".join(str(w) for w in week_levels)})',
+        f'  N subjects        : {n_subjects} (complete cases across all weeks)',
+        '',
+        '  Test statistics:',
+        '    ATS = ANOVA-Type Statistic (F-approximation, recommended for small n)',
+        '    WTS = Wald-Type Statistic  (Chi-sq, asymptotic, shown for reference)',
+        '    RTE = Relative Treatment Effect (rank-based mean, 0-1 scale)',
+        '',
+        '  Post-hoc (per week): Mann-Whitney U + Holm correction',
+        '    HL = Hodges-Lehmann estimator (x \u2212 y); 95% CI via wilcox.test',
+        '    r_rb = rank-biserial correlation = 1 \u2212 2U/(n\u2081\u00b7n\u2082)',
+        '=' * W,
+        '',
+        '  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10',
+        '',
+        '\u2550' * W,
+        f'  DEPENDENT VARIABLE:  {measure}',
+        '\u2550' * W,
+        '',
+        '  Model Information',
+        f'    {"Model (R)":<40} F1 LD F1 Model',
+        f'    {"Method":<40} Nonparametric rank-based (nparLD)',
+        f'    {"Between-subjects factor":<40} Cohort  ({", ".join(cohort_levels)})',
+        f'    {"Within-subjects factor":<40} Week    ({", ".join(str(w) for w in week_levels)})',
+        f'    {"N subjects (complete data)":<40} {n_subjects}',
+        f'    {"N subjects dropped":<40} {n_dropped}',
+        '',
+        '  Note: nparLD uses rank transformation; no parametric model is fit.',
+        '  Residuals, R\u00b2, AIC/BIC are not applicable. Inference is based on',
+        '  Relative Treatment Effects (RTEs) which are bounded in [0, 1].',
+        '',
+    ]
+
+    # ATS table
+    if not ats_df.empty:
+        _s_col  = next((c for c in ['Statistic', 'ATS', 'F'] if c in ats_df.columns), None)
+        _d1_col = next((c for c in ['df1', 'df', 'Df'] if c in ats_df.columns), None)
+        _d2_col = next((c for c in ['df2'] if c in ats_df.columns), None)
+        _p_col  = next((c for c in ['p-value', 'p.value', 'Pr(>F)'] if c in ats_df.columns), None)
+        lines += [
+            '  ANOVA-Type Statistics (ATS)  \u2014  F-approximation, recommended for small n',
+            f"  {'Effect':<30}  {'ATS':>10}  {'df1':>8}  {'df2':>8}  {'p-value':>10}  Sig",
+            '  ' + '\u2500' * 74,
+        ]
+        for _, row in ats_df.iterrows():
+            eff  = str(row.get('effect', '')).strip()
+            stat = float(row[_s_col])  if _s_col  else np.nan
+            df1  = float(row[_d1_col]) if _d1_col else np.nan
+            df2  = float(row[_d2_col]) if _d2_col else np.nan
+            pv   = float(row[_p_col])  if _p_col  else np.nan
+            df2s = f'{df2:>8.2f}' if not np.isnan(df2) else f'{"—":>8}'
+            lines.append(
+                f'  {eff:<30}  {stat:>10.4f}  {df1:>8.2f}  {df2s}  {_fmt_p_nw(pv):>10}  {_sig_nw(pv)}'
+            )
+        lines.append('')
+
+    # Box approximation table
+    if not box_df.empty:
+        _bs_col  = next((c for c in ['Statistic', 'ATS', 'F'] if c in box_df.columns), None)
+        _bd1_col = next((c for c in ['df1', 'df', 'Df'] if c in box_df.columns), None)
+        _bd2_col = next((c for c in ['df2'] if c in box_df.columns), None)
+        _bp_col  = next((c for c in ['p-value', 'p.value', 'Pr(>F)'] if c in box_df.columns), None)
+        lines += [
+            '  ATS with Box approximation  \u2014  preferred for small between-subjects N',
+            f"  {'Effect':<30}  {'Statistic':>10}  {'df1':>8}  {'df2':>8}  {'p-value':>10}  Sig",
+            '  ' + '\u2500' * 74,
+        ]
+        for _, row in box_df.iterrows():
+            eff  = str(row.get('effect', '')).strip()
+            stat = float(row[_bs_col])  if _bs_col  else np.nan
+            df1  = float(row[_bd1_col]) if _bd1_col else np.nan
+            df2  = float(row[_bd2_col]) if _bd2_col else np.nan
+            pv   = float(row[_bp_col])  if _bp_col  else np.nan
+            df2s = f'{df2:>8.4f}' if not np.isnan(df2) else f'{"—":>8}'
+            lines.append(
+                f'  {eff:<30}  {stat:>10.4f}  {df1:>8.4f}  {df2s}  {_fmt_p_nw(pv):>10}  {_sig_nw(pv)}'
+            )
+        lines.append('')
+
+    # WTS table
+    if not wts_df.empty:
+        _ws_col = next((c for c in ['Statistic', 'WTS', 'Chisq'] if c in wts_df.columns), None)
+        _wd_col = next((c for c in ['df', 'Df'] if c in wts_df.columns), None)
+        _wp_col = next((c for c in ['p-value', 'p.value', 'Pr(>Chisq)'] if c in wts_df.columns), None)
+        lines += [
+            '  Wald-Type Statistics (WTS)  \u2014  Chi-square, asymptotic (shown for reference)',
+            f"  {'Effect':<30}  {'WTS (chi-sq)':>12}  {'df':>6}  {'p-value':>10}  Sig",
+            '  ' + '\u2500' * 66,
+        ]
+        for _, row in wts_df.iterrows():
+            eff  = str(row.get('effect', '')).strip()
+            stat = float(row[_ws_col]) if _ws_col else np.nan
+            df_  = float(row[_wd_col]) if _wd_col else np.nan
+            pv   = float(row[_wp_col]) if _wp_col else np.nan
+            lines.append(
+                f'  {eff:<30}  {stat:>12.4f}  {df_:>6.2f}  {_fmt_p_nw(pv):>10}  {_sig_nw(pv)}'
+            )
+        lines.append('')
+
+    # RTE section
+    if not rte_df.empty:
+        if 'Unnamed: 0' in rte_df.columns:
+            rte_df = rte_df.rename(columns={'Unnamed: 0': 'label'})
+        _lbl_col  = 'label' if 'label' in rte_df.columns else rte_df.columns[0]
+        _est_col  = next((c for c in ['RTE', 'Estimate', 'rte'] if c in rte_df.columns), None)
+        _nobs_col = next((c for c in ['Nobs', 'nobs', 'N'] if c in rte_df.columns), None)
+        lines += [
+            '  Relative Treatment Effects (RTEs)  \u2014  rank-based effect sizes (0-1 scale)',
+            '  Interpretation: RTE near 0.5 = no effect; >0.5 = higher ranks in this cell',
+            '',
+        ]
+        cohort_rows_rte, week_rows_rte, cell_rows_rte = [], [], []
+        for _, row in rte_df.iterrows():
+            lbl = str(row.get(_lbl_col, '')).strip()
+            if ':' in lbl:
+                cell_rows_rte.append((lbl, row))
+            elif lbl.startswith('Week'):
+                week_rows_rte.append((lbl, row))
+            else:
+                cohort_rows_rte.append((lbl, row))
+
+        def _rte_line_nw(lbl, row, ind=4):
+            est  = float(row[_est_col]) if _est_col else np.nan
+            nobs = int(row[_nobs_col])  if (_nobs_col and not pd.isna(row.get(_nobs_col))) else None
+            ns   = f'  n={nobs}' if nobs is not None else ''
+            return f'  {" "*ind}{lbl:<36}  {est:>6.4f}{ns}'
+
+        if cohort_rows_rte:
+            lines.append('  Between-subjects (Cohort marginal):')
+            for lbl, row in cohort_rows_rte: lines.append(_rte_line_nw(lbl, row))
+            lines.append('')
+        if week_rows_rte:
+            lines.append('  Within-subjects (Week marginal):')
+            for lbl, row in week_rows_rte: lines.append(_rte_line_nw(lbl, row))
+            lines.append('')
+        if cell_rows_rte:
+            lines.append('  Cell RTEs (Cohort \u00d7 Week):')
+            for lbl, row in cell_rows_rte: lines.append(_rte_line_nw(lbl, row))
+            lines.append('')
+
+    # Pairwise group comparisons
+    if not pair_df.empty:
+        _pc_pair = next((c for c in pair_df.columns if 'pair' in c.lower()), pair_df.columns[0])
+        _pc_test = next((c for c in pair_df.columns if 'test' in c.lower()), None)
+        _pc_stat = next((c for c in ['Statistic', 'ATS'] if c in pair_df.columns), None)
+        _pc_df   = next((c for c in ['df', 'Df'] if c in pair_df.columns), None)
+        _pc_p    = next((c for c in ['p-value', 'p.value'] if c in pair_df.columns), None)
+
+        _cohort_rte_map: Dict[str, float] = {}
+        if not rte_df.empty and _est_col:
+            for _, _crrow in rte_df.iterrows():
+                _crlbl = str(_crrow.get(_lbl_col, '')).strip()
+                if ':' not in _crlbl and not _crlbl.startswith('Week'):
+                    _crgrp = _crlbl.replace('Cohort', '', 1).strip()
+                    try: _cohort_rte_map[_crgrp] = float(_crrow[_est_col])
+                    except Exception: pass
+
+        _parsed_pairs: List[dict] = []
+        for _, row in pair_df.iterrows():
+            try:
+                pair_lbl = str(row.get(_pc_pair, '')).replace('Cohort', '').replace(':', ' vs ')
+                test_lbl = str(row.get(_pc_test, '')) if _pc_test else ''
+                stat     = float(row[_pc_stat]) if _pc_stat else np.nan
+                df_v     = float(row[_pc_df])   if _pc_df   else np.nan
+                pv       = float(row[_pc_p])    if _pc_p    else np.nan
+                _parsed_pairs.append({'pair': pair_lbl, 'test': test_lbl, 'stat': stat, 'df': df_v, 'p_raw': pv})
+            except Exception:
+                _parsed_pairs.append({'raw': str(row.to_dict())})
+
+        _ttype_idx: Dict[str, list] = {}
+        for _pi, _pr in enumerate(_parsed_pairs):
+            if 'test' in _pr and 'p_raw' in _pr:
+                _ttype_idx.setdefault(_pr['test'], []).append(_pi)
+        for _tt, _tidxs in _ttype_idx.items():
+            _adjs = _holm_nw([_parsed_pairs[i]['p_raw'] for i in _tidxs])
+            for _ti, _ap in zip(_tidxs, _adjs):
+                _parsed_pairs[_ti]['p_adj'] = _ap
+
+        lines += [
+            '  Pairwise Group Comparisons  (from nparLD $pair.comparison)',
+            '  Holm-Bonferroni correction applied within each test type (Cohort / Week / Cohort:Week)',
+            '  Effect size: |\u0394RTE| = absolute difference in marginal RTEs (Cohort tests only)',
+            f"  {'Pair':<28}  {'Test':<12}  {'ATS':>11}  {'df':>6}  {'p (raw)':>10}  {'p (Holm)':>10}  {'|\u0394RTE|':>8}  Sig",
+            '  ' + '\u2500' * 102,
+        ]
+        for _pr in _parsed_pairs:
+            if 'raw' in _pr:
+                lines.append('  ' + _pr['raw'])
+            else:
+                _p_adj = _pr.get('p_adj', _pr['p_raw'])
+                if 'Cohort' in _pr['test'] and 'Week' not in _pr['test'] and _cohort_rte_map:
+                    _pp = [p.strip() for p in _pr['pair'].split(' vs ')]
+                    if len(_pp) == 2:
+                        _r1 = _cohort_rte_map.get(_pp[0], float('nan'))
+                        _r2 = _cohort_rte_map.get(_pp[1], float('nan'))
+                        _dv = abs(_r1 - _r2) if not (np.isnan(_r1) or np.isnan(_r2)) else float('nan')
+                        _ds = f'{_dv:.3f}' if not np.isnan(_dv) else 'N/A'
+                    else:
+                        _ds = 'N/A'
+                else:
+                    _ds = '\u2014'
+                lines.append(
+                    f"  {_pr['pair']:<28}  {_pr['test']:<12}  ATS={_pr['stat']:>9.4f}  "
+                    f"df={_pr['df']:>6.2f}  {_fmt_p_nw(_pr['p_raw']):>10}  "
+                    f"{_fmt_p_nw(_p_adj):>10}  {_ds:>8}  {_sig_nw(_p_adj)}"
+                )
+        lines.append('')
+
+    # Within-group time effects
+    if not time_df.empty:
+        _tc_coh  = 'cohort' if 'cohort' in time_df.columns else time_df.columns[-1]
+        _tc_stat = next((c for c in ['Statistic', 'ATS'] if c in time_df.columns), None)
+        _tc_df   = next((c for c in ['df', 'Df'] if c in time_df.columns), None)
+        _tc_p    = next((c for c in ['p-value', 'p.value'] if c in time_df.columns), None)
+        lines += [
+            '  Within-Group Time Effects  (ATS per cohort, from nparLD $ANOVA.test.time)',
+            '  \u2500' + '\u2500' * 77,
+            f"  {'Cohort':<18}  {'ATS':>10}  {'df':>8}  {'p-value':>12}  Sig",
+            '  ' + '\u2500' * 56,
+        ]
+        for _, row in time_df.iterrows():
+            coh  = str(row.get(_tc_coh, '')).strip()
+            stat = float(row[_tc_stat]) if _tc_stat else np.nan
+            df_  = float(row[_tc_df])   if _tc_df   else np.nan
+            pv   = float(row[_tc_p])    if _tc_p    else np.nan
+            lines.append(
+                f'  {coh:<18}  {stat:>10.4f}  {df_:>8.4f}  {_fmt_p_nw(pv):>12}  {_sig_nw(pv)}'
+            )
+        lines.append('')
+
+    # Per-week between-cohort MWU with HL and CI
+    if not wkmwu_df.empty:
+        lines += [
+            '  Between-Cohort Comparisons at Each Week  (Mann-Whitney U, Holm corrected within each week)',
+            '  Effect size: r_rb = rank-biserial correlation = 1 \u2212 2U/(n\u2081\u00b7n\u2082); range [\u22121, 1], positive = group1 > group2',
+            '  HL = Hodges-Lehmann estimator of location shift (x \u2212 y); 95% CI via wilcox.test',
+            '  ' + '\u2500' * 88,
+        ]
+        for _wk_val in sorted(wkmwu_df['week'].unique()):
+            _wk_sub = wkmwu_df[wkmwu_df['week'] == _wk_val].copy()
+            _p_adjs = _holm_nw(_wk_sub['p_raw'].tolist())
+            lines.append(f'  Week: {int(_wk_val)}')
+            for (_idx, _row), _pa in zip(_wk_sub.iterrows(), _p_adjs):
+                _g1, _n1 = str(_row['g1']), int(_row['n1'])
+                _g2, _n2 = str(_row['g2']), int(_row['n2'])
+                _U       = float(_row['U'])
+                _pr_v    = float(_row['p_raw'])
+                _hl      = float(_row['hl'])
+                _ci_lo   = float(_row['ci_lo'])
+                _ci_hi   = float(_row['ci_hi'])
+                _rrb     = 1.0 - 2.0 * _U / (_n1 * _n2)
+                lines.append(
+                    f'    {_g1} (n={_n1}) vs {_g2} (n={_n2}) :  '
+                    f'U={_U:.0f}  p_raw={_fmt_p_nw(_pr_v)}  p_holm={_fmt_p_nw(_pa)}  '
+                    f'r_rb={_rrb:+.3f}  {_sig_nw(_pa)}'
+                )
+                if np.isnan(_hl):
+                    lines.append(f'      HL=[N/A]  95%CI [N/A, N/A]  (ties prevented CI)')
+                else:
+                    lines.append(f'      HL={_hl:+.4f}  95%CI [{_ci_lo:+.4f}, {_ci_hi:+.4f}]')
+            lines.append('')
+
+    # Collapsed (across weeks) between-cohort MWU post-hoc
+    _coll_groups = sorted(weekly['Cohort'].unique())
+    if len(_coll_groups) >= 2:
+        # Per-animal mean across all weeks
+        _coll_means = (
+            weekly.groupby(['ID', 'Cohort'], as_index=False)['DailyChange'].mean()
+        )
+        _coll_pairs_raw = []
+        _coll_pairs_info = []
+        for _ci in range(len(_coll_groups)):
+            for _cj in range(_ci + 1, len(_coll_groups)):
+                _ga, _gb = _coll_groups[_ci], _coll_groups[_cj]
+                _va = _coll_means[_coll_means['Cohort'] == _ga]['DailyChange'].dropna().values
+                _vb = _coll_means[_coll_means['Cohort'] == _gb]['DailyChange'].dropna().values
+                if len(_va) > 0 and len(_vb) > 0:
+                    from scipy.stats import mannwhitneyu as _mwu
+                    _U_c, _p_c = _mwu(_va, _vb, alternative='two-sided')
+                    _U_c = float(_U_c)
+                    _rrb_c = 1.0 - 2.0 * _U_c / (len(_va) * len(_vb))
+                    _hl_c  = float(np.median(np.subtract.outer(_va, _vb).ravel()))
+                    # Bootstrap percentile 95% CI on HL
+                    _rng_c = np.random.default_rng(42)
+                    _bt_c  = np.array([
+                        np.median(np.subtract.outer(
+                            _rng_c.choice(_va, size=len(_va), replace=True),
+                            _rng_c.choice(_vb, size=len(_vb), replace=True)
+                        ).ravel())
+                        for _ in range(2000)
+                    ])
+                    _ci_lo_c = float(np.percentile(_bt_c, 2.5))
+                    _ci_hi_c = float(np.percentile(_bt_c, 97.5))
+                else:
+                    _U_c = float('nan'); _p_c = 1.0
+                    _rrb_c = float('nan'); _hl_c = float('nan')
+                    _ci_lo_c = float('nan'); _ci_hi_c = float('nan')
+                _coll_pairs_raw.append(_p_c)
+                _coll_pairs_info.append((_ga, len(_va), _gb, len(_vb), _U_c, _p_c, _rrb_c, _hl_c, _ci_lo_c, _ci_hi_c))
+        _coll_adj = _holm_nw(_coll_pairs_raw)
+        lines += [
+            '  Between-Cohort Comparisons Collapsed Across Weeks  (per-animal mean; MWU, Holm corrected)',
+            '  Effect size: r_rb = rank-biserial correlation = 1 \u2212 2U/(n\u2081\u00b7n\u2082); range [\u22121, 1], positive = group1 > group2',
+            '  HL = Hodges-Lehmann estimator of location shift (x \u2212 y); 95% CI via bootstrap percentile (2000 resamples)',
+            '  ' + '\u2500' * 88,
+        ]
+        for (_ga, _na, _gb, _nb, _U_c, _pr_c, _rrb_c, _hl_c, _ci_lo_c, _ci_hi_c), _pa_c in zip(_coll_pairs_info, _coll_adj):
+            _rrb_s = f'{_rrb_c:+.3f}' if not np.isnan(_rrb_c) else 'N/A'
+            _u_s   = f'{_U_c:.0f}'    if not np.isnan(_U_c)   else 'N/A'
+            _hl_s  = f'{_hl_c:+.4f}'  if not np.isnan(_hl_c)  else 'N/A'
+            _ci_s  = (f'[{_ci_lo_c:+.4f}, {_ci_hi_c:+.4f}]'
+                      if not (np.isnan(_ci_lo_c) or np.isnan(_ci_hi_c)) else '[N/A]')
+            lines.append(
+                f'    {_ga} (n={_na}) vs {_gb} (n={_nb}) :  '
+                f'U={_u_s}  p_raw={_fmt_p_nw(_pr_c)}  p_holm={_fmt_p_nw(_pa_c)}  '
+                f'r_rb={_rrb_s}  {_sig_nw(_pa_c)}'
+            )
+            lines.append(f'      HL={_hl_s}  95%CI {_ci_s}')
+        lines.append('')
+
+    lines += [
+        '  Significance: *** p<.001  ** p<.01  * p<.05  . p<.10', '',
+        '=' * W, '  End of nparLD Report', '=' * W,
+    ]
+    report_str = '\n'.join(lines)
+    #print(report_str)
+
+    # ── Save report ────────────────────────────────────────────────────────
+    report_path: Optional[Path] = None
+    if save_report:
+        if save_path is None:
+            _ts2 = datetime.now().strftime('%Y%m%d_%H%M%S')
+            report_path = Path.cwd() / f'nparld_water_access_report_{_ts2}.txt'
+        else:
+            # Callers pass a complete filename, matching the neighboring report helpers.
+            report_path = Path(save_path)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report_str, encoding='utf-8')
+        #print(f'\n[OK] Report saved -> {report_path}')
+
+    return {
+        'r_output'   : r_output,
+        'report_str' : report_str,
+        'report_path': report_path,
+        'n_subjects' : n_subjects,
+        'cohorts'    : cohort_levels,
+        'weeks'      : week_levels,
+        'p_values'   : p_values,
+    }
+
+
+def _ext_data_2_1C_water_access_plot(
+    cohorts: Dict[str, pd.DataFrame],
+    target_days: Optional[List[int]] = None,
+    save_path: Optional[Path] = None,
+    show: bool = True,
+) -> Optional["plt.Figure"]:
+    """
+    Grouped bar chart of Daily Change (mean ± SEM) at specific target days for
+    3 cohorts (0% CA, 2% CA, 5-Wk Ramp).  One bar group per target day; one
+    bar per cohort within each group.  Individual animal values overlaid as
+    scatter points.  Uses the same day-alignment logic as
+    plot_daily_change_by_cohort (drop_ramp_baseline=False, Day >= 1).
+    """
+    if not HAS_MATPLOTLIB:
+        print("[ERROR] matplotlib is required for plotting")
+        return None
+
+    if target_days is None:
+        target_days = [5, 12, 19, 26, 33]
+
+    import colorsys as _cs
+
+    # ------------------------------------------------------------------
+    # Build aligned combined frame (same logic as option 5)
+    # ------------------------------------------------------------------
+    combined = combine_cohorts_for_analysis(cohorts)
+    combined = clean_cohort(combined)
+    if 'Day' not in combined.columns:
+        combined = add_day_column_across_cohorts(combined, drop_ramp_baseline=False)
+    combined = combined[combined['Day'] >= 1].copy()
+
+    cohort_map = _get_id_cohort_map(combined)
+    series_by_id = build_daily_change_series_by_id(combined)
+
+    # Consistent cohort ordering: 0% → 2% → ramp
+    all_labels = sorted(
+        set(cohort_map.values()),
+        key=lambda lbl: (
+            0 if '0%' in lbl.lower() and 'ramp' not in lbl.lower() else
+            1 if '2%' in lbl.lower() and 'ramp' not in lbl.lower() else 2
+        ),
+    )
+    color_map = {lbl: _cohort_label_to_color(lbl) for lbl in all_labels}
+
+    # ------------------------------------------------------------------
+    # Extract per-(day, cohort) animal values
+    # ------------------------------------------------------------------
+    day_cohort_vals: Dict[int, Dict[str, list]] = {
+        day: {lbl: [] for lbl in all_labels} for day in target_days
+    }
+    for mid, series in series_by_id.items():
+        cohort_lbl = cohort_map.get(mid)
+        if cohort_lbl is None:
+            continue
+        for day in target_days:
+            if day in series.index:
+                val = series.loc[day]
+                if np.isfinite(val):
+                    day_cohort_vals[day][cohort_lbl].append(float(val))
+
+    # ------------------------------------------------------------------
+    # Layout: groups of bars per day, one bar per cohort
+    # ------------------------------------------------------------------
+    n_days = len(target_days)
+    n_cohorts = len(all_labels)
+    bar_width = 0.22
+    bar_gap = 0.04
+    group_spacing = 1.0
+    step = bar_width + bar_gap
+    offsets = np.array([i * step for i in range(n_cohorts)], dtype=float)
+    offsets -= offsets.mean()          # centre the cohort bars around the day tick
+
+    rng = np.random.default_rng(42)
+    fig, ax = plt.subplots(figsize=plt.rcParams['figure.figsize'])
+
+    for ci, lbl in enumerate(all_labels):
+        col = color_map[lbl]
+        _r, _g, _b = (int(col.lstrip('#')[k:k+2], 16) / 255.0 for k in (0, 2, 4))
+        _h, _s, _v = _cs.rgb_to_hsv(_r, _g, _b)
+        edge_col = '#%02x%02x%02x' % tuple(
+            int(c * 255) for c in _cs.hsv_to_rgb(_h, min(_s * 1.3, 1.0), _v * 0.72))
+
+        for di, day in enumerate(target_days):
+            vals = np.array(day_cohort_vals[day][lbl])
+            if len(vals) == 0:
+                continue
+            x_center = di * group_spacing + offsets[ci]
+            mean_v = float(np.mean(vals))
+            sem_v = (float(np.std(vals, ddof=1) / np.sqrt(len(vals)))
+                     if len(vals) > 1 else 0.0)
+            ax.bar(x_center, mean_v, width=bar_width,
+                   color=col, edgecolor=edge_col, linewidth=0.8, zorder=2,
+                   label=lbl if di == 0 else '_nolegend_')
+            ax.errorbar(x_center, mean_v, yerr=sem_v,
+                        fmt='none', color='black', capsize=3, capthick=0.7,
+                        linewidth=0.8, zorder=3)
+            jitter = rng.uniform(-bar_width * 0.35, bar_width * 0.35, size=len(vals))
+            ax.scatter(x_center + jitter, vals,
+                       color=col, s=10, alpha=0.65,
+                       edgecolors='black', linewidths=0.4, zorder=4)
+
+    ax.axhline(0, color='black', linewidth=0.6, linestyle='--', zorder=1)
+
+    group_centers = [di * group_spacing for di in range(n_days)]
+    ax.set_xticks(group_centers)
+    ax.set_xticklabels([f"Day {d}" for d in target_days], fontsize=7)
+    ax.set_xlim(group_centers[0] - 0.65, group_centers[-1] + 0.65)
+    ax.set_ylabel('Daily Change (%BW/day)  (mean \u00b1 SEM)')
+    ax.set_title('Daily Weight Change at Selected Days\n0% CA  |  2% CA  |  5-Wk Ramp')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(direction='in', which='both', length=4)
+    ax.legend(title='Cohort', loc='lower left', fontsize=7)
+
+    fig.tight_layout()
+
+    ax.set_ylim(-5, 10)
+    ax.set_yticks([-5, 0, 5, 10])
+
+    if save_path is not None:
+        fig.savefig(save_path, format='svg')
+        print(f"[OK] Bar chart saved -> {save_path}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig
+
+
+def _ext_data_2_1D_plot_rmcorr_licks_vs_weight_SR(
+    weekly_averages: Dict,
+    save_path: Optional[Path] = None,
+    show: bool = True,
+) -> Optional[plt.Figure]:
+    import os as _os
+
+    # ── build flat per-animal-per-week data ──────────────────────────────
+    if EXPERIMENT_MODE == 'ramp':
+        sorted_dates = sorted(weekly_averages.keys(),
+                              key=lambda d: weekly_averages[d]['ca_percent'])
+    else:
+        sorted_dates = sort_dates_chronologically(list(weekly_averages.keys()))
+
+    records = []
+    for week_idx, date in enumerate(sorted_dates):
+        data = weekly_averages[date]
+        lick_arr = np.asarray(data['avg_licks_per_animal'], dtype=float)
+        wt_arr   = np.asarray(data['avg_total_weight_per_animal'], dtype=float)
+        ids      = data.get('animal_ids',
+                            [f"Animal_{j+1}" for j in range(len(lick_arr))])
+        ca_pct_val = data.get('ca_percent', np.nan)
+        for aid, lk, wt in zip(ids, lick_arr, wt_arr):
+            records.append({'mouse_id': str(aid), 'licks': lk, 'weight_pct': wt,
+                             'ca_percent': ca_pct_val})
+
+    if not records:
+        print("ERROR: No per-animal data for rmcorr.")
+        return None
+
+    _df = pd.DataFrame(records).dropna(subset=['licks', 'weight_pct'])
+    if _df.shape[0] < 5 or _df['mouse_id'].nunique() < 3:
+        print("Not enough data for rmcorr (need ≥3 mice, ≥5 observations).")
+        return None
+
+    unique_animals = list(_df['mouse_id'].unique())
+    n_animals      = len(unique_animals)
+    design_label   = _MLB['plot_suffix']
+
+    # ── print data pairs for validation ─────────────────────────────────
+    _factor_col = 'ca_percent' if EXPERIMENT_MODE == 'ramp' else 'ca_percent'
+    _factor_lbl = 'CA%' if EXPERIMENT_MODE == 'ramp' else 'Week'
+    _df_sorted = _df.sort_values(['mouse_id', 'ca_percent']).reset_index(drop=True)
+    # Add a 1-based week index per animal for nonramp display
+    _df_sorted['_week_idx'] = (
+        _df_sorted.groupby('mouse_id').cumcount() + 1
+    )
+    print("\n" + "=" * 72)
+    print("RMCORR INPUT — lick / weight pairs (sorted by animal, then week)")
+    print(f"{'Animal':<12}  {_factor_lbl:>6}  {'Week#':>5}  {'Licks':>8}  {'Weight (%BW chg)':>17}")
+    print("-" * 72)
+    for _, _row in _df_sorted.iterrows():
+        print(
+            f"  {_row['mouse_id']:<10}  {_row['ca_percent']:>6.1f}  "
+            f"{int(_row['_week_idx']):>5}  {_row['licks']:>8.0f}  "
+            f"{_row['weight_pct']:>17.4f}"
+        )
+    print("-" * 72)
+    print(f"  Total rows: {len(_df_sorted)}  |  Animals: {n_animals}  |  "
+          f"Rows/animal: "
+          + ", ".join(f"{a}={(_df_sorted['mouse_id']==a).sum()}"
+                      for a in sorted(unique_animals)))
+    print("=" * 72 + "\n")
+    # ────────────────────────────────────────────────────────────────────
+
+    # ── attempt rmcorr via rpy2 ──────────────────────────────────────────
+    _r_rm  = np.nan
+    _p_rm  = np.nan
+    _ci_lo = np.nan
+    _ci_hi = np.nan
+    _slope = np.nan
+    _per_subject_intercepts: dict = {}
+    _rmcorr_ok = False
+    _rmcorr_report = ""
+
+    try:
+        import os as _osi
+        import glob as _globi
+
+        if _osi.name == 'nt':
+            _r_home = _osi.environ.get('R_HOME', '')
+            if _r_home:
+                for _p in [_osi.path.join(_r_home, 'bin', 'x64'),
+                            _osi.path.join(_r_home, 'bin')]:
+                    if _osi.path.isdir(_p):
+                        if _p not in _osi.environ.get('PATH', ''):
+                            _osi.environ['PATH'] = _p + _osi.pathsep + _osi.environ.get('PATH', '')
+                        try:
+                            _osi.add_dll_directory(_p)
+                        except (AttributeError, OSError):
+                            pass
+
+        import rpy2.robjects as _ro2
+        import rpy2.robjects.packages as _rpkgs2
+        _rpkgs2.importr('rmcorr')
+
+        import tempfile as _tmpi
+        _uid  = str(id(_df))[-6:]
+        _tdir = _tmpi.gettempdir().replace('\\', '/')
+        _csv  = f"{_tdir}/rmcorr_in_{_uid}.csv"
+        _out  = f"{_tdir}/rmcorr_out_{_uid}.csv"
+
+        _df.to_csv(_csv, index=False)
+        _ro2.globalenv['r_rmc_in']  = _csv
+        _ro2.globalenv['r_rmc_out'] = _out
+
+        _ro2.r("""
+            suppressPackageStartupMessages(library(rmcorr))
+            .d <- read.csv(r_rmc_in)
+            .d$mouse_id <- factor(.d$mouse_id)
+            .rmc <- rmcorr(participant = mouse_id,
+                           measure1    = weight_pct,
+                           measure2    = licks,
+                           dataset     = .d)
+            .all_coefs <- stats::coef(.rmc$model)
+            .slope     <- as.numeric(.all_coefs["weight_pct"])
+            .lvls <- levels(.d$mouse_id)
+            .intercepts <- sapply(.lvls, function(.lv) {
+                sx <- .d$weight_pct[.d$mouse_id == .lv]
+                sy <- .d$licks[.d$mouse_id == .lv]
+                if (length(sx) == 0 || is.na(.slope)) return(NA_real_)
+                mean(sy) - .slope * mean(sx)
+            })
+            .out_df <- data.frame(
+                mouse_id  = .lvls,
+                intercept = as.numeric(.intercepts),
+                slope     = .slope,
+                r_rm      = .rmc$r,
+                p_val     = .rmc$p,
+                ci_lo     = .rmc$CI[1],
+                ci_hi     = .rmc$CI[2],
+                df_rm     = .rmc$df
+            )
+            write.csv(.out_df, r_rmc_out, row.names = FALSE)
+        """)
+
+        _res_df = pd.read_csv(_out)
+        for _fp in [_csv, _out]:
+            try:    _os.unlink(_fp)
+            except Exception: pass
+
+        _r_rm  = float(_res_df['r_rm'].iloc[0])
+        _p_rm  = float(_res_df['p_val'].iloc[0])
+        _ci_lo = float(_res_df['ci_lo'].iloc[0])
+        _ci_hi = float(_res_df['ci_hi'].iloc[0])
+        _df_rm = float(_res_df['df_rm'].iloc[0])
+        _slope = float(_res_df['slope'].iloc[0])
+        _per_subject_intercepts = dict(
+            zip(_res_df['mouse_id'].astype(str), _res_df['intercept'].astype(float))
+        )
+        print(f"  [debug] slope={_slope:.4f}  n_intercepts={len(_per_subject_intercepts)}"
+              f"  intercept_keys={list(_per_subject_intercepts.keys())[:3]}")
+        # If R returned NaN for slope, compute it in Python from the rmcorr r value
+        # using the pooled within-subject regression: slope = r_rm * SD(y)/SD(x)
+        if np.isnan(_slope) and not np.isnan(_r_rm):
+            _sx = _df.groupby('mouse_id')['weight_pct'].apply(lambda v: v - v.mean()).std()
+            _sy = _df.groupby('mouse_id')['licks'].apply(lambda v: v - v.mean()).std()
+            if _sx > 0:
+                _slope = _r_rm * float(_sy) / float(_sx)
+                print(f"  [debug] slope recomputed from r_rm: {_slope:.4f}")
+            # recompute intercepts with new slope
+            _per_subject_intercepts = {
+                str(aid): (float(_df.loc[_df['mouse_id'] == aid, 'licks'].mean())
+                           - _slope * float(_df.loc[_df['mouse_id'] == aid, 'weight_pct'].mean()))
+                for aid in _df['mouse_id'].unique()
+            }
+        _rmcorr_ok = True
+        print(f"\nrmcorr: r_rm = {_r_rm:.4f},  p = {_p_rm:.4f},  "
+              f"95% CI [{_ci_lo:.4f}, {_ci_hi:.4f}],  df = {_df_rm:.0f}")
+
+    except Exception as _rmc_exc:
+        print(f"NOTE: rmcorr via rpy2 failed ({type(_rmc_exc).__name__}: {_rmc_exc})")
+        print("      Falling back to Spearman scatter (install R package 'rmcorr' for full output).")
+
+    # ── matplotlib figure ─────────────────────────────────────────────────
+    _ms = plt.rcParams.get('lines.markersize', 6)
+
+    # ── pre-compute annotation text and line data ─────────────────────────
+    if _rmcorr_ok:
+        _p_str = f"p = {_p_rm:.4f}" if _p_rm >= 0.0001 else f"p = {_p_rm:.4e}"
+        _ann = (f"$r_{{rm}}$ = {_r_rm:.3f}\n"
+                f"{_p_str}\n"
+                f"95% CI [{_ci_lo:.3f}, {_ci_hi:.3f}]\n"
+                f"n = {n_animals} mice")
+        if not np.isnan(_slope):
+            _line_xs = np.linspace(-50, 50, 500)
+            _grand_intercept = _df['licks'].mean() - _slope * _df['weight_pct'].mean()
+            _line_ys = _grand_intercept + _slope * _line_xs
+        else:
+            _line_xs = _line_ys = None
+        _line_kw = dict(color='black', linewidth=1.2, zorder=4)
+    else:
+        _valid = _df[['weight_pct', 'licks']].dropna()
+        if len(_valid) >= 3:
+            _rho, _pv = stats.spearmanr(_valid['weight_pct'], _valid['licks'])
+            _sl, _ic, *_ = stats.linregress(_valid['weight_pct'], _valid['licks'])
+            _line_xs = np.linspace(-50, 50, 500)
+            _line_ys = _sl * _line_xs + _ic
+            _p_str = f"p = {_pv:.4f}" if _pv >= 0.0001 else f"p = {_pv:.4e}"
+            _ann = (f"Spearman \u03c1 = {_rho:.3f}\n{_p_str}\nn = {n_animals} mice\n"
+                    f"(rmcorr unavailable)")
+        else:
+            _line_xs = _line_ys = None
+            _ann = f"n = {n_animals} mice\n(rmcorr unavailable)"
+        _line_kw = dict(color='dimgray', linestyle='--', zorder=2)
+
+    def _draw_scatter_and_line(_axx):
+        for _, _row in _df.iterrows():
+            _axx.scatter(_row['weight_pct'], _row['licks'],
+                         color=COHORT_COLOR, marker='o',
+                         s=_ms ** 2, edgecolors='black', linewidths=0.5,
+                         alpha=0.8, zorder=4)
+        if _line_xs is not None:
+            _axx.plot(_line_xs, _line_ys, **_line_kw)
+
+    # ── single axis ────────────────────────────────────────────────────────
+    fig, ax = plt.subplots()
+    _draw_scatter_and_line(ax)
+    ax.set_ylim(bottom=0, top=5000)
+    ax.set_yticks(range(0, 5001, 1000))
+    ax.set_xlim(-20, 5)
+    ax.set_xticks(range(-20, 6, 5))
+    ax.text(0.03, 0.97, _ann,
+            transform=ax.transAxes, va='top', ha='left', fontsize=7.5,
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.75, edgecolor='gray'))
+    ax.set_xlabel('Total Weight Change (%)')
+    ax.set_ylabel('Lick Count')
+    ax.set_title(
+        f'Repeated-Measures Correlation: Licks ~ Weight Change\n({design_label})',
+        weight='bold')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(direction='in', which='both', length=5)
+    plt.tight_layout()
+
+    # ── save ──────────────────────────────────────────────────────────────
+    if save_path is not None:
+        _rmc_svg = save_path.parent / (save_path.stem + '_rmcorr.svg')
+        fig.savefig(_rmc_svg, format='svg', dpi=200, bbox_inches='tight')
+        print(f"rmcorr figure saved -> {_rmc_svg}")
+
+        _rmc_txt = save_path.parent / (save_path.stem + '_rmcorr.txt')
+        if _rmcorr_ok:
+            _p_str_txt = f"p = {_p_rm:.4f}" if _p_rm >= 0.0001 else f"p = {_p_rm:.4e}"
+            _rmc_txt.write_text("\n".join([
+                "=" * 70,
+                "REPEATED-MEASURES CORRELATION  (Bakdash & Marusich 2017)",
+                "  rmcorr(participant=mouse_id, measure1=weight_pct, measure2=licks)",
+                "  Package: R::rmcorr",
+                "=" * 70,
+                "",
+                f"  r_rm  = {_r_rm:.4f}",
+                f"  {_p_str_txt}",
+                f"  95% CI  [{_ci_lo:.4f}, {_ci_hi:.4f}]",
+                f"  df    = {_df_rm:.0f}",
+                f"  n mice  = {n_animals}",
+                f"  n obs   = {_df.shape[0]}",
+                "",
+                "  Interpretation: r_rm is the within-individual Pearson correlation",
+                "  after removing between-subject variance (ANCOVA with participant",
+                "  as factor). Parallel lines in the plot share one common slope.",
+                "=" * 70,
+            ]), encoding='utf-8')
+        else:
+            _rmc_txt.write_text("rmcorr not available — install R package 'rmcorr' and rpy2.\n",
+                                encoding='utf-8')
+        print(f"rmcorr report saved  -> {_rmc_txt}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    # ── Ramp-only variant: colour each dot by CA% (blue → red) ────────────
+    if EXPERIMENT_MODE == 'ramp' and 'ca_percent' in _df.columns:
+        # Discrete colour lookup: blue → yellow → orange → red-orange → dark red
+        def _ca_to_color(ca):
+            if ca == 0:       return 'dodgerblue'
+            elif ca <= 1.0:   return 'gold'
+            elif ca <= 2.0:   return 'orange'
+            elif ca <= 3.0:   return 'orangered'
+            else:             return 'darkred'
+
+        def _draw_ca_colored(_axx):
+            for _, _row in _df.iterrows():
+                if not (np.isfinite(_row['weight_pct']) and np.isfinite(_row['licks'])):
+                    continue
+                _axx.scatter(_row['weight_pct'], _row['licks'],
+                             color=_ca_to_color(_row['ca_percent']),
+                             marker='o', s=_ms ** 2,
+                             edgecolors='black', linewidths=0.5,
+                             alpha=0.85, zorder=4)
+            if _line_xs is not None:
+                _axx.plot(_line_xs, _line_ys, **_line_kw)
+
+        fig_ca, ax_ca = plt.subplots()
+        _draw_ca_colored(ax_ca)
+        ax_ca.set_ylim(bottom=0, top=5000)
+        ax_ca.set_yticks(range(0, 5001, 1000))
+        ax_ca.set_xlim(-20, 5)
+        ax_ca.set_xticks(range(-20, 6, 5))
+
+        ax_ca.text(0.03, 0.97, _ann,
+                   transform=ax_ca.transAxes, va='top', ha='left', fontsize=7.5,
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.75,
+                             edgecolor='gray'))
+        ax_ca.set_xlabel('Total Weight Change (%)')
+        ax_ca.set_ylabel('Lick Count')
+        ax_ca.set_title(
+            f'Repeated-Measures Correlation: Licks ~ Weight Change\n({design_label})',
+            weight='bold')
+        ax_ca.spines['top'].set_visible(False)
+        ax_ca.spines['right'].set_visible(False)
+        ax_ca.tick_params(direction='in', which='both', length=5)
+
+        # Discrete legend, one patch per CA% level present in the data
+        from matplotlib.patches import Patch
+        _ca_ticks = sorted(_df['ca_percent'].dropna().unique())
+        _legend_handles = [
+            Patch(facecolor=_ca_to_color(v), edgecolor='black',
+                  linewidth=0.6, label=f'{v:g}% CA')
+            for v in _ca_ticks
+        ]
+        ax_ca.legend(handles=_legend_handles, title='CA%', framealpha=0.75,
+                     fontsize=7, title_fontsize=7.5, loc='upper right')
+
+        plt.tight_layout()
+
+        if save_path is not None:
+            _ca_svg = save_path.parent / (save_path.stem + '_rmcorr_by_ca.svg')
+            fig_ca.savefig(_ca_svg, format='svg', dpi=200, bbox_inches='tight')
+            print(f"CA%-coloured rmcorr figure saved -> {_ca_svg}")
+
+        if show:
+            plt.show()
+        else:
+            plt.close(fig_ca)
+
+    return fig
+
+
 # =============================================================================
 # EXTENDED DATA 2–3 — (add description when porting)
 # =============================================================================
 
-def extended_data_2_3() -> None:
-    """Placeholder — port the Extended Data 2–3 panels here."""
+def extended_data_5_1() -> None:
+    """Placeholder — port the Extended Data 5–1 panels here."""
     pass
 
 
@@ -6776,7 +8377,7 @@ if __name__ == "__main__":
     figure_8()
     figure_9()
     extended_data_2_1()
-    extended_data_2_3()
+    extended_data_5_1()
     extended_data_4_5()
 
 
