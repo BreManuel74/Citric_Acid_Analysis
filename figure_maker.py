@@ -47,6 +47,7 @@ import matplotlib.ticker as mticker
 import matplotlib.transforms as mtransforms
 from matplotlib.patches import Patch
 from scipy import stats
+from datetime import datetime
 
 # ── Optional packages ─────────────────────────────────────────────────────────
 
@@ -109,11 +110,11 @@ DIR_2WK           = _ROOT / "2_week_files"
 MASTER_2WK        = DIR_2WK / "master_data_2wk.csv"
 # (no lick master or capacitive logs for 2-wk ramp)
 
-# ── CAH cohort ────────────────────────────────────────────────────────────────
+# ── CAH (running task) cohort ────────────────────────────────────────────────────────────────
 DIR_CAH           = _ROOT / "CAH_cohort"
 MASTER_CAH        = DIR_CAH / "master_data_CAH.csv"
 
-# ── RV cohort ─────────────────────────────────────────────────────────────────
+# ── RV (stopping task) cohort ─────────────────────────────────────────────────────────────────
 DIR_RV            = _ROOT / "RV_cohort"
 MASTER_RV         = DIR_RV / "RV_master_data.csv"
 
@@ -150,7 +151,7 @@ for _out in [OUT_FIG2, OUT_FIG3, OUT_FIG4, OUT_FIG5,
 COLOR_0PCT  = "#1f77b4"   # 0 % CA  — blue
 COLOR_2PCT  = "#f79520"   # 2 % CA  — orange
 COLOR_RAMP  = "#2da048"   # slow ramp — green
-COLOR_4PCT  = "#424143"   # 4 % CA (pilot) — dark grey
+COLOR_4PCT  = "#424143"   # 4 % CA (pilot) — dark gray
 COLOR_OTHER = "#7f3f98"   # fast ramp - purple
 
 # Sex marker styles (cohort color is applied separately)
@@ -8311,12 +8312,289 @@ def _ext_data_2_1D_plot_rmcorr_licks_vs_weight_SR(
 
 
 # =============================================================================
-# EXTENDED DATA 2–3 — (add description when porting)
+# EXTENDED DATA 5–1 — Running and stopping task total weight change
 # =============================================================================
 
 def extended_data_5_1() -> None:
-    """Placeholder — port the Extended Data 5–1 panels here."""
-    pass
+    """Generated Extended Data 5–1 running and stopping task
+    weight change panels."""
+
+    print("\n" + "=" * 60)
+    print("Extended Data 5-1 — Running and stopping task total weight change")
+    print("=" * 60)
+
+    CAH_df = _load_master_csv(MASTER_CAH)
+    RV_df  = _load_master_csv(MASTER_RV)
+    _generate_descriptive_stats_report(CAH_df, output_dir= OUT_EXT_5_1, cohort_label="CAH")
+    _generate_descriptive_stats_report(RV_df,  output_dir= OUT_EXT_5_1, cohort_label="RV")
+
+
+def _generate_descriptive_stats_report(
+	df: pd.DataFrame,
+	output_dir: Optional[Path] = None,
+	cohort_label: str = "CAH",
+) -> dict:
+	"""
+	Generate per-week descriptive statistics for Total Change and Daily Change,
+	stratified all-animals, by CA% condition, and by Sex.  Also reports
+	starting weights by Sex.
+
+	Study structure: 27 post-baseline days (Days 1–27).
+	  Week 1 = Days 1–7   (7 days)
+	  Week 2 = Days 8–14  (7 days)
+	  Week 3 = Days 15–21 (7 days)
+	  Week 4 = Days 22–27 (6 days — study ended before day 28)
+
+	Per-week values are computed as the within-animal mean over that week's
+	days, then descriptive stats are computed across animals.
+
+	Returns a dict with keys 'report_text' and 'report_path'.
+	"""
+	from scipy.stats import t as _t_dist
+
+	df = df.copy()
+	if "Day" not in df.columns:
+		df = _add_day_col(df, 'nonramp')
+	if "Week" not in df.columns:
+		df = _add_week_col(df)
+
+	# Post-baseline rows only
+	cdf = df[df["Day"] > 0].copy()
+
+	# Ensure CA (%) column exists
+	if "CA (%)" not in cdf.columns and "Condition" in cdf.columns:
+		def _parse_ca(val):
+			if pd.isna(val):
+				return None
+			try:
+				return int(float(str(val).strip().replace('%', '')))
+			except (ValueError, TypeError):
+				return None
+		cdf["CA (%)"] = cdf["Condition"].apply(_parse_ca)
+
+	weeks = sorted(w for w in cdf["Week"].dropna().unique())
+
+	# Build week→day-range map (to note the 6-day last week)
+	week_day_map = {}
+	for w in weeks:
+		wd = cdf.loc[cdf["Week"] == w, "Day"]
+		week_day_map[int(w)] = (int(wd.min()), int(wd.max()), int(wd.nunique()))
+
+	has_sex = "Sex" in cdf.columns and cdf["Sex"].notna().any()
+	has_ca  = "CA (%)" in cdf.columns and cdf["CA (%)"].notna().any()
+	conditions = sorted(cdf["CA (%)"].dropna().unique()) if has_ca else []
+	sexes      = sorted(cdf["Sex"].dropna().unique())    if has_sex else []
+
+	# ── Helpers ──────────────────────────────────────────────────────────────
+	def _ci95(arr):
+		n = len(arr)
+		if n < 2:
+			return float('nan'), float('nan')
+		se = float(np.std(arr, ddof=1)) / np.sqrt(n)
+		margin = float(_t_dist.ppf(0.975, df=n - 1)) * se
+		mean = float(np.mean(arr))
+		return mean - margin, mean + margin
+
+	def _wk_label(w):
+		wk = int(w)
+		d_lo, d_hi, nd = week_day_map.get(wk, (0, 0, 0))
+		if nd < 7:
+			return f"Week {wk}*"
+		return f"Week {wk} "
+
+	def _animal_week_means(sub_df, col):
+		return (
+			sub_df.groupby(["ID", "Week"])[col]
+			.mean()
+			.reset_index()
+		)
+
+	def _cont_stats_block(sub_df, col, weeks, lines, indent=""):
+		hdr = (f"{indent}  {'Level':>8}  {'n':>4}  {'Mean':>8}  {'Median':>8}  "
+		       f"{'SEM':>8}  {'SD':>8}  {'95% CI':>22}")
+		sep = f"{indent}  {'-'*72}"
+		lines += [hdr, sep]
+		for wk in weeks:
+			wm = _animal_week_means(sub_df[sub_df["Week"] == wk], col)
+			vals = wm[col].dropna().values
+			lbl = _wk_label(wk)
+			n = len(vals)
+			if n == 0:
+				lines.append(f"{indent}  {lbl:>8}  {n:>4}  {'—':>8}  {'—':>8}  {'—':>8}  {'—':>8}  {'—':>22}")
+				continue
+			mean   = float(np.mean(vals))
+			median = float(np.median(vals))
+			sd     = float(np.std(vals, ddof=1))  if n >= 2 else float('nan')
+			sem    = sd / np.sqrt(n)               if n >= 2 else float('nan')
+			ci_lo, ci_hi = _ci95(vals)
+			ci_str = f"[{ci_lo:.3f}, {ci_hi:.3f}]" if not np.isnan(ci_lo) else "N/A"
+			lines.append(
+				f"{indent}  {lbl:>8}  {n:>4}  {mean:>8.3f}  {median:>8.3f}  "
+				f"{sem:>8.3f}  {sd:>8.3f}  {ci_str:>22}"
+			)
+		# One grand mean per animal across all weeks (no n inflation)
+		av = (
+			sub_df[sub_df["Week"].isin(weeks)]
+			.groupby("ID")[col]
+			.mean()
+			.dropna()
+			.values
+		)
+		av = np.array(av, dtype=float)
+		an = len(av)
+		if an > 0:
+			am = float(np.mean(av)); amed = float(np.median(av))
+			asd = float(np.std(av, ddof=1)) if an >= 2 else float('nan')
+			asem = asd / np.sqrt(an)        if an >= 2 else float('nan')
+			aci_lo, aci_hi = _ci95(av)
+			aci_str = f"[{aci_lo:.3f}, {aci_hi:.3f}]" if not np.isnan(aci_lo) else "N/A"
+			lines += [sep, f"{indent}  {'All':>8}  {an:>4}  {am:>8.3f}  {amed:>8.3f}  "
+			               f"{asem:>8.3f}  {asd:>8.3f}  {aci_str:>22}"]
+
+	# ── Build report lines ──────────────────────────────────────────────────
+	ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+	lines: list[str] = [
+		"=" * 80,
+		f"DESCRIPTIVE STATISTICS REPORT — {cohort_label} COHORT",
+		"=" * 80,
+		f"Generated: {ts}",
+		f"Post-baseline days: 27  |  Weeks: 4",
+		"Week structure:",
+	]
+	for wk in weeks:
+		d_lo, d_hi, nd = week_day_map[int(wk)]
+		note = "  ← 6-day week (study ended before day 28)" if nd < 7 else ""
+		lines.append(f"  Week {int(wk)}: Days {d_lo}–{d_hi}  ({nd} days){note}")
+	lines += [
+		"* Week labels marked with * contain fewer than 7 days.",
+		"  Per-week values = within-animal mean over that week's days.",
+		"  n = number of animals contributing to each level.",
+		"=" * 80,
+	]
+
+	cont_cols = [c for c in ["Total Change", "Daily Change"] if c in cdf.columns]
+
+	# ── Section 1: All animals ───────────────────────────────────────────────
+	lines += ["", "─" * 80, "  ALL ANIMALS (collapsed across Sex and CA%)", "─" * 80]
+	for col in cont_cols:
+		lines += ["", f"  {col.upper()}", "  " + "─" * 60]
+		_cont_stats_block(cdf, col, weeks, lines)
+
+	# ── Section 2: Stratified by CA% condition ───────────────────────────────
+	if has_ca and conditions:
+		lines += ["", "─" * 80, "  BY CA% CONDITION", "─" * 80]
+		for ca in conditions:
+			sub = cdf[cdf["CA (%)"] == ca]
+			n_animals = sub["ID"].nunique()
+			lines += ["", f"  CA = {int(ca)}%  (n = {n_animals} animals)", "  " + "─" * 60]
+			for col in cont_cols:
+				lines += [f"  {col.upper()}"]
+				_cont_stats_block(sub, col, weeks, lines, indent="  ")
+				lines.append("")
+
+	# ── Section 3: Stratified by Sex ─────────────────────────────────────────
+	if has_sex and sexes:
+		lines += ["─" * 80, "  BY SEX", "─" * 80]
+		for sex in sexes:
+			sub = cdf[cdf["Sex"] == sex]
+			n_animals = sub["ID"].nunique()
+			lines += ["", f"  Sex = {sex}  (n = {n_animals} animals)", "  " + "─" * 60]
+			for col in cont_cols:
+				lines += [f"  {col.upper()}"]
+				_cont_stats_block(sub, col, weeks, lines, indent="  ")
+				lines.append("")
+
+	# ── Section 4: Starting Weight by Sex (and CA%) ──────────────────────────
+	if "Weight" in df.columns and "ID" in df.columns:
+		sw_rows = []
+		for iid, grp in df.sort_values(["ID", "Date"]).groupby("ID"):
+			valid = grp.dropna(subset=["Weight"])
+			if valid.empty:
+				continue
+			first = valid.iloc[0]
+			sw_sex = str(first.get("Sex", "U")).strip().upper()
+			sw_sex = sw_sex[0] if sw_sex else "U"
+			sw_ca  = first.get("CA (%)", None)
+			sw_ca  = int(sw_ca) if pd.notna(sw_ca) else None
+			sw_rows.append({"ID": str(iid), "Sex": sw_sex, "CA (%)": sw_ca, "Weight": float(first["Weight"])})
+		sw_df = pd.DataFrame(sw_rows) if sw_rows else pd.DataFrame(columns=["ID","Sex","CA (%)","Weight"])
+
+		lines += [
+			"", "=" * 80, "STARTING WEIGHT BY SEX",
+			"=" * 80,
+			"Note: starting weight = first recorded weight per animal (Day 0 or earliest date)",
+			"",
+			"Individual starting weights:",
+			"-" * 52,
+			f"  {'ID':<10}  {'Sex':>4}  {'CA (%)':>7}  {'Starting Weight (g)':>20}",
+			"-" * 52,
+		]
+		for _, row in sw_df.sort_values(["Sex", "CA (%)", "ID"]).iterrows():
+			ca_lbl = f"{int(row['CA (%)'])}%" if pd.notna(row["CA (%)"]) else "?"
+			lines.append(f"  {row['ID']:<10}  {row['Sex']:>4}  {ca_lbl:>7}  {row['Weight']:>20.2f}")
+
+		lines += [
+			"", "Summary statistics by Sex:",
+			"-" * 56,
+			f"  {'Sex':>4}  {'n':>4}  {'Mean (g)':>10}  {'SEM':>8}  {'SD':>8}  {'95% CI':>22}",
+			"-" * 56,
+		]
+		for sex in sorted(sw_df["Sex"].unique()):
+			arr = sw_df.loc[sw_df["Sex"] == sex, "Weight"].values.astype(float)
+			n   = len(arr)
+			mean = float(np.mean(arr))
+			sd   = float(np.std(arr, ddof=1)) if n >= 2 else float('nan')
+			sem  = sd / np.sqrt(n)            if n >= 2 else float('nan')
+			ci_lo, ci_hi = _ci95(arr)
+			ci_str = f"[{ci_lo:.2f}, {ci_hi:.2f}]" if not np.isnan(ci_lo) else "N/A"
+			lines.append(f"  {sex:>4}  {n:>4}  {mean:>10.2f}  {sem:>8.3f}  {sd:>8.3f}  {ci_str:>22}")
+		arr_all = sw_df["Weight"].values.astype(float)
+		an = len(arr_all)
+		if an > 0:
+			am   = float(np.mean(arr_all))
+			asd  = float(np.std(arr_all, ddof=1)) if an >= 2 else float('nan')
+			asem = asd / np.sqrt(an)               if an >= 2 else float('nan')
+			aci_lo, aci_hi = _ci95(arr_all)
+			aci_str = f"[{aci_lo:.2f}, {aci_hi:.2f}]" if not np.isnan(aci_lo) else "N/A"
+			lines += ["-" * 56,
+			          f"  {'All':>4}  {an:>4}  {am:>10.2f}  {asem:>8.3f}  {asd:>8.3f}  {aci_str:>22}"]
+
+		if has_ca and not sw_df["CA (%)"].isna().all():
+			lines += [
+				"", "Summary statistics by Sex × CA%:",
+				"-" * 70,
+				f"  {'Sex':>4}  {'CA%':>5}  {'n':>4}  {'Mean (g)':>10}  {'SEM':>8}  {'SD':>8}  {'95% CI':>22}",
+				"-" * 70,
+			]
+			for sex in sorted(sw_df["Sex"].unique()):
+				for ca in sorted(sw_df["CA (%)"].dropna().unique()):
+					arr = sw_df.loc[(sw_df["Sex"] == sex) & (sw_df["CA (%)"] == ca), "Weight"].values.astype(float)
+					n   = len(arr)
+					if n == 0:
+						continue
+					mean = float(np.mean(arr))
+					sd   = float(np.std(arr, ddof=1)) if n >= 2 else float('nan')
+					sem  = sd / np.sqrt(n)            if n >= 2 else float('nan')
+					ci_lo, ci_hi = _ci95(arr)
+					ci_str = f"[{ci_lo:.2f}, {ci_hi:.2f}]" if not np.isnan(ci_lo) else "N/A"
+					ca_lbl = f"{int(ca)}%"
+					lines.append(f"  {sex:>4}  {ca_lbl:>5}  {n:>4}  {mean:>10.2f}  {sem:>8.3f}  {sd:>8.3f}  {ci_str:>22}")
+
+	lines += ["", "=" * 80, "END OF REPORT", "=" * 80, ""]
+	report_text = "\n".join(lines)
+	#print(report_text)
+
+	rpt_path = None
+	_out = output_dir or Path(__file__).parent
+	#_ts2 = datetime.now().strftime("%Y%m%d_%H%M%S")
+	rpt_path = _out / f"{cohort_label}_descriptive_stats_report.txt"
+	try:
+		rpt_path.write_text(report_text, encoding='utf-8')
+		#print(f"\nReport saved: {rpt_path}")
+	except Exception as _e:
+		print(f"\n[WARNING] Could not save report: {_e}")
+
+	return {"report_text": report_text, "report_path": rpt_path}
 
 
 # =============================================================================
