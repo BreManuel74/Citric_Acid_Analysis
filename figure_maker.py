@@ -48,6 +48,7 @@ import matplotlib.transforms as mtransforms
 from matplotlib.patches import Patch
 from scipy import stats
 from datetime import datetime
+import re
 
 # ── Optional packages ─────────────────────────────────────────────────────────
 
@@ -478,6 +479,42 @@ def _build_total_change_series(
     return result
 
 
+def build_total_change_series_by_id(df: pd.DataFrame, index: str = "day") -> dict:
+	"""
+	For each ID, return a pandas Series of 'Total Change' indexed by Day number.
+	
+	Parameters:
+		df: DataFrame with ID, Day, Total Change columns
+		index: "day" or "date" (CAH cohort uses day numbers)
+		
+	Returns:
+		dict[str, pd.Series]: Mapping from ID to Series of total changes
+	"""
+
+	cdf = df.copy()
+	if "Day" not in cdf.columns:
+		cdf = _add_day_col(cdf, 'nonramp')
+
+	required = {"ID", "Day", "Total Change"}
+	missing = required - set(cdf.columns)
+	if missing:
+		raise ValueError(f"DataFrame missing required columns: {sorted(missing)}")
+
+	series_by_id: dict = {}
+	for gid, g in cdf.groupby("ID", dropna=True):
+		g = g.dropna(subset=["Total Change"])
+		if g.empty:
+			continue
+		
+		g["Day"] = g["Day"].astype("Int64")
+		ser = g.set_index("Day")["Total Change"].sort_index()
+		s = ser.groupby(level=0).last()
+		s.name = str(gid)
+		series_by_id[str(gid)] = s
+
+	return series_by_id
+
+
 def build_daily_change_series_by_id(df: pd.DataFrame) -> dict:
     """
     For each ID, return a pandas Series of 'Daily Change' indexed by Day number.
@@ -708,6 +745,43 @@ def _add_week_column_across_cohorts(combined_df: pd.DataFrame) -> pd.DataFrame:
         df = add_day_column_across_cohorts(df)
     df['Week'] = (df['Day'] - 1) // 7 + 1
     return df
+
+
+def _get_id_ca_map(df: pd.DataFrame) -> dict:
+	"""
+	Build a mapping from ID -> CA (%) using the first non-null value per ID.
+	If CA (%) isn't available, returns an empty mapping.
+	"""
+	cdf = df.copy()
+	if "ID" not in cdf.columns or "CA (%)" not in cdf.columns:
+		return {}
+
+	def _norm_ca(x: pd.Series) -> Optional[int]:
+		valid = x.dropna().unique()
+		if len(valid) > 0:
+			return int(valid[0])
+		return None
+
+	ca_map = cdf.groupby("ID")["CA (%)"].apply(_norm_ca).to_dict()
+	return {str(k): v for k, v in ca_map.items()}
+
+
+def _ca_to_style(ca_pct: Optional[int]) -> Tuple[str, str]:
+	"""Return (color, marker) based on CA%: 0=blue/circle, 2=red/square, unknown=gray/triangle."""
+	if ca_pct == 0:
+		return ("black", "^")
+	if ca_pct == 2:
+		return ("#e8262a", "s")
+	return ("gray", "^")
+
+
+def _sex_to_style(sex: Optional[str]) -> Tuple[str, str]:
+	"""Return (color, marker) based on sex: M=green/square, F=purple/circle, unknown=gray/triangle."""
+	if sex == "M":
+		return ("green", "s")
+	if sex == "F":
+		return ("purple", "o")
+	return ("gray", "^")
 
 
 # =============================================================================
@@ -8325,11 +8399,16 @@ def extended_data_5_1() -> None:
 
     CAH_df = _load_master_csv(MASTER_CAH)
     RV_df  = _load_master_csv(MASTER_RV)
-    _generate_descriptive_stats_report(CAH_df, output_dir= OUT_EXT_5_1, cohort_label="CAH")
-    _generate_descriptive_stats_report(RV_df,  output_dir= OUT_EXT_5_1, cohort_label="RV")
+    _ext_data_5_1_generate_descriptive_stats_report(CAH_df, output_dir= OUT_EXT_5_1, cohort_label="CAH")
+    _ext_data_5_1_generate_descriptive_stats_report(RV_df,  output_dir= OUT_EXT_5_1, cohort_label="RV")
 
+    print("\n[Ext 5-1A] Running task total weight change plot ...")
+    _ext_data_5_1_plot_total_change_by_id(CAH_df, save_path=OUT_EXT_5_1 / "ext_data_5_1A_running_task_total_change", show=SHOW_PLOTS)
 
-def _generate_descriptive_stats_report(
+    print("\n[Ext 5-1C] Stopping task total weight change plot ...")
+    _ext_data_5_1_plot_total_change_by_id(RV_df, save_path=OUT_EXT_5_1 / "ext_data_5_1C_stopping_task_total_change", show=SHOW_PLOTS)
+
+def _ext_data_5_1_generate_descriptive_stats_report(
 	df: pd.DataFrame,
 	output_dir: Optional[Path] = None,
 	cohort_label: str = "CAH",
@@ -8595,6 +8674,147 @@ def _generate_descriptive_stats_report(
 		print(f"\n[WARNING] Could not save report: {_e}")
 
 	return {"report_text": report_text, "report_path": rpt_path}
+
+
+def _ext_data_5_1_plot_total_change_by_id(
+	df: pd.DataFrame,
+	ids: Optional[list] = None,
+	title: Optional[str] = None,
+	save_path: Optional[Path] = None,
+	show: bool = True,
+	save_svg: bool = False,
+	svg_filename: Optional[str] = None,
+) -> plt.Figure:
+	"""
+	Create a plot showing Total Change over Day for each animal (ID),
+	with colors and markers indicating CA% (0%=dodgerblue/triangle, 2%=orangered/triangle).
+	
+	Adapted from ramp_analysis.py for CAH cohort.
+	
+	Parameters:
+		df: DataFrame with ID, Day, CA (%), Total Change columns
+		ids: Optional list of IDs to plot (None = all)
+		title: Plot title
+		save_path: Optional path to save figure
+		show: Whether to display the plot
+		save_svg: Whether to save as SVG
+		svg_filename: Custom SVG filename
+		
+	Returns:
+		matplotlib Figure object
+	"""
+
+    # Ensure CA (%) column exists
+	if "CA (%)" not in df.columns and "Condition" in df.columns:
+		def _parse_ca(val):
+			if pd.isna(val):
+				return None
+			try:
+				return int(float(str(val).strip().replace('%', '')))
+			except (ValueError, TypeError):
+				return None
+		df["CA (%)"] = df["Condition"].apply(_parse_ca)
+
+	series_by_id = build_total_change_series_by_id(df, index="day")
+	ca_map = _get_id_ca_map(df)
+	sex_map = _get_sex_map_from_df(df)
+
+	# Filter to requested IDs if provided
+	if ids is not None:
+		series_by_id = {k: v for k, v in series_by_id.items() if k in set(ids)}
+
+	if not series_by_id:
+		raise ValueError("No series available to plot. Check input DataFrame and 'ids' filter.")
+
+	fig, ax = plt.subplots()
+
+	# Track which CA% groups have been plotted (for color legend)
+	ca_groups_plotted = {}
+
+	# Plot each ID as a separate line
+	for mid, s in series_by_id.items():
+		if s.empty:
+			continue
+		ca_pct = ca_map.get(mid)
+		color, _ = _ca_to_style(ca_pct)
+		sex = sex_map.get(mid)
+		_, marker = _sex_to_style(sex)
+
+		# Only add label for first ID in each CA% group
+		if ca_pct not in ca_groups_plotted:
+			label = f"{ca_pct}% CA"
+			ca_groups_plotted[ca_pct] = True
+		else:
+			label = None
+
+		ax.plot(
+			s.index,
+			s.values,
+			label=label,
+			marker=marker,
+			markersize=3,
+			alpha=0.9,
+			color=color,
+		)
+
+	ax.set_xlabel("Day")
+	ax.set_ylabel("Total Change (%)")
+	ax.grid(False)
+
+	if title is None:
+		title = "Total Weight Change by Day per Animal"
+	ax.set_title(title, weight='bold')
+
+	apply_common_plot_style(
+		ax,
+		start_x_at_zero=False,
+		remove_top_right=True,
+		remove_x_margins=True,
+		remove_y_margins=True,
+		ticks_in=True,
+	)
+
+	# Manual axis limits and ticks
+	ax.set_xlim(0, 28)
+	ax.set_xticks(range(0, 29, 4))
+	ax.set_ylim(-25, 10)
+	ax.set_yticks(range(-25, 11, 5))
+
+	# Legend: CA% color entries + sex marker entries
+	import matplotlib.lines as mlines
+	legend_handles = []
+	for ca_pct in sorted(ca_groups_plotted.keys(), key=lambda x: (x is None, x)):
+		color, _ = _ca_to_style(ca_pct)
+		legend_handles.append(mlines.Line2D([], [], color=color, linewidth=1.5,
+		                                     label=f"{ca_pct}% CA"))
+	legend_handles.append(mlines.Line2D([], [], color='gray', marker='s',
+	                                     linestyle='None', markersize=4, label='Male'))
+	legend_handles.append(mlines.Line2D([], [], color='gray', marker='o',
+	                                     linestyle='None', markersize=4, label='Female'))
+	ax.legend(handles=legend_handles, loc="best", fontsize=7)
+	fig.tight_layout()
+
+	if save_path is not None:
+		save_path = Path(save_path)
+		#fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
+		svg_path = save_path.with_suffix(".svg")
+		fig.savefig(str(svg_path), format="svg", bbox_inches="tight")
+		#print(f"  [OK] Saved SVG: {svg_path}")
+	# elif save_svg:
+	# 	base = svg_filename or (title or "total_change_by_id")
+	# 	safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(base)).strip("-_.") or "plot"
+	# 	if not safe.lower().endswith(".svg"):
+	# 		safe += ".svg"
+	# 	out_path = Path.cwd() / safe
+	# 	fig.savefig(str(out_path), format="svg", bbox_inches="tight")
+	# 	#print(f"  [OK] Saved SVG: {out_path}")
+
+	if show:
+		plt.show()
+	else:
+		plt.close(fig)
+
+	return fig
 
 
 # =============================================================================
