@@ -3893,14 +3893,14 @@ def compare_slopes_within_ca_groups(slopes_df: pd.DataFrame) -> Dict:
 			'N': _n,
 			'Mean': group_slopes.mean(),
 			'Median': np.median(group_slopes),
-			'SD': group_slopes.std(),
-			'SEM': group_slopes.std() / np.sqrt(_n),
+			'SD': group_slopes.std(ddof=1),
+			'SEM': _sem,
 			'CI_95_lo': _ci_lo,
 			'CI_95_hi': _ci_hi,
 			'Min': group_slopes.min(),
 			'Max': group_slopes.max(),
 			'IQR': np.percentile(group_slopes, 75) - np.percentile(group_slopes, 25),
-			'CV': (group_slopes.std() / group_slopes.mean() * 100) if group_slopes.mean() != 0 else np.nan
+			'CV': (group_slopes.std(ddof=1) / group_slopes.mean() * 100) if group_slopes.mean() != 0 else np.nan
 		}
 		
 		results['group_stats'].append(group_stat)

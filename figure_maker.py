@@ -1627,7 +1627,7 @@ def _fig2_plot_slopes(
     fig, ax = plt.subplots()
 
     bar_means = [float(np.mean(d)) if len(d) > 0 else 0.0 for d in box_data]
-    bar_sems  = [float(stats.sem(d))  if len(d) > 1 else 0.0 for d in box_data]
+    bar_sems  = [float(stats.sem(d, ddof=1))  if len(d) > 1 else 0.0 for d in box_data]
     ax.bar(positions, bar_means, width=0.65, color=colors, alpha=0.7,
            yerr=bar_sems,
            error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor="black"),
@@ -2743,7 +2743,7 @@ def _fig3a_plot_daily_change_cohorts(
             if not vals:
                 continue
             mu  = float(np.mean(vals))
-            sem = float(stats.sem(vals)) if len(vals) > 1 else 0.0
+            sem = float(stats.sem(vals, ddof=1)) if len(vals) > 1 else 0.0
             days_plot.append(day)
             means_plot.append(mu)
             sems_plot.append(sem)
@@ -2883,7 +2883,7 @@ def _fig3b_plot_behavioral_metrics(
                 if not animal_pcts:
                     continue
                 mu  = float(np.mean(animal_pcts))
-                sem = float(stats.sem(animal_pcts)) if len(animal_pcts) > 1 else 0.0
+                sem = float(stats.sem(animal_pcts, ddof=1)) if len(animal_pcts) > 1 else 0.0
                 week_stats[int(week_val)] = (mu, sem)
                 all_weeks.add(int(week_val))
             beh_results[col] = week_stats
@@ -3110,7 +3110,7 @@ def _fig3c_plot_transition_comparison(
     fig, ax = plt.subplots(figsize=(4.5, 3.0))
 
     bar_means = [float(np.mean(v)) if len(v) > 0 else 0.0 for v in cohort_values.values()]
-    bar_sems  = [float(stats.sem(v)) if len(v) > 1 else 0.0 for v in cohort_values.values()]
+    bar_sems  = [float(stats.sem(v, ddof=1)) if len(v) > 1 else 0.0 for v in cohort_values.values()]
     ax.bar(positions, bar_means, width=0.65, color=colors, alpha=0.7,
            yerr=bar_sems,
            error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor="black"),
@@ -3250,7 +3250,7 @@ def _fig3c_transition_report(
         n = len(vals)
         if n == 0: continue
         mu  = float(np.mean(vals))
-        sem = float(stats.sem(vals)) if n > 1 else float("nan")
+        sem = float(stats.sem(vals, ddof=1)) if n > 1 else float("nan")
         lo, hi = _ci95(vals)
         ci_str = f"[{lo:.4f}, {hi:.4f}]" if not np.isnan(lo) else "N/A"
         lines.append(
@@ -3399,7 +3399,7 @@ def _fig3d_plot_1pct_to_2pct(
 
     bar_means = [float(np.mean(cohort_values[lbl])) for lbl in labels]
     bar_sems  = [
-        float(stats.sem(cohort_values[lbl])) if len(cohort_values[lbl]) > 1 else 0.0
+        float(stats.sem(cohort_values[lbl], ddof=1)) if len(cohort_values[lbl]) > 1 else 0.0
         for lbl in labels
     ]
 
@@ -3519,7 +3519,7 @@ def _fig3d_transition_report(
     for lbl, vals in cohort_values.items():
         n  = len(vals)
         mu = float(np.mean(vals))
-        se = float(stats.sem(vals)) if n > 1 else float("nan")
+        se = float(stats.sem(vals, ddof=1)) if n > 1 else float("nan")
         lo, hi = _ci95(vals)
         ci_str = f"[{lo:.4f}, {hi:.4f}]" if not np.isnan(lo) else "N/A"
         lines.append(f"  {lbl:<22}  {n:>4}  {mu:>13.4f}  {se:>8.4f}  {ci_str:>26}")
@@ -3760,7 +3760,7 @@ def compute_sensor_KDE(
                 kdes[col] = float(x_eval[np.argmax(density)])
                 if verbose:
                     print(f"  {col}: KDE={kdes[col]:.2f}, mean={series.mean():.2f}, "
-                          f"std={series.std():.2f}, min={series.min():.2f}, max={series.max():.2f}")
+                          f"std={series.std(ddof=1):.2f}, min={series.min():.2f}, max={series.max():.2f}")
             except Exception:
                 kdes[col] = float(series.mean())
                 if verbose:
@@ -5234,7 +5234,9 @@ def _fig4c_plot_total_licks(
         for lbl in sorted(cohort_dfs.keys()):
             grp  = combined[combined["Cohort"] == lbl]
             if grp.empty: continue
-            wks  = grp.groupby("Week")["Total_Licks"].agg(["mean", "sem", "count"]).reset_index()
+            wks  = grp.groupby("Week")["Total_Licks"].agg(
+                mean="mean", sem=lambda values: values.sem(ddof=1), count="count"
+            ).reset_index()
             n_pw = int(wks["count"].iloc[0]) if len(wks) > 0 else 0
             ax.errorbar(wks["Week"], wks["mean"], yerr=wks["sem"],
                         label=f"{lbl} (n={n_pw}/week)",
@@ -5283,7 +5285,8 @@ def _fig4e_plot_first5min_pct(
             grp  = combined[combined["Cohort"] == lbl]
             if grp.empty: continue
             wks  = (grp.groupby("Week")["First_5min_Lick_Pct"]
-                    .agg(["mean", "sem", "count"]).reset_index())
+                    .agg(mean="mean", sem=lambda values: values.sem(ddof=1), count="count")
+                    .reset_index())
             n_pw = int(wks["count"].iloc[0]) if len(wks) > 0 else 0
             ax.errorbar(wks["Week"], wks["mean"], yerr=wks["sem"],
                         label=f"{lbl} (n={n_pw}/week)",
@@ -5332,7 +5335,8 @@ def _fig4g_plot_fecal_count(
             grp  = combined[combined["Cohort"] == lbl]
             if grp.empty: continue
             wks  = (grp.groupby("Week")["Fecal_Count"]
-                    .agg(["mean", "sem", "count"]).reset_index())
+                    .agg(mean="mean", sem=lambda values: values.sem(ddof=1), count="count")
+                    .reset_index())
             n_pw = int(wks["count"].iloc[0]) if len(wks) > 0 else 0
             ax.errorbar(wks["Week"], wks["mean"], yerr=wks["sem"],
                         label=f"{lbl} (n={n_pw}/week)",
@@ -5568,8 +5572,8 @@ def _fig4_plot_rmcorr_for_cohort(
         _slope = float(_res_df['slope'].iloc[0])
         
         if np.isnan(_slope) and not np.isnan(_r_rm):
-            _sx = _df.groupby('mouse_id')['weight_pct'].apply(lambda v: v - v.mean()).std()
-            _sy = _df.groupby('mouse_id')['licks'].apply(lambda v: v - v.mean()).std()
+            _sx = _df.groupby('mouse_id')['weight_pct'].apply(lambda v: v - v.mean()).std(ddof=1)
+            _sy = _df.groupby('mouse_id')['licks'].apply(lambda v: v - v.mean()).std(ddof=1)
             if _sx > 0:
                 _slope = _r_rm * float(_sy) / float(_sx)
         
@@ -7121,7 +7125,7 @@ def _ext_data_2_1C_map_water_access_days(
     _diag_wa = (
         filtered
         .groupby(['Cohort', 'Week'])[measure]
-        .agg(n='count', mean='mean', sd='std')
+        .agg(n='count', mean='mean', sd=lambda values: values.std(ddof=1))
         .reset_index()
     )
     for _coh_lbl, _grp in _diag_wa.groupby('Cohort'):
@@ -8277,8 +8281,8 @@ def _ext_data_2_1D_plot_rmcorr_licks_vs_weight_SR(
         _slope = float(_res_df['slope'].iloc[0])
         
         if np.isnan(_slope) and not np.isnan(_r_rm):
-            _sx = _df.groupby('mouse_id')['weight_pct'].apply(lambda v: v - v.mean()).std()
-            _sy = _df.groupby('mouse_id')['licks'].apply(lambda v: v - v.mean()).std()
+            _sx = _df.groupby('mouse_id')['weight_pct'].apply(lambda v: v - v.mean()).std(ddof=1)
+            _sy = _df.groupby('mouse_id')['licks'].apply(lambda v: v - v.mean()).std(ddof=1)
             if _sx > 0:
                 _slope = _r_rm * float(_sy) / float(_sx)
         
@@ -8399,14 +8403,21 @@ def extended_data_5_1() -> None:
 
     CAH_df = _load_master_csv(MASTER_CAH)
     RV_df  = _load_master_csv(MASTER_RV)
-    _ext_data_5_1_generate_descriptive_stats_report(CAH_df, output_dir= OUT_EXT_5_1, cohort_label="CAH")
-    _ext_data_5_1_generate_descriptive_stats_report(RV_df,  output_dir= OUT_EXT_5_1, cohort_label="RV")
+    _ext_data_5_1_generate_descriptive_stats_report(CAH_df, output_dir= OUT_EXT_5_1, cohort_label="running_task")
+    _ext_data_5_1_generate_descriptive_stats_report(RV_df,  output_dir= OUT_EXT_5_1, cohort_label="stopping_task")
 
     print("\n[Ext 5-1A] Running task total weight change plot ...")
     _ext_data_5_1_plot_total_change_by_id(CAH_df, save_path=OUT_EXT_5_1 / "ext_data_5_1A_running_task_total_change", show=SHOW_PLOTS)
 
+    print("\n[Ext 5-1B] Running task total weight change slope plot comparison ...")
+    _ext_data_5_1_perform_complete_slope_analysis(CAH_df, time_unit="Week", output_dir=OUT_EXT_5_1, cohort_label="running_task", panel_label="B")
+
     print("\n[Ext 5-1C] Stopping task total weight change plot ...")
     _ext_data_5_1_plot_total_change_by_id(RV_df, save_path=OUT_EXT_5_1 / "ext_data_5_1C_stopping_task_total_change", show=SHOW_PLOTS)
+
+    print("\n[Ext 5-1D] Stopping task total weight change slope plot comparison ...")
+    _ext_data_5_1_perform_complete_slope_analysis(RV_df, time_unit="Week", output_dir=OUT_EXT_5_1, cohort_label="stopping_task", panel_label="D")
+
 
 def _ext_data_5_1_generate_descriptive_stats_report(
 	df: pd.DataFrame,
@@ -8815,6 +8826,798 @@ def _ext_data_5_1_plot_total_change_by_id(
 		plt.close(fig)
 
 	return fig
+
+
+def _ext_data_5_1_calculate_animal_slopes(
+	df: pd.DataFrame,
+	measure: str = "Total Change",
+	time_unit: str = "Week"
+) -> pd.DataFrame:
+	"""
+	Calculate linear regression slopes for each animal's weight change over time.
+	
+	For each animal, fits: measure ~ time_unit (e.g., Total Change ~ Week)
+	Returns slope (rate of change), R^2, p-value, etc.
+	
+	Parameters:
+		df: Cleaned DataFrame with ID, Sex, CA (%), Day/Week, and measure columns
+		measure: Weight measure to analyze ('Total Change', 'Daily Change', 'Weight')
+		time_unit: Time variable to use ('Week' or 'Day')
+		
+	Returns:
+		DataFrame with one row per animal containing slope statistics
+	"""
+	from scipy import stats
+	
+	# print("\n" + "="*80)
+	# print(f"CALCULATING ANIMAL SLOPES: {measure} ~ {time_unit}")
+	# print("="*80)
+	df = df.copy()
+
+	# Derive metadata columns before validating the analysis inputs.
+	if "CA (%)" not in df.columns and "Condition" in df.columns:
+		def _parse_ca(value):
+			if pd.isna(value):
+				return None
+			try:
+				return int(float(str(value).strip().replace('%', '')))
+			except (ValueError, TypeError):
+				return None
+		df["CA (%)"] = df["Condition"].apply(_parse_ca)
+
+	df = _add_day_col(df, 'nonramp') if 'Day' not in df.columns else df
+	df = _add_week_col(df) if 'Week' not in df.columns else df
+	
+	# Ensure required columns exist
+	required_cols = ['ID', 'Sex', 'CA (%)', measure]
+	missing = [col for col in required_cols if col not in df.columns]
+	if missing:
+		raise ValueError(f"Missing required columns: {missing}")
+	
+	# Filter to rows with valid time and measure values
+	analysis_df = df[[col for col in ['ID', 'Sex', 'CA (%)', time_unit, measure] if col in df.columns]].copy()
+	analysis_df = analysis_df.dropna()
+	
+	# If using weeks, exclude Week 0 (baseline)
+	if time_unit == "Week":
+		analysis_df = analysis_df[analysis_df[time_unit] > 0].copy()
+		# Average within each week per animal so each animal contributes
+		# one data point per week (4 points for a 27-day study, not 27).
+		group_cols = [c for c in ['ID', 'Sex', 'CA (%)'] if c in analysis_df.columns] + [time_unit]
+		analysis_df = analysis_df.groupby(group_cols, dropna=False)[measure].mean().reset_index()
+	
+	# print(f"  Animals: {analysis_df['ID'].nunique()}")
+	# print(f"  CA% groups: {sorted(analysis_df['CA (%)'].unique())}")
+	# print(f"  {time_unit} range: {analysis_df[time_unit].min():.0f} to {analysis_df[time_unit].max():.0f}")
+	
+	# Calculate slope for each animal
+	slopes_data = []
+	
+	for animal_id in analysis_df['ID'].unique():
+		animal_data = analysis_df[analysis_df['ID'] == animal_id].copy()
+		
+		# Get metadata
+		sex = animal_data['Sex'].iloc[0]
+		ca_pct = animal_data['CA (%)'].iloc[0]
+		
+		# Get time and measure arrays
+		x = animal_data[time_unit].values
+		y = animal_data[measure].values
+		
+		if len(x) < 2:
+			# Need at least 2 points for regression
+			continue
+		
+		# Perform linear regression
+		slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+		
+		slopes_data.append({
+			'ID': animal_id,
+			'Sex': sex,
+			'CA (%)': ca_pct,
+			'Slope': slope,
+			'Intercept': intercept,
+			'R2': r_value**2,
+			'P_value': p_value,
+			'Std_Error': std_err,
+			'N_points': len(x)
+		})
+	
+	slopes_df = pd.DataFrame(slopes_data)
+	
+	# Print summary by CA% group
+	#print(f"\nSlope Summary by CA% Group:")
+	for ca_val in sorted(slopes_df['CA (%)'].unique()):
+		ca_slopes = slopes_df[slopes_df['CA (%)'] == ca_val]['Slope']
+		# print(f"  {ca_val}% CA (n={len(ca_slopes)}):")
+		# print(f"    Mean slope:   {ca_slopes.mean():.4f} {measure} per {time_unit}")
+		# print(f"    Median slope: {ca_slopes.median():.4f} {measure} per {time_unit}")
+        # print(f"    SD:           {ca_slopes.std(ddof=1):.4f}")
+		# print(f"    Range:        [{ca_slopes.min():.4f}, {ca_slopes.max():.4f}]")
+		r2_values = slopes_df[slopes_df['CA (%)'] == ca_val]['R2']
+		# print(f"    Mean R^2:      {r2_values.mean():.4f}")
+	
+	return slopes_df
+
+
+def _ext_data_5_1_compare_slopes_within_ca_groups(slopes_df: pd.DataFrame) -> Dict:
+	"""
+	Analyze slope variability within each CA% group using descriptive statistics.
+	
+	This analyzes the variability of slopes within each CA% group separately,
+	providing detailed descriptive statistics.
+	
+	Parameters:
+		slopes_df: DataFrame from calculate_animal_slopes_cah()
+		
+	Returns:
+		Dictionary with within-group statistics
+	"""
+	# print("\n" + "="*80)
+	# print("WITHIN-GROUP SLOPE VARIABILITY ANALYSIS")
+	# print("="*80)
+	
+	results = {
+		'group_stats': []
+	}
+	
+	# Descriptive statistics by CA% group
+	for ca_val in sorted(slopes_df['CA (%)'].unique()):
+		group_slopes = slopes_df[slopes_df['CA (%)'] == ca_val]['Slope'].values
+		_n = len(group_slopes)
+		_sem = group_slopes.std(ddof=1) / np.sqrt(_n)
+		_t_crit = stats.t.ppf(0.975, _n - 1)
+		_ci_lo = float(group_slopes.mean() - _t_crit * _sem)
+		_ci_hi = float(group_slopes.mean() + _t_crit * _sem)
+
+		group_stat = {
+			'CA (%)': ca_val,
+			'N': _n,
+			'Mean': group_slopes.mean(),
+			'Median': np.median(group_slopes),
+            'SD': group_slopes.std(ddof=1),
+            'SEM': _sem,
+			'CI_95_lo': _ci_lo,
+			'CI_95_hi': _ci_hi,
+			'Min': group_slopes.min(),
+			'Max': group_slopes.max(),
+			'IQR': np.percentile(group_slopes, 75) - np.percentile(group_slopes, 25),
+            'CV': (group_slopes.std(ddof=1) / group_slopes.mean() * 100) if group_slopes.mean() != 0 else np.nan
+		}
+		
+		results['group_stats'].append(group_stat)
+		
+		# print(f"\n{ca_val}% CA Group (n={group_stat['N']}):")
+		# print(f"  Mean +/- SEM:         {group_stat['Mean']:.4f} +/- {group_stat['SEM']:.4f}")
+		# print(f"  Median (IQR):       {group_stat['Median']:.4f} ({group_stat['IQR']:.4f})")
+		# print(f"  SD:                 {group_stat['SD']:.4f}")
+		# print(f"  Coefficient of Var: {group_stat['CV']:.2f}%")
+		# print(f"  Range:              [{group_stat['Min']:.4f}, {group_stat['Max']:.4f}]")
+	
+	return results
+
+
+def _ext_data_5_1_compare_slopes_between_ca_groups(slopes_df: pd.DataFrame) -> Dict:
+	"""
+	Statistically compare average slopes between CA% groups.
+	
+	Performs:
+	1. Independent samples t-test (or Welch's t-test if variances unequal)
+	2. Mann-Whitney U test (non-parametric alternative)
+	3. Effect size calculation (Cohen's d)
+	
+	Parameters:
+		slopes_df: DataFrame from calculate_animal_slopes_cah()
+		
+	Returns:
+		Dictionary with test results and effect sizes
+	"""
+	from scipy import stats
+	
+	# print("\n" + "="*80)
+	# print("BETWEEN-GROUP SLOPE COMPARISON: 0% CA vs 2% CA")
+	# print("="*80)
+	
+	ca_groups = sorted(slopes_df['CA (%)'].unique())
+	
+	if len(ca_groups) != 2:
+		print(f"Warning: Expected 2 CA% groups, found {len(ca_groups)}. Returning empty results.")
+		return {}
+	
+	ca_0 = ca_groups[0]
+	ca_1 = ca_groups[1]
+	
+	slopes_0 = slopes_df[slopes_df['CA (%)'] == ca_0]['Slope'].values
+	slopes_1 = slopes_df[slopes_df['CA (%)'] == ca_1]['Slope'].values
+	
+	# print(f"\nComparing: {ca_0}% CA (n={len(slopes_0)}) vs {ca_1}% CA (n={len(slopes_1)})")
+	# print(f"  {ca_0}% CA: Mean = {slopes_0.mean():.4f}, SD = {slopes_0.std(ddof=1):.4f}")
+	# print(f"  {ca_1}% CA: Mean = {slopes_1.mean():.4f}, SD = {slopes_1.std(ddof=1):.4f}")
+	# print(f"  Difference in means: {slopes_1.mean() - slopes_0.mean():.4f}")
+	
+	results = {
+		'ca_groups': ca_groups,
+		'n_0': len(slopes_0),
+		'n_1': len(slopes_1),
+		'mean_0': slopes_0.mean(),
+		'mean_1': slopes_1.mean(),
+		'sd_0': slopes_0.std(ddof=1),
+		'sd_1': slopes_1.std(ddof=1),
+		'mean_diff': slopes_1.mean() - slopes_0.mean()
+	}
+	
+	# 1. Welch's t-test (unequal variances assumed)
+	t_stat, t_p = stats.ttest_ind(slopes_0, slopes_1, equal_var=False)
+	
+	# print(f"\nWelch's T-Test (unequal variances):")
+	# print(f"  t = {t_stat:.4f}, p = {t_p:.4f}")
+	
+	if t_p < 0.001:
+		sig_str = "p < 0.001 (highly significant)"
+	elif t_p < 0.01:
+		sig_str = "p < 0.01 (very significant)"
+	elif t_p < 0.05:
+		sig_str = "p < 0.05 (significant)"
+	else:
+		sig_str = "p = 0.05 (not significant)"
+	
+	# print(f"  Result: {sig_str}")
+	
+	# Calculate Welch-Satterthwaite degrees of freedom
+	s1_sq = slopes_0.var(ddof=1)
+	s2_sq = slopes_1.var(ddof=1)
+	n1 = len(slopes_0)
+	n2 = len(slopes_1)
+	df = (s1_sq/n1 + s2_sq/n2)**2 / ((s1_sq/n1)**2/(n1-1) + (s2_sq/n2)**2/(n2-1))
+	
+	results['t_test'] = {
+		'statistic': t_stat,
+		'p_value': t_p,
+		'df': df,
+		'significant': t_p < 0.05
+	}
+	
+	# 2. Mann-Whitney U test (non-parametric)
+	u_stat, u_p = stats.mannwhitneyu(slopes_0, slopes_1, alternative='two-sided')
+
+	# Hodges-Lehmann estimator and bootstrap 95% CI
+	_hl_est = float(np.median(np.subtract.outer(slopes_0, slopes_1).ravel()))
+	_rng_hl = np.random.default_rng(42)
+	_hl_boot = np.array([
+		np.median(np.subtract.outer(
+			_rng_hl.choice(slopes_0, size=n1, replace=True),
+			_rng_hl.choice(slopes_1, size=n2, replace=True)
+		).ravel())
+		for _ in range(2000)
+	])
+	_hl_ci_lo = float(np.quantile(_hl_boot, 0.025))
+	_hl_ci_hi = float(np.quantile(_hl_boot, 0.975))
+
+	# print(f"\nMann-Whitney U Test (non-parametric):")
+	# print(f"  U = {u_stat:.4f}, p = {u_p:.4f}")
+	# print(f"  Result: {'Significant' if u_p < 0.05 else 'Not significant'} (a = 0.05)")
+	# print(f"  Hodges-Lehmann shift: {_hl_est:.4f}  95% CI (bootstrap): [{_hl_ci_lo:.4f}, {_hl_ci_hi:.4f}]")
+
+	results['mann_whitney'] = {
+		'statistic': u_stat,
+		'p_value': u_p,
+		'significant': u_p < 0.05,
+		'hodges_lehmann': _hl_est,
+		'ci_95_lo': _hl_ci_lo,
+		'ci_95_hi': _hl_ci_hi,
+	}
+	
+	# 3. Effect size (Cohen's d)
+	# Pooled standard deviation
+	n1 = len(slopes_0)
+	n2 = len(slopes_1)
+	s1 = slopes_0.std(ddof=1)
+	s2 = slopes_1.std(ddof=1)
+	pooled_sd = np.sqrt(((n1-1)*s1**2 + (n2-1)*s2**2) / (n1 + n2 - 2))
+	
+	cohens_d = (slopes_1.mean() - slopes_0.mean()) / pooled_sd
+	
+	# Interpret effect size
+	abs_d = abs(cohens_d)
+	if abs_d < 0.2:
+		interpretation = "negligible"
+	elif abs_d < 0.5:
+		interpretation = "small"
+	elif abs_d < 0.8:
+		interpretation = "medium"
+	else:
+		interpretation = "large"
+	
+	# print(f"\nEffect Size (Cohen's d):")
+	# print(f"  d = {cohens_d:.4f}")
+	# print(f"  Interpretation: {interpretation.capitalize()} effect size")
+	
+	results['effect_size'] = {
+		'cohens_d': cohens_d,
+		'pooled_sd': pooled_sd,
+		'interpretation': interpretation
+	}
+	
+	# 4. 95% Confidence Interval for mean difference (using Welch df)
+	# Use unequal variance formula for SE
+	se_diff = np.sqrt(slopes_0.var(ddof=1)/n1 + slopes_1.var(ddof=1)/n2)
+	t_crit = stats.t.ppf(0.975, df)
+	ci_lower = results['mean_diff'] - t_crit * se_diff
+	ci_upper = results['mean_diff'] + t_crit * se_diff
+	
+	# print(f"\n95% Confidence Interval for Mean Difference:")
+	# print(f"  Mean Difference: {results['mean_diff']:.4f}")
+	# print(f"  95% CI: [{ci_lower:.4f}, {ci_upper:.4f}]")
+	
+	#if ci_lower * ci_upper > 0:
+	# 	print(f"  Interpretation: CI does not include zero (significant difference)")
+	# else:
+	# 	print(f"  Interpretation: CI includes zero (no significant difference)")
+	
+	results['confidence_interval'] = {
+		'mean_diff': results['mean_diff'],
+		'se_diff': se_diff,
+		't_critical': t_crit,
+		'ci_95_lower': ci_lower,
+		'ci_95_upper': ci_upper
+	}
+	
+	return results
+
+
+def _ext_data_5_1_plot_slopes_comparison(
+	slopes_df: pd.DataFrame,
+	measure: str = "Total Change",
+	time_unit: str = "Week",
+	title: Optional[str] = None,
+	save_path: Optional[Path] = None,
+	show: bool = True
+) -> Dict[str, plt.Figure]:
+	"""
+	Create separate visualizations comparing slopes between CA% groups.
+	
+	Creates 3 individual figures:
+	1. Boxplot with individual points
+	2. Bar chart with error bars (Mean +/- SEM)
+	3. Histogram overlay
+	
+	Parameters:
+		slopes_df: DataFrame from calculate_animal_slopes_cah()
+		measure: Weight measure analyzed
+		time_unit: Time unit used
+		title: Optional custom title prefix
+		save_path: Optional path to save figures (will append suffixes)
+		show: Whether to display the plots
+		
+	Returns:
+		Dictionary with 'boxplot', 'barplot', 'histogram' matplotlib Figure objects
+	"""
+	# print("\n" + "="*80)
+	# print("CREATING SLOPE COMPARISON PLOTS")
+	# print("="*80)
+	
+	ca_groups = sorted(slopes_df['CA (%)'].unique())
+	# Derive colors and markers from _ca_to_style() to enforce CA% color scheme
+	colors = [_ca_to_style(ca)[0] for ca in ca_groups]
+	markers = [_ca_to_style(ca)[1] for ca in ca_groups]
+	_ms = plt.rcParams.get('lines.markersize', 3)
+	figures = {}
+	
+	# Figure 2: Bar chart with individual scatter points
+	fig2, ax2 = plt.subplots()
+
+	bar_data = [slopes_df[slopes_df['CA (%)'] == ca]['Slope'].values for ca in ca_groups]
+	means = [np.mean(d) if len(d) > 0 else 0.0 for d in bar_data]
+	sems = [stats.sem(d, ddof=1) if len(d) > 1 else 0.0 for d in bar_data]
+
+	ax2.bar(range(len(ca_groups)), means, width=0.65, color=colors, alpha=0.7,
+			yerr=sems, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'),
+			zorder=2)
+
+	# Overlay individual scatter points
+	rng2 = np.random.default_rng(43)
+	for i, ca in enumerate(ca_groups):
+		slopes = slopes_df[slopes_df['CA (%)'] == ca]['Slope'].values
+		x_jitter = rng2.normal(i, 0.04, size=len(slopes))
+		ax2.scatter(x_jitter, slopes, alpha=0.6, s=10,
+					color=colors[i], edgecolors='black', linewidths=0.5, zorder=3)
+
+	ax2.axhline(0, color='black', linewidth=0.5, linestyle='--')
+
+	# MWU significance bracket
+	if len(ca_groups) == 2:
+		_s0b = bar_data[0]
+		_s1b = bar_data[1]
+		_u2, _p2 = stats.mannwhitneyu(_s0b, _s1b, alternative='two-sided')
+		if _p2 < 0.001:
+			_lbl2 = '***'
+		elif _p2 < 0.01:
+			_lbl2 = '**'
+		elif _p2 < 0.05:
+			_lbl2 = '*'
+		else:
+			_lbl2 = 'ns'
+		_all2 = np.concatenate([_s0b, _s1b])
+		_rng2 = np.max(_all2) - np.min(_all2) if np.max(_all2) != np.min(_all2) else 1.0
+		_brk2 = np.max(_all2) + _rng2 * 0.12
+		_tkh2 = _rng2 * 0.04
+		ax2.plot([0, 0, 1, 1], [_brk2 - _tkh2, _brk2, _brk2, _brk2 - _tkh2],
+				 lw=plt.rcParams.get('lines.linewidth', 0.9), color='black', clip_on=False)
+		ax2.text(0.5, _brk2 + _tkh2 * 0.5, _lbl2,
+				 ha='center', va='bottom', fontsize=plt.rcParams.get('font.size', 8))
+
+	ax2.set_xticks(range(len(ca_groups)))
+	ax2.set_xticklabels([f'{ca}% CA' for ca in ca_groups])
+	ax2.set_xlim(-0.7, len(ca_groups) - 1 + 0.7)
+	#ax2.set_ylim(0, 3)
+	ax2.set_ylabel(f'Mean Slope \u00b1 SEM ({measure} per {time_unit})')
+	ax2.grid(False)
+	plot_title = 'Mean Slopes with Error Bars'
+	if title:
+		plot_title = f'{title}: {plot_title}'
+	ax2.set_title(plot_title)
+	apply_common_plot_style(ax2, remove_top_right=True, ticks_in=True,
+							remove_x_margins=False, remove_y_margins=True)
+	fig2.tight_layout()
+	figures['barplot'] = fig2
+
+	if save_path is not None:
+		# barplot_path = Path(str(save_path).replace('.png', '_barplot.png'))
+		# fig2.savefig(str(barplot_path), dpi=300, bbox_inches='tight')
+		#print(f"\n[OK] Bar plot saved to: {barplot_path}")
+		# svg_path = save_path.with_suffix(".svg")
+		fig2.savefig(str(save_path), format='svg', bbox_inches='tight')
+		#print(f"  [OK] Saved SVG: {svg_path}")
+
+	if show:
+		plt.show()
+	else:
+		plt.close(fig2)
+	
+	return figures
+
+
+def _ext_data_5_1_generate_slope_analysis_report(
+	slopes_df: pd.DataFrame,
+	within_results: Dict,
+	between_results: Dict,
+	measure: str = "Total Change",
+	time_unit: str = "Week"
+) -> str:
+	"""
+	Generate comprehensive text report of slope analysis results.
+	
+	Parameters:
+		slopes_df: DataFrame from calculate_animal_slopes_cah()
+		within_results: Dictionary from compare_slopes_within_ca_groups()
+		between_results: Dictionary from compare_slopes_between_ca_groups()
+		measure: Weight measure analyzed
+		time_unit: Time unit used
+		
+	Returns:
+		Formatted text report
+	"""
+	lines = []
+	
+	lines.append("="*80)
+	lines.append("SLOPE ANALYSIS REPORT: CAH COHORT")
+	lines.append("="*80)
+	lines.append(f"\nMeasure: {measure}")
+	lines.append(f"Time Unit: {time_unit}")
+	lines.append(f"Date: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
+	
+	# Section 1: Individual animal slopes
+	lines.append("\n\n" + "="*80)
+	lines.append("SECTION 1: INDIVIDUAL ANIMAL SLOPES")
+	lines.append("="*80)
+	lines.append(f"\nLinear regression: {measure} ~ {time_unit}")
+	
+	for ca_val in sorted(slopes_df['CA (%)'].unique()):
+		ca_data = slopes_df[slopes_df['CA (%)'] == ca_val].sort_values('Slope', ascending=False)
+		
+		lines.append(f"\n{ca_val}% CA Group (n={len(ca_data)}):")
+		lines.append("-"*80)
+		lines.append(f"{'ID':<15} {'Sex':<6} {'Slope':>10} {'R^2':>8} {'P-value':>10} {'N Points':>10}")
+		lines.append("-"*80)
+		
+		for _, row in ca_data.iterrows():
+			lines.append(f"{str(row['ID']):<15} {row['Sex']:<6} {row['Slope']:>10.4f} {row['R2']:>8.4f} {row['P_value']:>10.4f} {row['N_points']:>10.0f}")
+	
+	# Section 2: Within-group variability
+	lines.append("\n\n" + "="*80)
+	lines.append("SECTION 2: WITHIN-GROUP VARIABILITY")
+	lines.append("="*80)
+	lines.append("\nThis section analyzes the variability of slopes within each CA% group.")
+	
+	for group_stat in within_results['group_stats']:
+		lines.append(f"\n{group_stat['CA (%)']}% CA Group (n={group_stat['N']}):")
+		lines.append("-"*80)
+		lines.append(f"  Mean:               {group_stat['Mean']:.4f}")
+		lines.append(f"  Median:             {group_stat['Median']:.4f}")
+		lines.append(f"  Standard Deviation: {group_stat['SD']:.4f}")
+		lines.append(f"  SEM:                {group_stat['SEM']:.4f}")
+		if 'CI_95_lo' in group_stat and 'CI_95_hi' in group_stat:
+			lines.append(f"  95% CI (mean slope): [{group_stat['CI_95_lo']:.4f}, {group_stat['CI_95_hi']:.4f}]  (t-dist)")
+		lines.append(f"  Min:                {group_stat['Min']:.4f}")
+		lines.append(f"  Max:                {group_stat['Max']:.4f}")
+		lines.append(f"  IQR:                {group_stat['IQR']:.4f}")
+		lines.append(f"  Coefficient of Var: {group_stat['CV']:.2f}%")
+	
+	# Section 3: Between-group comparison
+	lines.append("\n\n" + "="*80)
+	lines.append("SECTION 3: BETWEEN-GROUP COMPARISON")
+	lines.append("="*80)
+	lines.append("\nThis section compares the average slopes between 0% CA and 2% CA groups.")
+	
+	if between_results and 'ca_groups' in between_results:
+		ca_0 = between_results['ca_groups'][0]
+		ca_1 = between_results['ca_groups'][1]
+		
+		lines.append(f"\nGroup Comparison: {ca_0}% CA vs {ca_1}% CA")
+		lines.append("-"*80)
+		lines.append(f"  {ca_0}% CA: Mean = {between_results['mean_0']:.4f}, SD = {between_results['sd_0']:.4f} (n={between_results['n_0']})")
+		lines.append(f"  {ca_1}% CA: Mean = {between_results['mean_1']:.4f}, SD = {between_results['sd_1']:.4f} (n={between_results['n_1']})")
+		lines.append(f"  Difference in means: {between_results['mean_diff']:.4f}")
+		
+		# T-test results
+		lines.append("\n" + "-"*80)
+		lines.append("Welch's T-Test (unequal variances):")
+		lines.append("-"*80)
+		t_test = between_results['t_test']
+		lines.append(f"  t-statistic: t({t_test['df']:.2f}) = {t_test['statistic']:.4f}")
+		lines.append(f"  P-value:     p = {t_test['p_value']:.4f}")
+		
+		if t_test['p_value'] < 0.001:
+			sig_str = "p < 0.001 (highly significant)"
+		elif t_test['p_value'] < 0.01:
+			sig_str = "p < 0.01 (very significant)"
+		elif t_test['p_value'] < 0.05:
+			sig_str = "p < 0.05 (significant)"
+		else:
+			sig_str = "p = 0.05 (not significant)"
+		
+		lines.append(f"  Result: {sig_str}")
+		
+		# Mann-Whitney U test
+		lines.append("\n" + "-"*80)
+		lines.append("Mann-Whitney U Test (Non-parametric):")
+		lines.append("-"*80)
+		mw = between_results['mann_whitney']
+		lines.append(f"  U-statistic: U = {mw['statistic']:.4f}")
+		lines.append(f"  P-value:     p = {mw['p_value']:.4f}")
+		if 'hodges_lehmann' in mw:
+			lines.append(f"  Hodges-Lehmann shift: {mw['hodges_lehmann']:.4f}")
+			lines.append(f"  95% CI (bootstrap, n=2000): [{mw['ci_95_lo']:.4f}, {mw['ci_95_hi']:.4f}]")
+		
+		if mw['p_value'] < 0.05:
+			lines.append(f"  Result: Significant difference (p < 0.05)")
+		else:
+			lines.append(f"  Result: No significant difference (p = 0.05)")
+		
+		# Effect size
+		lines.append("\n" + "-"*80)
+		lines.append("Effect Size (Cohen's d):")
+		lines.append("-"*80)
+		es = between_results['effect_size']
+		lines.append(f"  Cohen's d:   {es['cohens_d']:.4f}")
+		lines.append(f"  Interpretation: {es['interpretation'].capitalize()} effect size")
+		
+		# Confidence interval
+		lines.append("\n" + "-"*80)
+		lines.append("95% Confidence Interval for Mean Difference:")
+		lines.append("-"*80)
+		ci = between_results['confidence_interval']
+		lines.append(f"  Mean Difference: {ci['mean_diff']:.4f}")
+		lines.append(f"  95% CI: [{ci['ci_95_lower']:.4f}, {ci['ci_95_upper']:.4f}]")
+		
+		if ci['ci_95_lower'] * ci['ci_95_upper'] > 0:
+			lines.append("  Interpretation: CI does not include zero (significant difference)")
+		else:
+			lines.append("  Interpretation: CI includes zero (no significant difference)")
+	else:
+		lines.append("\n[WARNING] Between-group comparison could not be performed.")
+		lines.append("Expected 2 CA% groups but found a different number.")
+	
+	# Interpretation and conclusion
+	lines.append("\n\n" + "="*80)
+	lines.append("SECTION 4: INTERPRETATION AND CONCLUSIONS")
+	lines.append("="*80)
+	
+	if between_results and 't_test' in between_results and between_results['t_test']['p_value'] < 0.05:
+		lines.append(f"\nThe two groups show SIGNIFICANTLY DIFFERENT rates of weight change.")
+		lines.append(f"The {between_results['ca_groups'][1]}% CA group has a mean slope that is")
+		lines.append(f"{abs(between_results['mean_diff']):.4f} {measure} per {time_unit} {'higher' if between_results['mean_diff'] > 0 else 'lower'}")
+		lines.append(f"than the {between_results['ca_groups'][0]}% CA group (p = {between_results['t_test']['p_value']:.4f}).")
+	elif between_results and 't_test' in between_results:
+		lines.append(f"\nThe two groups show NO SIGNIFICANT DIFFERENCE in rates of weight change.")
+		lines.append(f"Both groups put on weight at approximately the same rate (p = {between_results['t_test']['p_value']:.4f}).")
+	else:
+		lines.append(f"\n[WARNING] Between-group comparison could not be completed.")
+		lines.append("This analysis requires exactly 2 CA% groups.")
+	
+	lines.append("\n" + "="*80)
+	lines.append("END OF REPORT")
+	lines.append("="*80)
+	
+	return "\n".join(lines)
+
+
+def _ext_data_5_1_generate_slope_mwu_report(
+	slopes_df: pd.DataFrame,
+	measure: str = "Total Change",
+	time_unit: str = "Week",
+) -> str:
+	"""Generate a Mann-Whitney U test report table for slope comparison brackets."""
+	SEP = "=" * 90
+	lines = [
+		SEP,
+		"MANN-WHITNEY U TEST RESULTS  --  Slope Comparison Brackets",
+		SEP,
+		f"Generated  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+		f"Measure    : {measure}",
+		f"Time unit  : {time_unit}",
+		"Correction : None (single pairwise comparison)",
+		"",
+		"Field definitions:",
+		"  U        : Mann-Whitney U statistic",
+		"  p(raw)   : Two-sided p-value (uncorrected)",
+		"  p(adj)   : Adjusted p-value (= p(raw); no correction for single comparison)",
+		"  r_rb     : Rank-biserial correlation (effect size r = 1 - 2U/(nA*nB))",
+		"             |r| < 0.3 = small, 0.3-0.5 = medium, > 0.5 = large",
+		"  HL_est   : Hodges-Lehmann location shift (median of all pairwise diffs A-B)",
+		"  95% CI   : Bootstrap CI (n=2 000 resamples) on Hodges-Lehmann estimator",
+		"",
+		f"{'Comparison':<40} {'nA':>4} {'nB':>4} {'U':>10} {'p(raw)':>10} {'p(adj)':>10} {'r_rb':>8} {'HL_est':>10}  95% CI",
+		"-" * 100,
+	]
+
+	ca_groups = sorted(slopes_df['CA (%)'].unique())
+	for i, ca_a in enumerate(ca_groups):
+		for ca_b in ca_groups[i + 1:]:
+			s_a = slopes_df[slopes_df['CA (%)'] == ca_a]['Slope'].values
+			s_b = slopes_df[slopes_df['CA (%)'] == ca_b]['Slope'].values
+			nA, nB = len(s_a), len(s_b)
+			u_stat, p_raw = stats.mannwhitneyu(s_a, s_b, alternative='two-sided')
+			p_adj = p_raw  # no correction for single comparison
+			r_rb = 1.0 - 2.0 * u_stat / (nA * nB)
+			# Hodges-Lehmann estimator: median of all pairwise differences
+			hl_est = float(np.median(np.subtract.outer(s_a, s_b).ravel()))
+			# Bootstrap 95% CI on HL
+			rng = np.random.default_rng(42)
+			hl_boot = np.array([
+				np.median(np.subtract.outer(
+					rng.choice(s_a, size=nA, replace=True),
+					rng.choice(s_b, size=nB, replace=True)
+				).ravel())
+				for _ in range(2000)
+			])
+			ci_lo = float(np.quantile(hl_boot, 0.025))
+			ci_hi = float(np.quantile(hl_boot, 0.975))
+			p_raw_str = "< 0.001" if p_raw < 0.001 else f"{p_raw:.4f}"
+			p_adj_str = "< 0.001" if p_adj < 0.001 else f"{p_adj:.4f}"
+			label = f"{int(ca_a)}% CA vs {int(ca_b)}% CA"
+			lines.append(
+				f"{label:<40} {nA:>4} {nB:>4} {u_stat:>10.2f} {p_raw_str:>10} {p_adj_str:>10}"
+				f" {r_rb:>8.4f} {hl_est:>10.4f}  [{ci_lo:.4f}, {ci_hi:.4f}]"
+			)
+
+	lines += [
+		"",
+		"Significance: * p<0.05   ** p<0.01   *** p<0.001",
+		SEP,
+	]
+	return "\n".join(lines)
+
+
+def _ext_data_5_1_perform_complete_slope_analysis(
+	df: pd.DataFrame,
+	measure: str = "Total Change",
+	time_unit: str = "Week",
+	save_plot: bool = True,
+	save_report: bool = True,
+	output_dir: Optional[Path] = None,
+    cohort_label: str = "CAH",
+    panel_label: str = "B"
+) -> Dict:
+	"""
+	Complete pipeline for slope analysis: calculate slopes, compare groups, plot, report.
+	
+	Parameters:
+		df: Cleaned DataFrame with all required columns
+		measure: Weight measure to analyze ('Total Change', 'Daily Change', 'Weight')
+		time_unit: Time unit to use ('Week' or 'Day')
+		save_plot: Whether to save the plot to a file
+		save_report: Whether to save the report to a file
+		output_dir: Directory to save outputs (None = current directory)
+		
+	Returns:
+		Dictionary with all analysis results
+	"""
+
+    # Ensure CA (%) column exists
+	if "CA (%)" not in df.columns and "Condition" in df.columns:
+		def _parse_ca(val):
+			if pd.isna(val):
+				return None
+			try:
+				return int(float(str(val).strip().replace('%', '')))
+			except (ValueError, TypeError):
+				return None
+		df["CA (%)"] = df["Condition"].apply(_parse_ca)
+     
+	# print("\n" + "="*80)
+	# print("COMPLETE SLOPE ANALYSIS PIPELINE - CAH COHORT")
+	# print("="*80)
+	# print(f"\nMeasure: {measure}")
+	#print(f"Time Unit: {time_unit}")
+	
+	# Step 1: Calculate slopes for each animal
+	slopes_df = _ext_data_5_1_calculate_animal_slopes(df, measure=measure, time_unit=time_unit)
+	
+	# Step 2: Analyze within-group variability
+	within_results = _ext_data_5_1_compare_slopes_within_ca_groups(slopes_df)
+	
+	# Step 3: Compare slopes between groups
+	between_results = _ext_data_5_1_compare_slopes_between_ca_groups(slopes_df)
+	
+	# Step 4: Generate report
+	report_text = _ext_data_5_1_generate_slope_analysis_report(
+		slopes_df,
+		within_results,
+		between_results,
+		measure=measure,
+		time_unit=time_unit
+	)
+	
+	# Print preview
+	# print("\n" + "="*80)
+	# print("REPORT PREVIEW")
+	# print("="*80)
+	# print(report_text)
+	
+	# Prepare output directory and timestamp
+	if output_dir is None:
+		output_dir = Path.cwd()
+	else:
+		output_dir = Path(output_dir)
+		output_dir.mkdir(parents=True, exist_ok=True)
+	
+	timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+	
+	# Save report to file
+	if save_report:
+		report_path = output_dir / f"ext_data_5_1{panel_label}_{cohort_label}_slope_analysis_report.txt"
+		with open(report_path, 'w', encoding='utf-8') as f:
+			f.write(report_text)
+		#print(f"\n[OK] Report saved to: {report_path}")
+
+	mwu_report = _ext_data_5_1_generate_slope_mwu_report(slopes_df, measure=measure, time_unit=time_unit)
+	if save_report:
+		mwu_path = output_dir / f"ext_data_5_1{panel_label}_{cohort_label}_slope_analysis_mwu.txt"
+		with open(mwu_path, 'w', encoding='utf-8') as f:
+			f.write(mwu_report)
+		#print(f"[OK] MWU report saved to: {mwu_path}")
+
+	# Create visualization
+	if save_plot:
+		plot_path = output_dir / f"ext_data_5_1{panel_label}_{cohort_label}_slope_analysis.svg"
+		_ext_data_5_1_plot_slopes_comparison(
+			slopes_df,
+			measure=measure,
+			time_unit=time_unit,
+			save_path=plot_path,
+			show=False
+		)
+	
+	return {
+		'slopes_df': slopes_df,
+		'within_results': within_results,
+		'between_results': between_results,
+		'report_text': report_text,
+		'mwu_report': mwu_report,
+		'measure': measure,
+		'time_unit': time_unit
+	}
 
 
 # =============================================================================
